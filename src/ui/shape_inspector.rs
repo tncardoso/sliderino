@@ -11,7 +11,8 @@ use gpui_kit::{AppContext as _, Context, Entity, Focusable as _, Hsla, Subscript
 
 use crate::document::{
     Arrowhead, Dash, ElementId, ElementKind, Fill, GradientStop, HeadKind, HeadSize,
-    LinearGradient, Operation, RadialGradient, Rgb, ShapeStylePatch, SolidFill, Stroke, Vec2,
+    LinearGradient, Operation, RadialGradient, Rgb, ShaderFill, ShapeStylePatch, SolidFill, Stroke,
+    Vec2,
 };
 use crate::editor::EditorView;
 use crate::style::MAX_STOPS;
@@ -59,6 +60,8 @@ impl ShapeField {
             ShapeField::FillOpacity => match fill? {
                 Fill::Solid(solid) => Some(solid.opacity * 100.),
                 Fill::Image(image) => Some(image.opacity * 100.),
+                Fill::Video(video) => Some(video.opacity * 100.),
+                Fill::Shader(shader) => Some(shader.opacity * 100.),
                 _ => None,
             },
             ShapeField::StrokeWidth => Some(stroke?.width),
@@ -126,6 +129,8 @@ impl ShapeField {
                     match fill {
                         Fill::Solid(solid) => solid.opacity = opacity,
                         Fill::Image(image) => image.opacity = opacity,
+                        Fill::Video(video) => video.opacity = opacity,
+                        Fill::Shader(shader) => shader.opacity = opacity,
                         _ => return None,
                     }
                     Some(())
@@ -209,6 +214,8 @@ pub enum FillType {
     Linear,
     Radial,
     Image,
+    Video,
+    Shader,
 }
 
 impl FillType {
@@ -219,6 +226,8 @@ impl FillType {
             Fill::LinearGradient(_) => FillType::Linear,
             Fill::RadialGradient(_) => FillType::Radial,
             Fill::Image(_) => FillType::Image,
+            Fill::Video(_) => FillType::Video,
+            Fill::Shader(_) => FillType::Shader,
         }
     }
 }
@@ -230,7 +239,7 @@ fn main_color(fill: &Fill) -> Rgb {
         Fill::LinearGradient(_) | Fill::RadialGradient(_) => {
             fill.stops().map_or(Rgb(0xD9D9D9), |stops| stops[0].color)
         }
-        Fill::None | Fill::Image(_) => Rgb(0xD9D9D9),
+        Fill::None | Fill::Image(_) | Fill::Video(_) | Fill::Shader(_) => Rgb(0xD9D9D9),
     }
 }
 
@@ -575,7 +584,9 @@ impl EditorView {
                     radius: Vec2::new(0.5, 0.5),
                     stops: stops_from(fill),
                 }),
-                FillType::Image => return None,
+                // An image or a video comes from a file the author picks.
+                FillType::Image | FillType::Video => return None,
+                FillType::Shader => Fill::Shader(ShaderFill::default()),
             };
             Some(ShapeStylePatch {
                 fill: Some(new),

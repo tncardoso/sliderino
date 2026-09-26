@@ -943,12 +943,15 @@ pub struct Presentation {
     pub slides: Vec<Slide>,
     pub fonts: FontLibrary,
     pub images: ImageLibrary,
+    pub videos: VideoLibrary,
     /// Id given to the next created slide; only ever grows.
     next_slide_id: u64,
     /// Id given to the next created element; only ever grows.
     next_element_id: u64,
     /// Id given to the next embedded image; only ever grows.
     next_image_id: u64,
+    /// Id given to the next embedded video; only ever grows.
+    next_video_id: u64,
     /// Counts the changes applied, undo and redo included. External agents
     /// compare it to detect edits made since they last read the document.
     revision: u64,
@@ -965,6 +968,8 @@ impl PartialEq for Presentation {
             && self.next_slide_id == other.next_slide_id
             && self.next_element_id == other.next_element_id
             && self.next_image_id == other.next_image_id
+            && self.videos == other.videos
+            && self.next_video_id == other.next_video_id
     }
 }
 
@@ -982,9 +987,11 @@ impl Presentation {
             slides: Vec::new(),
             fonts: FontLibrary::default(),
             images: ImageLibrary::default(),
+            videos: VideoLibrary::default(),
             next_slide_id: 1,
             next_element_id: 1,
             next_image_id: 1,
+            next_video_id: 1,
             revision: 0,
         };
         let id = presentation.new_slide_id();
@@ -1013,13 +1020,36 @@ impl Presentation {
         id
     }
 
-    /// Whether a fill of an element of any slide uses the image.
-    pub fn image_in_use(&self, id: ImageId) -> bool {
+    /// Reserves a video id for an [`Operation::AddVideo`].
+    pub fn new_video_id(&mut self) -> VideoId {
+        let id = VideoId(self.next_video_id);
+        self.next_video_id += 1;
+        id
+    }
+
+    /// Whether a fill of an element of any slide matches.
+    fn fill_in_use(&self, uses: impl Fn(&Fill) -> bool) -> bool {
         self.slides.iter().any(|slide| {
-            slide.walk().iter().any(|node| {
-                matches!(node.element.kind.fill(), Some(Fill::Image(image)) if image.id == id)
-            })
+            slide
+                .walk()
+                .iter()
+                .any(|node| node.element.kind.fill().is_some_and(&uses))
         })
+    }
+
+    /// Whether a fill of an element of any slide uses the image, as its
+    /// picture or as the channel of its shader.
+    pub fn image_in_use(&self, id: ImageId) -> bool {
+        self.fill_in_use(|fill| match fill {
+            Fill::Image(image) => image.id == id,
+            Fill::Shader(shader) => shader.channel0 == Some(id),
+            _ => false,
+        })
+    }
+
+    /// Whether a fill of an element of any slide uses the video.
+    pub fn video_in_use(&self, id: VideoId) -> bool {
+        self.fill_in_use(|fill| matches!(fill, Fill::Video(video) if video.id == id))
     }
 
     pub fn index_of(&self, id: SlideId) -> Option<usize> {
@@ -1562,6 +1592,25 @@ impl Presentation {
                     .ok_or(ApplyError::MissingImage(id))?;
                 Ok(Operation::AddImage { id, data })
             }
+            Operation::AddVideo { id, data } => {
+                if self.videos.contains(id) {
+                    return Err(ApplyError::DuplicateVideo(id));
+                }
+                self.next_video_id = self.next_video_id.max(id.0 + 1);
+                self.videos.videos.insert(id, data);
+                Ok(Operation::RemoveVideo { id })
+            }
+            Operation::RemoveVideo { id } => {
+                if self.video_in_use(id) {
+                    return Err(ApplyError::VideoInUse(id));
+                }
+                let data = self
+                    .videos
+                    .videos
+                    .remove(&id)
+                    .ok_or(ApplyError::MissingVideo(id))?;
+                Ok(Operation::AddVideo { id, data })
+            }
             Operation::Batch(operations) => {
                 let mut inverses = Vec::with_capacity(operations.len());
                 for operation in operations {
@@ -1631,11 +1680,18 @@ impl Presentation {
         })
     }
 
-    /// Checks that the image of an image fill is embedded.
+    /// Checks that the image or the video of a fill is embedded.
     fn check_fill(&self, fill: &Fill) -> Result<(), ApplyError> {
         match fill {
             Fill::Image(image) if !self.images.contains(image.id) => {
                 Err(ApplyError::MissingImage(image.id))
+            }
+            Fill::Shader(shader) => match shader.channel0 {
+                Some(image) if !self.images.contains(image) => Err(ApplyError::MissingImage(image)),
+                _ => Ok(()),
+            },
+            Fill::Video(video) if !self.videos.contains(video.id) => {
+                Err(ApplyError::MissingVideo(video.id))
             }
             _ => Ok(()),
         }
@@ -1693,8 +1749,9 @@ pub use crate::images::{ImageData, ImageLibrary};
 pub use crate::operation::{ApplyError, LayerPatch, Operation, ShapeStylePatch, TextStylePatch};
 pub use crate::style::{
     Arrowhead, Dash, Fill, GradientStop, HeadKind, HeadSize, ImageFill, ImageFit, ImageId,
-    LinearGradient, RadialGradient, SolidFill, Stroke, Vec2,
+    LinearGradient, RadialGradient, ShaderFill, SolidFill, Start, Stroke, Vec2, VideoFill, VideoId,
 };
+pub use crate::videos::{VideoData, VideoLibrary};
 
 #[cfg(test)]
 pub(crate) mod tests {

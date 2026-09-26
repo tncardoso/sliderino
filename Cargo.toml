@@ -10,16 +10,23 @@ base64 = "0.22"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 fontdb = "0.23"
 gpui-kit = "0.6.6"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-pbutils = "0.25"
+gstreamer-video = "0.25"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
+naga = { version = "29", features = ["glsl-in"] }
+pollster = "0.4"
 rmcp = { version = "3.4.1", default-features = false, features = ["server", "transport-io"] }
 rustybuzz = "0.20"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tiny-skia = "0.11"
 tokio = { version = "1.53.1", features = ["rt", "io-std", "macros"] }
 ttf-parser = "0.25"
 unicode-linebreak = "0.1"
+wgpu = { version = "29", features = ["naga-ir"] }
 
 [features]
 # Timing spans for the benchmarks in src/ui/perf_tests.rs.

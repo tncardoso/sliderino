@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::document::{
     Arrowhead, Element, ElementId, ElementKind, Fill, FontData, FontFace, Frame, HAlign, ImageData,
     ImageId, LineHeight, Rgb, Slide, SlideId, Stroke, TextCase, TextSizing, TextStyle, VAlign,
+    VideoData, VideoId,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +112,15 @@ pub enum Operation {
     /// Removes an embedded image no fill uses.
     RemoveImage {
         id: ImageId,
+    },
+    /// Embeds a video in the presentation.
+    AddVideo {
+        id: VideoId,
+        data: VideoData,
+    },
+    /// Removes an embedded video no fill uses.
+    RemoveVideo {
+        id: VideoId,
     },
     /// Applies the operations in order, all or nothing. Its inverse is a
     /// batch of the inverses in reverse order.
@@ -426,6 +436,11 @@ pub enum ApplyError {
     DuplicateImage(ImageId),
     /// A fill uses the image.
     ImageInUse(ImageId),
+    /// No embedded video has this id.
+    MissingVideo(VideoId),
+    DuplicateVideo(VideoId),
+    /// A fill uses the video.
+    VideoInUse(VideoId),
 }
 
 impl std::fmt::Display for ApplyError {
@@ -464,6 +479,9 @@ impl std::fmt::Display for ApplyError {
             ApplyError::MissingImage(id) => write!(f, "image {} is not embedded", id.0),
             ApplyError::DuplicateImage(id) => write!(f, "image {} is already embedded", id.0),
             ApplyError::ImageInUse(id) => write!(f, "image {} is in use", id.0),
+            ApplyError::MissingVideo(id) => write!(f, "video {} is not embedded", id.0),
+            ApplyError::DuplicateVideo(id) => write!(f, "video {} is already embedded", id.0),
+            ApplyError::VideoInUse(id) => write!(f, "video {} is in use", id.0),
         }
     }
 }

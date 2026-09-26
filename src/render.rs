@@ -15,18 +15,21 @@ use tiny_skia::{
 pub use tiny_skia::{Paint, Pixmap};
 
 use crate::document::{
-    Element, ElementId, ElementKind, Fill, FontData, Frame, GradientStop, ImageId, Presentation,
+    Element, ElementId, ElementKind, Fill, FontData, Frame, GradientStop, ImageFit, Presentation,
     Rgb, SlideId,
 };
 use crate::shape::{self, Head, Seg};
 use crate::text_layout::TextLayout;
 
-/// Gives the decoded pixels of an embedded image, upright, or `None` while
-/// they are not available.
-pub type Images<'a> = &'a dyn Fn(ImageId) -> Option<Arc<Pixmap>>;
+/// Gives the pixels of a fill that paints a picture, or `None` while they
+/// are not available: the decoded image of an image fill, the frame of a
+/// video fill, the rendered frame of a shader fill. The size is that of the
+/// box of the fill in device pixels, for a shader to render at.
+pub type Pixels<'a> = &'a dyn Fn(&Fill, (u32, u32)) -> Option<Arc<Pixmap>>;
 
-/// For renders that draw no image: image fills show as a placeholder.
-pub fn no_images(_: ImageId) -> Option<Arc<Pixmap>> {
+/// For renders that draw no picture: image, video and shader fills show as
+/// a placeholder.
+pub fn no_pixels(_: &Fill, _: (u32, u32)) -> Option<Arc<Pixmap>> {
     None
 }
 
@@ -53,12 +56,25 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
-/// Renders the slide at `scale` (1.0 is one pixel per slide unit).
+/// Renders the slide at `scale` (1.0 is one pixel per slide unit), with its
+/// shaders at time 0 and its videos at their first frame.
 pub fn render_slide(
     presentation: &Presentation,
     slide: SlideId,
     scale: f32,
     overlay: bool,
+) -> Result<Pixmap, RenderError> {
+    render_slide_at(presentation, slide, scale, overlay, 0.)
+}
+
+/// [`render_slide`] with the shaders at `time` seconds after they start.
+/// Videos show their first frame.
+pub fn render_slide_at(
+    presentation: &Presentation,
+    slide: SlideId,
+    scale: f32,
+    overlay: bool,
+    time: f32,
 ) -> Result<Pixmap, RenderError> {
     let slide = presentation
         .slide(slide)
@@ -91,7 +107,7 @@ pub fn render_slide(
             paint_overlay_under(&mut pixmap, &element.frame, layout, transform);
         }
     }
-    let images = presentation_images(presentation);
+    let pixels = presentation_pixels(presentation, time);
     for (element, opacity, layout) in &leaves {
         let transform = turned(transform, &element.frame);
         match layout {
@@ -103,7 +119,7 @@ pub fn render_slide(
                 layout,
                 transform,
             ),
-            None => paint_shape(&mut pixmap, element, *opacity, transform, &images),
+            None => paint_shape(&mut pixmap, element, *opacity, transform, &pixels),
         }
     }
     if overlay {
@@ -124,9 +140,26 @@ fn turned(transform: Transform, frame: &Frame) -> Transform {
     transform.pre_concat(Transform::from_rotate_at(frame.rotation, cx, cy))
 }
 
-/// The images of the presentation, decoded when first drawn.
-fn presentation_images(presentation: &Presentation) -> impl Fn(ImageId) -> Option<Arc<Pixmap>> {
-    |id| crate::images::pixels(presentation.images.get(id)?)
+/// The pictures of the fills of the presentation, decoded or rendered when
+/// first drawn: the first frame of videos, shaders at `time`.
+pub fn presentation_pixels(
+    presentation: &Presentation,
+    time: f32,
+) -> impl Fn(&Fill, (u32, u32)) -> Option<Arc<Pixmap>> {
+    move |fill, (width, height)| match fill {
+        Fill::Image(image) => crate::images::pixels(presentation.images.get(image.id)?),
+        Fill::Video(video) => crate::videos::poster(presentation.videos.get(video.id)?),
+        Fill::Shader(shader) => {
+            let channel = shader
+                .channel0
+                .and_then(|id| crate::images::pixels(presentation.images.get(id)?));
+            let inputs = crate::shaders::Inputs::at(shader.time(time));
+            crate::shaders::render(&shader.source, channel.as_ref(), width, height, inputs)
+                .ok()
+                .map(Arc::new)
+        }
+        _ => None,
+    }
 }
 
 /// Paints a rectangle, an ellipse or a line; other kinds are left alone.
@@ -137,7 +170,7 @@ pub fn paint_shape(
     element: &Element,
     opacity: f32,
     transform: Transform,
-    images: Images,
+    pixels: Pixels,
 ) {
     let frame = &element.frame;
     if let ElementKind::Line(line) = &element.kind {
@@ -185,7 +218,7 @@ pub fn paint_shape(
         return;
     };
     if let Some(fill) = element.kind.fill() {
-        fill_shape(pixmap, &path, fill, frame, opacity, local, images);
+        fill_shape(pixmap, &path, fill, frame, opacity, local, pixels);
     }
     if let Some(stroke) = element.kind.stroke() {
         let color = paint(stroke.color, stroke.opacity * opacity);
@@ -241,7 +274,7 @@ fn fill_shape(
     frame: &Frame,
     opacity: f32,
     local: Transform,
-    images: Images,
+    pixels: Pixels,
 ) {
     let (width, height) = (frame.width, frame.height);
     let shader = match fill {
@@ -274,42 +307,8 @@ fn fill_shape(
                 Transform::from_row(radius.0, 0., 0., radius.1, center.0, center.1),
             )
         }
-        Fill::Image(image) => {
-            let Some(pixels) = images(image.id) else {
-                let color = paint(PLACEHOLDER, image.opacity * opacity);
-                pixmap.fill_path(path, &color, FillRule::Winding, local, None);
-                return;
-            };
-            let size = (pixels.width(), pixels.height());
-            let (x, y, w, h) = shape::fit_rect(image.fit, width, height, size);
-            let placed = Transform::from_row(w / size.0 as f32, 0., 0., h / size.1 as f32, x, y);
-            let shader = tiny_skia::Pattern::new(
-                pixels.as_ref().as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Bicubic,
-                image.opacity * opacity,
-                placed,
-            );
-            // With contain, the pattern stops at the image edges.
-            let clip = Rect::from_xywh(x.max(0.), y.max(0.), w.min(width), h.min(height));
-            let paint = Paint {
-                shader,
-                anti_alias: true,
-                ..Paint::default()
-            };
-            match clip.and_then(|clip| {
-                let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height())?;
-                mask.fill_path(
-                    &PathBuilder::from_rect(clip),
-                    FillRule::Winding,
-                    true,
-                    local,
-                );
-                Some(mask)
-            }) {
-                Some(mask) => pixmap.fill_path(path, &paint, FillRule::Winding, local, Some(&mask)),
-                None => pixmap.fill_path(path, &paint, FillRule::Winding, local, None),
-            }
+        Fill::Image(_) | Fill::Video(_) | Fill::Shader(_) => {
+            paint_picture(pixmap, path, fill, frame, opacity, local, pixels);
             return;
         }
     };
@@ -324,6 +323,67 @@ fn fill_shape(
     pixmap.fill_path(path, &paint, FillRule::Winding, local, None);
 }
 
+/// Paints the picture of an image, video or shader fill inside the path,
+/// placed by the fit of the fill. A shader always fills its box.
+fn paint_picture(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    fill: &Fill,
+    frame: &Frame,
+    opacity: f32,
+    local: Transform,
+    pixels: Pixels,
+) {
+    let (width, height) = (frame.width, frame.height);
+    let fit = match fill {
+        Fill::Image(image) => image.fit,
+        Fill::Video(video) => video.fit,
+        _ => ImageFit::Stretch,
+    };
+    let opacity = fill.opacity() * opacity;
+    // Device pixels per slide unit, whatever the rotation.
+    let scale = (local.sx * local.sx + local.ky * local.ky).sqrt();
+    let device = (
+        (width * scale).round().max(1.) as u32,
+        (height * scale).round().max(1.) as u32,
+    );
+    let Some(picture) = pixels(fill, device) else {
+        let color = paint(PLACEHOLDER, opacity);
+        pixmap.fill_path(path, &color, FillRule::Winding, local, None);
+        return;
+    };
+    let size = (picture.width(), picture.height());
+    let (x, y, w, h) = shape::fit_rect(fit, width, height, size);
+    let placed = Transform::from_row(w / size.0 as f32, 0., 0., h / size.1 as f32, x, y);
+    let shader = tiny_skia::Pattern::new(
+        picture.as_ref().as_ref(),
+        SpreadMode::Pad,
+        FilterQuality::Bicubic,
+        opacity,
+        placed,
+    );
+    // With contain, the pattern stops at the picture edges.
+    let clip = Rect::from_xywh(x.max(0.), y.max(0.), w.min(width), h.min(height));
+    let paint = Paint {
+        shader,
+        anti_alias: true,
+        ..Paint::default()
+    };
+    match clip.and_then(|clip| {
+        let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height())?;
+        mask.fill_path(
+            &PathBuilder::from_rect(clip),
+            FillRule::Winding,
+            true,
+            local,
+        );
+        Some(mask)
+    }) {
+        Some(mask) => pixmap.fill_path(path, &paint, FillRule::Winding, local, Some(&mask)),
+        None => pixmap.fill_path(path, &paint, FillRule::Winding, local, None),
+    }
+}
+
 /// Renders one shape alone, turned by its rotation, at `scale` pixels per
 /// slide unit. Returns the image and the area of the slide it covers: the
 /// bounds of the frame grown by the stroke and the heads, and a pixel of
@@ -332,7 +392,7 @@ pub fn render_shape_box(
     element: &Element,
     opacity: f32,
     scale: f32,
-    images: Images,
+    pixels: Pixels,
 ) -> Option<(Pixmap, Frame)> {
     if !scale.is_finite() || scale <= 0. {
         return None;
@@ -355,7 +415,7 @@ pub fn render_shape_box(
         element,
         opacity,
         turned(transform, &element.frame),
-        images,
+        pixels,
     );
     let area = Frame {
         width: width as f32 / scale,

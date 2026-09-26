@@ -237,7 +237,7 @@ impl Capture {
                 // A capture waits for the images to be decoded.
                 editor
                     .camera
-                    .filter(|_| !editor.images_loading())
+                    .filter(|_| !editor.pictures_loading())
                     .map(|_| size)
             })
             .ok()

@@ -21,13 +21,13 @@ use crate::render::{self, Pixmap};
 use crate::shape::{self, Head, Seg};
 
 /// A shape ready to paint: a copy of the element with the frame the canvas
-/// shows, its opacity with its groups', and the decoded pixels of its image
-/// fill when they are ready.
+/// shows, its opacity with its groups', and the picture of its image, video
+/// or shader fill when it is ready.
 #[derive(Clone, Debug)]
 pub struct PaintShape {
     pub element: Element,
     pub opacity: f32,
-    pub image: Option<Arc<Pixmap>>,
+    pub picture: Option<Arc<Pixmap>>,
 }
 
 fn hsla(color: Rgb, alpha: f32) -> Hsla {
@@ -66,8 +66,8 @@ struct RasterKey {
     /// Device pixels per slide unit, rounded up to a power of √2.
     scale: f32,
     opacity: f32,
-    /// Address of the decoded image; 0 for the placeholder.
-    image: usize,
+    /// Address of the picture of the fill; 0 for the placeholder.
+    picture: usize,
 }
 
 /// Where a cache entry lives: the element, the zoom it is drawn at and
@@ -135,14 +135,18 @@ fn native_fill(fill: &Fill, rotation: f32) -> bool {
         Fill::LinearGradient(gradient) => {
             gradient.stops.len() == 2 && square(gradient.angle) && square(rotation)
         }
-        Fill::RadialGradient(_) | Fill::Image(_) => false,
+        Fill::RadialGradient(_) | Fill::Image(_) | Fill::Video(_) | Fill::Shader(_) => false,
     }
 }
 
 /// The background of a fill that [`native_fill`] accepts.
 fn background(fill: &Fill, rotation: f32, opacity: f32) -> Option<Background> {
     match fill {
-        Fill::None | Fill::RadialGradient(_) | Fill::Image(_) => None,
+        Fill::None
+        | Fill::RadialGradient(_)
+        | Fill::Image(_)
+        | Fill::Video(_)
+        | Fill::Shader(_) => None,
         Fill::Solid(solid) => Some(hsla(solid.color, solid.opacity * opacity).into()),
         Fill::LinearGradient(gradient) => {
             let [from, to] = [gradient.stops[0], gradient.stops[1]];
@@ -303,8 +307,8 @@ fn rasterize(shape: &PaintShape, scale: f32, whole: bool) -> Option<(Arc<RenderI
     let bounds = fill_only.frame.bounds();
     let largest = bounds.width.max(bounds.height).max(1.);
     let scale = scale.min(MAX_RASTER / largest);
-    let images = |_| shape.image.clone();
-    let (pixmap, area) = render::render_shape_box(&fill_only, shape.opacity, scale, &images)?;
+    let pixels = |_: &_, _| shape.picture.clone();
+    let (pixmap, area) = render::render_shape_box(&fill_only, shape.opacity, scale, &pixels)?;
     let image = render_image(&pixmap)?;
     let (cx, cy) = element.frame.center();
     Some((
@@ -353,10 +357,10 @@ pub fn paint_shape(
         rotation: frame.rotation,
         scale: scale_bucket(zoom * window.scale_factor()),
         opacity: shape.opacity,
-        image: shape
-            .image
+        picture: shape
+            .picture
             .as_ref()
-            .map_or(0, |image| Arc::as_ptr(image) as usize),
+            .map_or(0, |picture| Arc::as_ptr(picture) as usize),
     });
 
     let slot = (element.id, zoom.to_bits(), false);
@@ -434,10 +438,10 @@ fn paint_whole_raster(shape: &PaintShape, center: Point<Pixels>, zoom: f32, wind
         rotation: frame.rotation,
         scale: zoom * window.scale_factor(),
         opacity: shape.opacity,
-        image: shape
-            .image
+        picture: shape
+            .picture
             .as_ref()
-            .map_or(0, |image| Arc::as_ptr(image) as usize),
+            .map_or(0, |picture| Arc::as_ptr(picture) as usize),
     };
     let slot = (element.id, zoom.to_bits(), true);
     let mut evicted = Vec::new();

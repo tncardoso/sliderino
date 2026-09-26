@@ -2,7 +2,10 @@
 //!
 //! Only what PDF, PPTX and HTML all draw the same way is offered: solid
 //! colors, linear and radial gradients, embedded images, centered strokes
-//! with three dash presets and five arrowhead kinds.
+//! with three dash presets and five arrowhead kinds. Videos and shaders
+//! play in PPTX and HTML; PDF shows their first frame.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +39,18 @@ fn is_one(value: &f32) -> bool {
 
 fn unit(value: f32) -> bool {
     (0. ..=1.).contains(&value)
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The outline of a shape, centered on its edge. In JSON every field is
@@ -231,7 +246,8 @@ impl<'de> Deserialize<'de> for Arrowhead {
 
 /// The inside of a rectangle or an ellipse. In JSON, `"none"` or an object
 /// with one key: `{"solid": {..}}`, `{"linear_gradient": {..}}`,
-/// `{"radial_gradient": {..}}` or `{"image": {..}}`.
+/// `{"radial_gradient": {..}}`, `{"image": {..}}`, `{"video": {..}}` or
+/// `{"shader": {..}}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fill {
@@ -240,6 +256,8 @@ pub enum Fill {
     LinearGradient(LinearGradient),
     RadialGradient(RadialGradient),
     Image(ImageFill),
+    Video(VideoFill),
+    Shader(ShaderFill),
 }
 
 impl Default for Fill {
@@ -265,6 +283,34 @@ impl Fill {
             Fill::LinearGradient(_) => "Linear",
             Fill::RadialGradient(_) => "Radial",
             Fill::Image(_) => "Image",
+            Fill::Video(_) => "Video",
+            Fill::Shader(_) => "Shader",
+        }
+    }
+
+    /// The opacity of the fill; 1 for none.
+    pub fn opacity(&self) -> f32 {
+        match self {
+            Fill::None => 1.,
+            Fill::Solid(solid) => solid.opacity,
+            Fill::LinearGradient(_) | Fill::RadialGradient(_) => 1.,
+            Fill::Image(image) => image.opacity,
+            Fill::Video(video) => video.opacity,
+            Fill::Shader(shader) => shader.opacity,
+        }
+    }
+
+    /// Whether the fill changes over time: a video or a shader.
+    pub fn is_animated(&self) -> bool {
+        matches!(self, Fill::Video(_) | Fill::Shader(_))
+    }
+
+    /// When a video or a shader starts and whether it loops.
+    pub fn playback(&self) -> Option<(Start, bool)> {
+        match self {
+            Fill::Video(video) => Some((video.start, video.looped)),
+            Fill::Shader(shader) => Some((shader.start, shader.looped)),
+            _ => None,
         }
     }
 
@@ -306,6 +352,11 @@ impl Fill {
                     && valid_stops(&gradient.stops)
             }
             Fill::Image(image) => unit(image.opacity),
+            Fill::Video(video) => unit(video.opacity),
+            Fill::Shader(shader) => {
+                unit(shader.opacity)
+                    && (MIN_SHADER_DURATION..=MAX_SHADER_DURATION).contains(&shader.duration)
+            }
         };
         if valid {
             Ok(())
@@ -392,6 +443,11 @@ pub struct RadialGradient {
 #[serde(transparent)]
 pub struct ImageId(pub u64);
 
+/// Stable identity of a video embedded in the presentation. Never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VideoId(pub u64);
+
 /// An embedded image painted inside the shape.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -402,6 +458,127 @@ pub struct ImageFill {
     /// 0.0 to 1.0.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub opacity: f32,
+}
+
+/// When a video or a shader starts in a presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Start {
+    /// When its slide shows.
+    #[default]
+    Auto,
+    /// On a click (or the next key): the clicks of a slide start its
+    /// on-click fills in layer order, bottom first, before the next slide.
+    OnClick,
+}
+
+impl Start {
+    pub const ALL: [Start; 2] = [Start::Auto, Start::OnClick];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Start::Auto => "Auto",
+            Start::OnClick => "On click",
+        }
+    }
+}
+
+/// An embedded video painted inside the shape. In a presentation it plays
+/// with its sound; elsewhere its first frame shows.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoFill {
+    pub id: VideoId,
+    #[serde(default)]
+    pub fit: ImageFit,
+    /// 0.0 to 1.0.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub start: Start,
+    /// Plays again from the start at the end.
+    #[serde(rename = "loop", default = "yes", skip_serializing_if = "is_true")]
+    pub looped: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub muted: bool,
+}
+
+impl VideoFill {
+    pub fn new(id: VideoId) -> Self {
+        VideoFill {
+            id,
+            fit: ImageFit::Cover,
+            opacity: 1.,
+            start: Start::Auto,
+            looped: true,
+            muted: false,
+        }
+    }
+}
+
+/// Shortest and longest loop of a shader, in seconds.
+pub const MIN_SHADER_DURATION: f32 = 1.;
+pub const MAX_SHADER_DURATION: f32 = 60.;
+
+fn default_duration() -> f32 {
+    10.
+}
+
+fn is_default_duration(value: &f32) -> bool {
+    *value == default_duration()
+}
+
+/// A fragment shader in GLSL, written as on Shadertoy, painted inside the
+/// shape; see [`crate::shaders`]. PPTX gets it as a video of `duration`
+/// seconds; PDF gets its frame at time 0.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShaderFill {
+    pub source: Arc<str>,
+    /// An embedded image the shader reads as `iChannel0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel0: Option<ImageId>,
+    /// 0.0 to 1.0.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub start: Start,
+    /// Starts again at time 0 after `duration`; without it the shader stops
+    /// at `duration`.
+    #[serde(rename = "loop", default = "yes", skip_serializing_if = "is_true")]
+    pub looped: bool,
+    /// Seconds, [`MIN_SHADER_DURATION`] to [`MAX_SHADER_DURATION`].
+    #[serde(
+        default = "default_duration",
+        skip_serializing_if = "is_default_duration"
+    )]
+    pub duration: f32,
+}
+
+impl Default for ShaderFill {
+    fn default() -> Self {
+        ShaderFill {
+            source: Arc::from(crate::shaders::DEFAULT_SOURCE),
+            channel0: None,
+            opacity: 1.,
+            start: Start::Auto,
+            looped: true,
+            duration: default_duration(),
+        }
+    }
+}
+
+impl ShaderFill {
+    /// The time of the shader `elapsed` seconds after it started: it wraps
+    /// at `duration` when it loops and stops there when it does not.
+    pub fn time(&self, elapsed: f32) -> f32 {
+        let elapsed = elapsed.max(0.);
+        if self.looped {
+            elapsed % self.duration
+        } else {
+            elapsed.min(self.duration)
+        }
+    }
 }
 
 /// How an image fills the box of its shape.

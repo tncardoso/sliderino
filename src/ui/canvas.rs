@@ -20,9 +20,8 @@ use gpui_kit::{
 
 use crate::camera::Camera;
 use crate::document::{
-    Element, ElementId, ElementKind, EllipseElement, Fill, FontData, Frame, ImageId, LineElement,
-    Operation, RectangleElement, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
-    normalize_degrees,
+    Element, ElementId, ElementKind, EllipseElement, FontData, Frame, LineElement, Operation,
+    RectangleElement, SlideId, SlideSize, TextElement, TextSizing, TextStyle, normalize_degrees,
 };
 use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
@@ -133,33 +132,22 @@ impl EditorView {
             return Vec::new();
         };
         let mut items = Vec::new();
-        let mut missing: Vec<ImageId> = Vec::new();
         for node in slide.visible_leaves() {
             let element = node.element;
             let Some(text) = element.as_text() else {
                 if element.kind.is_shape() {
                     let (frame, _) = dragged.apply(element);
-                    let image = match element.kind.fill() {
-                        Some(Fill::Image(fill)) => {
-                            let pixels = self
-                                .presentation
-                                .images
-                                .get(fill.id)
-                                .and_then(crate::images::cached_pixels);
-                            if pixels.is_none() {
-                                missing.push(fill.id);
-                            }
-                            pixels
-                        }
-                        _ => None,
-                    };
+                    let picture = element
+                        .kind
+                        .fill()
+                        .and_then(|fill| self.fill_picture(fill, &frame));
                     items.push(PaintItem::Shape(PaintShape {
                         element: Element {
                             frame,
                             ..element.clone()
                         },
                         opacity: node.opacity,
-                        image,
+                        picture,
                     }));
                 }
                 continue;
@@ -188,7 +176,6 @@ impl EditorView {
                 strikethrough: style.strikethrough,
             }));
         }
-        self.want_images(missing);
         items
     }
 
@@ -307,7 +294,7 @@ impl EditorView {
                 scene.ghost = Some(PaintShape {
                     element: Element::new(ElementId(u64::MAX), frame, kind),
                     opacity: 1.,
-                    image: None,
+                    picture: None,
                 });
                 scene.badge = Some((
                     frame.bounds(),

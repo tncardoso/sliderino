@@ -5,6 +5,7 @@
 //! [`EditorView::commit`] (or typed into a text box), so it lands in the
 //! shared undo history.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -21,11 +22,13 @@ use gpui_kit::{
 use crate::api::server::Agents;
 use crate::camera::Camera;
 use crate::document::{
-    ApplyError, Element, ElementId, ElementKind, EllipseElement, Frame, ImageId, LineElement,
+    ApplyError, Element, ElementId, ElementKind, EllipseElement, Fill, Frame, LineElement,
     Operation, Presentation, RectangleElement, Slide, SlideId, TextElement, TextSizing, TextStyle,
 };
 use crate::fonts::FontRegistry;
 use crate::history::History;
+use crate::pictures::Picture;
+use crate::render::Pixmap;
 use crate::shortcuts::Shortcuts;
 use crate::snap::{Guide, Handle};
 use crate::text_layout::TextLayout;
@@ -373,13 +376,14 @@ pub struct EditorView {
     pub focus: FocusHandle,
     /// Agents connected through the API, and whether the view follows them.
     pub agents: Agents,
-    /// Images the canvas or the thumbnails would draw but that are not
-    /// decoded yet; see [`EditorView::load_images`].
-    images_wanted: HashSet<ImageId>,
-    /// Images being decoded in the background.
-    images_pending: HashSet<ImageId>,
-    /// Images that cannot be decoded; they show as a placeholder.
-    images_failed: HashSet<ImageId>,
+    /// Pictures of fills that the canvas or the thumbnails would draw but
+    /// that are not decoded or rendered yet; see
+    /// [`EditorView::load_pictures`].
+    pictures_wanted: RefCell<HashSet<Picture>>,
+    /// Pictures being loaded in the background.
+    pictures_pending: HashSet<Picture>,
+    /// Pictures that cannot be loaded; they show as a placeholder.
+    pictures_failed: HashSet<Picture>,
     _activation: Subscription,
 }
 
@@ -442,9 +446,9 @@ impl EditorView {
             hand_key_held: false,
             focus: cx.focus_handle(),
             agents: Agents::default(),
-            images_wanted: HashSet::new(),
-            images_pending: HashSet::new(),
-            images_failed: HashSet::new(),
+            pictures_wanted: RefCell::new(HashSet::new()),
+            pictures_pending: HashSet::new(),
+            pictures_failed: HashSet::new(),
             _activation: activation,
         }
     }
@@ -886,43 +890,42 @@ impl EditorView {
         }
     }
 
-    /// Asks for images whose pixels are not decoded: they are decoded in
-    /// the background after this render, and the editor renders again when
-    /// they are ready.
-    pub fn want_images(&mut self, ids: Vec<ImageId>) {
-        for id in ids {
-            if !self.images_failed.contains(&id) {
-                self.images_wanted.insert(id);
-            }
+    /// The still picture of a fill in a frame when it is ready. When it is
+    /// not, asks for it: it loads in the background after this render, and
+    /// the editor renders again when it is ready.
+    pub fn fill_picture(&self, fill: &Fill, frame: &Frame) -> Option<Arc<Pixmap>> {
+        let picture = Picture::of(fill, frame)?;
+        let pixels = picture.cached(&self.presentation);
+        if pixels.is_none() && !self.pictures_failed.contains(&picture) {
+            self.pictures_wanted.borrow_mut().insert(picture);
         }
+        pixels
     }
 
-    /// Whether images the canvas or the thumbnails draw are still being
-    /// decoded.
-    pub fn images_loading(&self) -> bool {
-        !self.images_pending.is_empty() || !self.images_wanted.is_empty()
+    /// Whether pictures the canvas or the thumbnails draw are still being
+    /// loaded.
+    pub fn pictures_loading(&self) -> bool {
+        !self.pictures_pending.is_empty() || !self.pictures_wanted.borrow().is_empty()
     }
 
-    /// Decodes the images asked for since the last render, off the UI
+    /// Loads the pictures asked for since the last render, off the UI
     /// thread.
-    fn load_images(&mut self, cx: &mut Context<Self>) {
-        for id in std::mem::take(&mut self.images_wanted) {
-            if !self.images_pending.insert(id) {
+    fn load_pictures(&mut self, cx: &mut Context<Self>) {
+        for picture in self.pictures_wanted.take() {
+            if self.pictures_pending.contains(&picture) {
                 continue;
             }
-            let Some(data) = self.presentation.images.get(id).cloned() else {
-                self.images_pending.remove(&id);
+            let Some(load) = picture.load(&self.presentation) else {
                 continue;
             };
+            self.pictures_pending.insert(picture.clone());
             cx.spawn(async move |this, cx| {
-                let decoded = gpui_kit::AppContext::background_spawn(cx, async move {
-                    crate::images::pixels(&data).is_some()
-                })
-                .await;
+                let loaded =
+                    gpui_kit::AppContext::background_spawn(cx, async move { load.run() }).await;
                 this.update(cx, |this, cx| {
-                    this.images_pending.remove(&id);
-                    if !decoded {
-                        this.images_failed.insert(id);
+                    this.pictures_pending.remove(&picture);
+                    if !loaded {
+                        this.pictures_failed.insert(picture);
                     }
                     cx.notify();
                 })
@@ -1518,8 +1521,8 @@ impl Render for EditorView {
                     .child(canvas(self, scene, cx))
                     .child(properties_panel(self, problems, cx)),
             );
-        // The canvas and the thumbnails asked for images; decode them now.
-        self.load_images(cx);
+        // The canvas and the thumbnails asked for pictures; load them now.
+        self.load_pictures(cx);
         root
     }
 }
