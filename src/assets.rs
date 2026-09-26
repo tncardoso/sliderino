@@ -61,6 +61,8 @@ icon_assets!(
         X,
         Blend,
         SquareRoundCorner,
+        Upload,
+        Trash,
     ]
 );
 

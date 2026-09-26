@@ -230,7 +230,7 @@ impl Session {
         {
             // The editor reads no files: images go by value.
             let base = std::env::current_dir().unwrap_or_default();
-            crate::api::ops::inline_image_paths(ops, &base)
+            crate::api::ops::inline_paths(ops, &base)
                 .map_err(|message| ApiError::new("io", message))?;
         }
         if spec.target == Target::Local {

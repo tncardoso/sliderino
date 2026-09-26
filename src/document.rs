@@ -929,6 +929,11 @@ impl FontLibrary {
     pub fn faces(&self) -> impl Iterator<Item = &FontFace> {
         self.faces.keys()
     }
+
+    /// The embedded faces and their bytes, sorted by face.
+    pub fn iter(&self) -> impl Iterator<Item = (&FontFace, &FontData)> {
+        self.faces.iter()
+    }
 }
 
 #[derive(Clone, Debug)]

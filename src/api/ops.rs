@@ -31,10 +31,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::document::{
-    ApplyError, Arrowhead, Dash, Element, ElementId, ElementKind, EllipseElement, Fill, FontFace,
-    Frame, GroupElement, ImageData, ImageFill, ImageFit, ImageId, LayerPatch, LineElement,
-    Operation, Presentation, RectangleElement, Rgb, ShapeStylePatch, Slide, SlideId, Stroke,
-    TextElement, TextSizing, TextStylePatch, Vec2,
+    ApplyError, Arrowhead, Dash, Element, ElementId, ElementKind, EllipseElement, Fill, FontData,
+    FontFace, Frame, GroupElement, ImageData, ImageFill, ImageFit, ImageId, LayerPatch,
+    LineElement, Operation, Presentation, RectangleElement, Rgb, ShapeStylePatch, Slide, SlideId,
+    Stroke, TextElement, TextSizing, TextStylePatch, Vec2,
 };
 use crate::fonts;
 
@@ -326,11 +326,24 @@ pub enum Op {
         range: Range<usize>,
         text: String,
     },
+    /// Embeds an installed `face`, or the faces of a TTF, OTF or TTC file
+    /// given as base64 `data`. Clients read `path` into `data` before they
+    /// send the op. With `data`, `face` picks one face of the file.
     AddFont {
-        face: FontFace,
+        #[serde(default)]
+        face: Option<FontFace>,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
     },
+    /// Removes one unused `face`, or every face of `family`: texts that use
+    /// the family change to Inter.
     RemoveFont {
-        face: FontFace,
+        #[serde(default)]
+        face: Option<FontFace>,
+        #[serde(default)]
+        family: Option<String>,
     },
     /// Embeds a PNG or JPEG image given as base64 `data`. Clients read
     /// `path` into `data` before they send the op. An image with the same
@@ -390,11 +403,11 @@ pub fn parse(text: &str) -> Result<Vec<Op>, serde_json::Error> {
     serde_json::from_str(text)
 }
 
-/// Reads the file of each `add_image` op that gives a `path`, inside
+/// Reads the file of each `add_image` and `add_font` op that gives a `path`, inside
 /// batches too, into its `data` as base64. A relative path is taken from
 /// `base`. Clients run this before they send the ops: the editor reads no
 /// files.
-pub fn inline_image_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
+pub fn inline_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
     let Some(ops) = ops.as_array_mut() else {
         return Ok(());
     };
@@ -403,9 +416,12 @@ pub fn inline_image_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
             continue;
         };
         if let Some(inner) = object.get_mut("ops") {
-            inline_image_paths(inner, base)?;
+            inline_paths(inner, base)?;
         }
-        if object.get("op").and_then(Value::as_str) != Some("add_image") {
+        if !matches!(
+            object.get("op").and_then(Value::as_str),
+            Some("add_image" | "add_font")
+        ) {
             continue;
         }
         let Some(path) = object.get("path").and_then(Value::as_str) else {
@@ -446,6 +462,10 @@ pub enum OpErrorKind {
     /// The op is malformed; the text says how.
     Invalid(&'static str),
     Image(crate::images::ImageError),
+    FontFile(fonts::FontFileError),
+    /// `add_font` names a face that its file does not have.
+    FaceNotInFile(FontFace),
+    RemoveFamily(fonts::RemoveFamilyError),
     Apply(ApplyError),
 }
 
@@ -474,6 +494,14 @@ impl std::fmt::Display for OpError {
             }
             OpErrorKind::Invalid(reason) => write!(f, "{reason}"),
             OpErrorKind::Image(error) => write!(f, "{error}"),
+            OpErrorKind::FontFile(error) => write!(f, "{error}"),
+            OpErrorKind::FaceNotInFile(face) => write!(
+                f,
+                "the font file has no face {} {}",
+                face.family,
+                face.style_name()
+            ),
+            OpErrorKind::RemoveFamily(error) => write!(f, "{error}"),
             OpErrorKind::Apply(error) => write!(f, "{error}"),
         }
     }
@@ -497,6 +525,9 @@ pub struct Applied {
     /// Notes about the ops that did not stop them, such as a font whose
     /// license forbids embedding.
     pub warnings: Vec<String>,
+    /// The faces that `add_font` ops with a file gave, under the family
+    /// names they have in the presentation.
+    pub fonts: Vec<FontFace>,
     /// The last slide and element the ops changed, to show them.
     pub last_slide: Option<SlideId>,
     pub last_element: Option<ElementId>,
@@ -737,13 +768,45 @@ impl Compiler {
                 range,
                 text,
             },
-            Op::AddFont { face } => {
+            Op::AddFont { path: Some(_), .. } => {
+                return Err(OpErrorKind::Invalid(
+                    "add_font.path is read by the client; send data (base64) instead",
+                ));
+            }
+            Op::AddFont {
+                face,
+                data: Some(data),
+                ..
+            } => {
+                self.upload_font(presentation, face, &data, out)?;
+                return Ok(());
+            }
+            Op::AddFont { face: None, .. } => {
+                return Err(OpErrorKind::Invalid("add_font needs face, data or path"));
+            }
+            Op::AddFont {
+                face: Some(face), ..
+            } => {
                 if self.options.auto_fonts && self.is_embedded(presentation, &face, out) {
                     return Ok(());
                 }
                 self.font(face)?
             }
-            Op::RemoveFont { face } => Operation::RemoveFont { face },
+            Op::RemoveFont {
+                face: Some(face),
+                family: None,
+            } => Operation::RemoveFont { face },
+            Op::RemoveFont {
+                face: None,
+                family: Some(family),
+            } => Operation::Batch(
+                fonts::remove_family(presentation, &family).map_err(OpErrorKind::RemoveFamily)?,
+            ),
+            Op::RemoveFont { .. } => {
+                return Err(OpErrorKind::Invalid(
+                    "remove_font needs one of face and family",
+                ));
+            }
             Op::AddImage { id, data, path } => {
                 if path.is_some() {
                     return Err(OpErrorKind::Invalid(
@@ -998,6 +1061,42 @@ impl Compiler {
         Ok(())
     }
 
+    /// `AddFont`s for the faces of a font file given as base64, or for its
+    /// face `only`. Their license is not checked: the author holds it.
+    fn upload_font(
+        &mut self,
+        presentation: &Presentation,
+        only: Option<FontFace>,
+        data: &str,
+        out: &mut Vec<Operation>,
+    ) -> Result<(), OpErrorKind> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .map_err(|_| OpErrorKind::Invalid("add_font.data is not base64"))?;
+        let mut faces = fonts::read_file(bytes).map_err(OpErrorKind::FontFile)?;
+        if let Some(only) = only {
+            faces.retain(|upload| upload.face == only);
+            if faces.is_empty() {
+                return Err(OpErrorKind::FaceNotInFile(only));
+            }
+        }
+        let mut embedded: Vec<(FontFace, FontData)> = presentation
+            .fonts
+            .iter()
+            .map(|(face, data)| (face.clone(), data.clone()))
+            .collect();
+        for operation in out.iter() {
+            if let Operation::AddFont { face, data } = operation {
+                embedded.push((face.clone(), data.clone()));
+            }
+        }
+        let plan = fonts::plan_upload(&embedded, fonts::catalog(), faces);
+        self.applied.warnings.extend(plan.warnings);
+        self.applied.fonts.extend(plan.faces);
+        out.extend(plan.operations);
+        Ok(())
+    }
+
     /// An `AddFont` with the face's bytes. A face whose license forbids
     /// embedding is embedded anyway, with a warning: the author is trusted
     /// to hold the license.
@@ -1183,6 +1282,122 @@ mod tests {
         assert!(error.to_string().contains("no element 1"), "{error}");
     }
 
+    fn font_base64(index: usize, family: &str) -> String {
+        let bytes = crate::font_file::rename(&crate::assets::fonts()[index], 0, family).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn agents_upload_font_files() {
+        let mut presentation = Presentation::new();
+        let ops = vec![Op::AddFont {
+            face: None,
+            data: Some(font_base64(0, "Sliderino Test Sans")),
+            path: None,
+        }];
+        let applied = apply(&mut presentation, ops.clone(), AGENT).unwrap();
+        let face = FontFace::new("Sliderino Test Sans", 400, false);
+        assert_eq!(applied.fonts, std::slice::from_ref(&face));
+        assert!(presentation.fonts.contains(&face));
+
+        // The same file again adds nothing.
+        let before = presentation.clone();
+        let applied = apply(&mut presentation, ops, AGENT).unwrap();
+        assert_eq!(applied.fonts, [face]);
+        assert!(applied.steps.is_empty());
+        assert_eq!(presentation, before);
+    }
+
+    #[test]
+    fn an_uploaded_font_with_a_name_in_use_is_renamed() {
+        let mut presentation = Presentation::new();
+        let ops = parse(&format!(
+            r#"[{{"op": "add_font", "data": "{}"}}]"#,
+            font_base64(1, "Inter")
+        ))
+        .unwrap();
+        let applied = apply(&mut presentation, ops, AGENT).unwrap();
+        assert_eq!(applied.fonts, [FontFace::new("Inter (2)", 500, false)]);
+        assert_eq!(applied.warnings.len(), 1);
+    }
+
+    #[test]
+    fn font_uploads_need_a_font_file_and_no_path() {
+        let mut presentation = Presentation::new();
+        let fail = |presentation: &mut Presentation, json: &str| {
+            apply(presentation, parse(json).unwrap(), AGENT)
+                .unwrap_err()
+                .kind
+        };
+        assert!(matches!(
+            fail(
+                &mut presentation,
+                r#"[{"op": "add_font", "path": "a.ttf"}]"#
+            ),
+            OpErrorKind::Invalid(_)
+        ));
+        assert_eq!(
+            fail(
+                &mut presentation,
+                r#"[{"op": "add_font", "data": "aGVsbG8="}]"#
+            ),
+            OpErrorKind::FontFile(fonts::FontFileError::NotAFont)
+        );
+        let json = format!(
+            r#"[{{"op": "add_font", "data": "{}", "face": {{"family": "X", "weight": 900}}}}]"#,
+            font_base64(0, "X")
+        );
+        assert_eq!(
+            fail(&mut presentation, &json),
+            OpErrorKind::FaceNotInFile(FontFace::new("X", 900, false))
+        );
+    }
+
+    #[test]
+    fn removing_a_font_family_moves_its_texts_to_inter() {
+        let mut presentation = Presentation::new();
+        let ops = parse(&format!(
+            r#"[
+              {{"op": "add_font", "data": "{}"}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$t", "text": {{"content": "a",
+                "style": {{"font": {{"family": "Custom", "weight": 600}}}}}}}}}}
+            ]"#,
+            font_base64(2, "Custom")
+        ))
+        .unwrap();
+        let applied = apply(&mut presentation, ops, AGENT).unwrap();
+        let id = ElementId(applied.refs["$t"]);
+        let before = presentation.clone();
+        let ops = parse(r#"[{"op": "remove_font", "family": "Custom"}]"#).unwrap();
+        let applied = apply(&mut presentation, ops, AGENT).unwrap();
+        assert!(
+            !presentation
+                .fonts
+                .contains(&FontFace::new("Custom", 600, false))
+        );
+        let text = presentation.element(id).unwrap().as_text().unwrap();
+        assert_eq!(text.style.font, FontFace::new("Inter", 600, false));
+        presentation.apply(applied.inverse()).unwrap();
+        assert_eq!(presentation.fonts, before.fonts);
+
+        let ops =
+            parse(r#"[{"op": "remove_font", "face": {"family": "Custom"}, "family": "Custom"}]"#)
+                .unwrap();
+        assert!(apply(&mut presentation, ops, AGENT).is_err());
+    }
+
+    #[test]
+    fn clients_read_font_paths_into_data() {
+        let dir = std::env::temp_dir().join(format!("sliderino-fonts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ttf"), b"font").unwrap();
+        let mut ops = serde_json::json!([{"op": "add_font", "path": "a.ttf"}]);
+        inline_paths(&mut ops, &dir).unwrap();
+        assert!(ops[0].get("path").is_none());
+        assert_eq!(ops[0]["data"], "Zm9udA==");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn png_base64() -> String {
         base64::engine::general_purpose::STANDARD.encode(crate::images::tests::png(40, 20))
     }
@@ -1246,12 +1461,12 @@ mod tests {
         let mut ops = serde_json::json!([
             {"op": "batch", "ops": [{"op": "add_image", "id": "$a", "path": "logo.png"}]}
         ]);
-        inline_image_paths(&mut ops, &dir).unwrap();
+        inline_paths(&mut ops, &dir).unwrap();
         let inner = &ops[0]["ops"][0];
         assert!(inner.get("path").is_none());
         assert_eq!(inner["data"], png_base64_of(4, 4));
         let mut missing = serde_json::json!([{"op": "add_image", "path": "nope.png"}]);
-        assert!(inline_image_paths(&mut missing, &dir).is_err());
+        assert!(inline_paths(&mut missing, &dir).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

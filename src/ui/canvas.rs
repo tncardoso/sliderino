@@ -72,10 +72,11 @@ pub struct PaintText {
     pub id: ElementId,
     pub frame: Frame,
     pub layout: Arc<TextLayout>,
-    /// None when GPUI cannot load the embedded face; the text is skipped.
+    /// None when GPUI cannot load the embedded face: the text is drawn from
+    /// the outlines of `font`.
     pub font_id: Option<FontId>,
-    /// The embedded face, whose outlines draw rotated text: the glyph atlas
-    /// only draws upright glyphs.
+    /// The embedded face, whose outlines draw rotated text (the glyph atlas
+    /// only draws upright glyphs) and text in a face that GPUI cannot load.
     pub font: Option<FontData>,
     pub color: Hsla,
     pub underline: bool,
@@ -174,7 +175,7 @@ impl EditorView {
             let style = &text.style;
             let font = self.presentation.fonts.get(&style.font);
             let font_id = font.and_then(|data| self.fonts.font_id(&style.font, data, cx));
-            let font = font.filter(|_| frame.rotation != 0.).cloned();
+            let font = font.filter(|_| outlined(frame.rotation, font_id)).cloned();
             let color: Hsla = gpui_kit::rgb(style.color.0).into();
             items.push(PaintItem::Text(PaintText {
                 id: element.id,
@@ -1285,11 +1286,21 @@ pub fn canvas(
         .on_any_mouse_down(cx.listener(EditorView::on_canvas_mouse_down))
         .on_scroll_wheel(cx.listener(EditorView::on_canvas_scroll))
         .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-            // Images land where they are dropped.
-            let at = this
-                .to_slide(window.mouse_position())
-                .map(|at| (at.x, at.y));
-            this.load_image_files(paths.paths().to_vec(), ImageTarget::Insert(at), window, cx);
+            let (fonts, images): (Vec<_>, Vec<_>) = paths
+                .paths()
+                .iter()
+                .cloned()
+                .partition(|path| crate::fonts::is_font_path(path));
+            if !fonts.is_empty() {
+                this.load_font_files(fonts, false, window, cx);
+            }
+            if !images.is_empty() {
+                // Images land where they are dropped.
+                let at = this
+                    .to_slide(window.mouse_position())
+                    .map(|at| (at.x, at.y));
+                this.load_image_files(images, ImageTarget::Insert(at), window, cx);
+            }
         }))
         .context_menu({
             let editor = cx.entity().downgrade();
@@ -1388,6 +1399,15 @@ fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
     .size_full()
 }
 
+/// Whether a text is drawn from the outlines of its face instead of the
+/// glyph atlas: the atlas draws no rotated glyphs, and no glyphs of a face
+/// that GPUI cannot load. GPUI finds faces only by family name, so a face
+/// without the letter "m" or with the name of another installed font is
+/// not loaded.
+pub fn outlined(rotation: f32, font_id: Option<FontId>) -> bool {
+    rotation != 0. || font_id.is_none()
+}
+
 /// Paints elements with the slide's top-left corner at `origin`, scaled by
 /// `zoom`, in order. Shared by the canvas and the slide thumbnails; with
 /// `raster_turned` (the thumbnails), rotated texts are cached images instead
@@ -1426,11 +1446,8 @@ fn paint_text(
 ) {
     let _span = crate::perf::span("paint_glyphs");
     let at = |x: f32, y: f32| origin + point(px(x * zoom), px(y * zoom));
-    if text.frame.rotation != 0. {
+    let Some(font_id) = text.font_id.filter(|_| text.frame.rotation == 0.) else {
         paint_turned_text(text, origin, zoom, raster_turned, window);
-        return;
-    }
-    let Some(font_id) = text.font_id else {
         return;
     };
     let layout = &text.layout;

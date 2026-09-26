@@ -7,15 +7,15 @@
 
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::searchable_list::{SearchableGroup, SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::{
     AppContext as _, Context, Entity, Focusable as _, Hsla, SharedString, Subscription, Window,
 };
 
 use crate::document::{
-    ElementId, FontFace, Frame, LayerPatch, LineHeight, Operation, Rgb, TextSizing, TextStyle,
-    TextStylePatch,
+    ElementId, FontFace, Frame, LayerPatch, LineHeight, Operation, Presentation, Rgb, TextSizing,
+    TextStyle, TextStylePatch,
 };
 use crate::editor::EditorView;
 use crate::fonts;
@@ -144,16 +144,20 @@ impl SearchableListItem for FaceItem {
     }
 }
 
-pub type FamilyList = SearchableVec<SharedString>;
+/// The families of the family picker: those embedded in the presentation
+/// first, then the others.
+pub type FamilyList = SearchableVec<SearchableGroup<SharedString>>;
 
 pub struct Inspector {
     fields: Vec<(Field, Entity<InputState>)>,
     pub color: Entity<ColorPickerState>,
     pub family: Entity<SelectState<FamilyList>>,
     pub face: Entity<SelectState<Vec<FaceItem>>>,
-    families_loaded: bool,
-    /// Family whose faces the face picker lists.
-    faces_of: Option<String>,
+    /// Embedded families the family picker lists; `None` until the fonts
+    /// load.
+    pub(crate) families_of: Option<Vec<String>>,
+    /// Family whose faces the face picker lists, and its embedded faces.
+    faces_of: Option<(String, Vec<FontFace>)>,
     /// Text element the fields show. A field left by clicking another
     /// element commits to this one, not to the new selection.
     shown: Option<ElementId>,
@@ -210,7 +214,7 @@ impl Inspector {
 
         let family = cx.new(|cx| {
             SelectState::new(
-                FamilyList::new(Vec::<SharedString>::new()),
+                FamilyList::new(Vec::<SearchableGroup<SharedString>>::new()),
                 None,
                 window,
                 cx,
@@ -247,7 +251,7 @@ impl Inspector {
             color,
             family,
             face,
-            families_loaded: false,
+            families_of: None,
             faces_of: None,
             shown: None,
             shown_group: Vec::new(),
@@ -364,15 +368,21 @@ impl EditorView {
         let Some(catalog) = fonts::catalog_ready() else {
             return;
         };
-        if !self.inspector.families_loaded {
-            self.inspector.families_loaded = true;
-            let names: Vec<SharedString> = catalog
+        let embedded = embedded_families(&self.presentation);
+        if self.inspector.families_of.as_ref() != Some(&embedded) {
+            let others = catalog
                 .families()
                 .iter()
-                .map(|family| SharedString::from(family.name.clone()))
-                .collect();
+                .filter(|family| !embedded.contains(&family.name))
+                .map(|family| SharedString::from(family.name.clone()));
+            let groups = vec![
+                SearchableGroup::new("In this presentation")
+                    .items(embedded.iter().cloned().map(SharedString::from)),
+                SearchableGroup::new("All fonts").items(others),
+            ];
+            self.inspector.families_of = Some(embedded);
             self.inspector.family.update(cx, |state, cx| {
-                state.set_items(FamilyList::new(names), window, cx);
+                state.set_items(FamilyList::new(groups), window, cx);
             });
         }
         let family = SharedString::from(style.font.family.clone());
@@ -382,22 +392,29 @@ impl EditorView {
             });
         }
 
-        if self.inspector.faces_of.as_deref() != Some(style.font.family.as_str()) {
-            self.inspector.faces_of = Some(style.font.family.clone());
+        let embedded_faces = embedded_faces(&self.presentation, &style.font.family);
+        let faces_of = (style.font.family.clone(), embedded_faces);
+        if self.inspector.faces_of.as_ref() != Some(&faces_of) {
             let mut items: Vec<FaceItem> = catalog
                 .family(&style.font.family)
                 .map(|family| {
                     family
                         .faces
                         .iter()
+                        .filter(|face| !faces_of.1.contains(face))
                         .map(|face| FaceItem::new(face.clone(), catalog.is_restricted(face)))
                         .collect()
                 })
                 .unwrap_or_default();
-            // A face embedded in the file may not be installed here.
-            if !items.iter().any(|item| item.face == style.font) {
-                items.push(FaceItem::new(style.font.clone(), false));
-            }
+            // Faces embedded in the file, uploaded or not installed here.
+            items.extend(
+                faces_of
+                    .1
+                    .iter()
+                    .map(|face| FaceItem::new(face.clone(), false)),
+            );
+            items.sort_by_key(|item| (item.face.italic, item.face.weight));
+            self.inspector.faces_of = Some(faces_of);
             self.inspector
                 .face
                 .update(cx, |state, cx| state.set_items(items, window, cx));
@@ -644,14 +661,13 @@ impl EditorView {
             return;
         };
         let catalog = fonts::catalog();
-        let Some(family) = catalog.family(name) else {
-            return;
-        };
-        let allowed: Vec<FontFace> = family
-            .faces
+        let embedded = embedded_faces(&self.presentation, name);
+        let installed = catalog.family(name).map_or(&[][..], |family| &family.faces);
+        let allowed: Vec<FontFace> = installed
             .iter()
-            .filter(|face| !catalog.is_restricted(face))
+            .filter(|face| !embedded.contains(face) && !catalog.is_restricted(face))
             .cloned()
+            .chain(embedded.iter().cloned())
             .collect();
         if let Some(face) = fonts::closest_face(&allowed, style.font.weight, style.font.italic) {
             self.set_font(face.clone());
@@ -780,6 +796,27 @@ fn field_edit(
         _ => return None,
     };
     Some(edit)
+}
+
+/// The families embedded in the presentation, sorted.
+pub fn embedded_families(presentation: &Presentation) -> Vec<String> {
+    let mut families: Vec<String> = presentation
+        .fonts
+        .faces()
+        .map(|face| face.family.clone())
+        .collect();
+    families.dedup();
+    families
+}
+
+/// The embedded faces of `family`, sorted.
+fn embedded_faces(presentation: &Presentation, family: &str) -> Vec<FontFace> {
+    presentation
+        .fonts
+        .faces()
+        .filter(|face| face.family == family)
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

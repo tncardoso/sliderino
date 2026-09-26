@@ -1,0 +1,12 @@
+[
+  {"op": "add_font", "path": "../../assets/fonts/Inter-ExtraBold.ttf"},
+  {"op": "add_font", "path": "../../assets/fonts/Inter-SemiBoldItalic.ttf"},
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 1, "frame": {"x": 120, "y": 120, "width": 1200},
+    "text": {"content": "A font from a file.", "sizing": "auto_height",
+             "style": {"font": {"family": "Inter", "weight": 800}, "size": 72}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 2, "frame": {"x": 120, "y": 360, "width": 1200, "rotation": -4},
+    "text": {"content": "Rotated text in the second file.", "sizing": "auto_height",
+             "style": {"font": {"family": "Inter", "weight": 600, "italic": true}, "size": 56}}}}
+]

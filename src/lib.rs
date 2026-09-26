@@ -9,6 +9,7 @@ pub mod assets;
 pub mod camera;
 pub mod document;
 pub mod editor;
+pub mod font_file;
 pub mod fonts;
 pub mod history;
 pub mod images;

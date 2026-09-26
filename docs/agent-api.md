@@ -236,6 +236,43 @@ Use `set_shape_style` to change the style. Give only the fields to change:
 - A field that the shape does not have makes the operation fail. For
   example, a line has no `fill`.
 
+## Fonts
+
+A presentation holds its fonts. The editor embeds an installed face when an
+operation uses it. To use a font that is not installed, add its file with
+`add_font`:
+
+```json
+[
+  {"op": "add_font", "path": "/home/me/fonts/Brand-Regular.ttf"},
+  {"op": "add_font", "path": "/home/me/fonts/Brand-Bold.ttf"}
+]
+```
+
+- Sliderino supports TTF, OTF and TTC files. It does not support WOFF and
+  WOFF2 files. Convert them to TTF or OTF first.
+- Give `path` or `data`. The CLI and the MCP server read the file of `path`
+  and send its bytes to the editor. A relative path starts from the folder
+  where the client runs. `data` is the file in base64.
+- `add_font` adds all faces of the file. To add only one face of a TTC
+  file, also give `face`.
+- The editor does not examine the license of a font file. You must have the
+  license to use the font.
+- If other fonts already use the family name of the file, the editor gives
+  the family a new name, for example `Brand (2)`. The result has a warning
+  in `warnings`. A later file of the same family goes into `Brand (2)` if
+  that family does not already have the same weight and slant.
+- The result gives the faces of the file in `fonts`, with their family
+  names in the presentation. Use these names in the text style.
+- If the presentation already holds the same face with the same bytes,
+  `add_font` does not add it again.
+- A variable font adds one face: its default instance. The result has a
+  warning in `warnings`.
+- `remove_font` with `face` removes a face that no text uses.
+  `remove_font` with `family` removes all faces of the family. The texts
+  that use the family change to the nearest face of Inter. You cannot
+  remove Inter while texts use it.
+
 ## Images
 
 A presentation holds its images. Add an image with `add_image`, then use it

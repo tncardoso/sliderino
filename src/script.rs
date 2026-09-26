@@ -37,7 +37,7 @@ pub fn load(path: &Path) -> Result<Vec<ScriptOp>, ScriptError> {
     let text = std::fs::read_to_string(path).map_err(ScriptError::Read)?;
     let mut value: serde_json::Value = serde_json::from_str(&text).map_err(ScriptError::Parse)?;
     let base = path.parent().unwrap_or(Path::new("."));
-    ops::inline_image_paths(&mut value, base)
+    ops::inline_paths(&mut value, base)
         .map_err(|message| ScriptError::Read(std::io::Error::other(message)))?;
     serde_json::from_value(value).map_err(ScriptError::Parse)
 }

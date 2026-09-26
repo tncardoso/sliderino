@@ -9,8 +9,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::{ClipboardEntry, Context, PathPromptOptions, Window};
 
 use crate::document::{
@@ -19,6 +17,7 @@ use crate::document::{
 };
 use crate::editor::{EditorView, Tool};
 use crate::images::ImageError;
+use crate::ui::show_error;
 
 /// Where a new image goes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -246,18 +245,5 @@ impl EditorView {
             }
         }
         false
-    }
-}
-
-/// Tells the author that an image could not be used.
-fn show_error(message: String, window: &mut Window, cx: &mut gpui_kit::App) {
-    if window
-        .root::<gpui_kit::component::Root>()
-        .flatten()
-        .is_some()
-    {
-        window.push_notification(Notification::error(message), cx);
-    } else {
-        eprintln!("sliderino: {message}");
     }
 }

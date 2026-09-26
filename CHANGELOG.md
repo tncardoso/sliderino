@@ -4,6 +4,17 @@
 
 ### Added
 
+- Upload font files (TTF, OTF or TTC). Click the upload button next to the
+  font family to give the font to the selected texts, or drop the files on
+  the canvas. The font goes into the presentation. If an installed or
+  embedded font already has the family name, the uploaded font gets a new
+  name, such as "Roboto (2)".
+- The family list shows the fonts of the presentation first, under "In this
+  presentation".
+- The Design tab with nothing selected shows the fonts of the presentation
+  and their size. Remove a font there; its texts change to Inter.
+- Agents can add a font file with `add_font` and `path` or `data`, and
+  remove a font family with `remove_font` and `family`.
 - Text tool: click to add a text box that grows with its text, or drag to
   add a box with a fixed size. Text in a narrow box goes onto more lines.
 - Design tab for text: font, style, size, line height, letter spacing,
@@ -84,6 +95,8 @@
 
 ### Fixed
 
+- Text in an embedded font now shows in the editor when an installed font
+  has the same family name, or when the font has no letter "m".
 - Moving and resizing a text box is smooth. Before, the editor stopped
   responding during the drag.
 - The first selection of a text box no longer waits for the system fonts to

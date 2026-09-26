@@ -2,11 +2,12 @@
 //! the slide when nothing is selected), speaker notes and the undo history.
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::color_picker::ColorPicker;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::Select;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement, Stateful, StatefulInteractiveElement as _, Styled, TestSupportExt as _, div, px,
@@ -116,7 +117,7 @@ fn design_tab(
         (None, None) if !editor.selection.is_empty() => {
             selection_design(editor, cx).into_any_element()
         }
-        (None, None) => slide_design(editor, problems).into_any_element(),
+        (None, None) => slide_design(editor, problems, cx).into_any_element(),
     };
     if !editor.selection_locked() {
         return content;
@@ -162,8 +163,13 @@ fn header(icon: IconName, title: String, subtitle: String) -> impl IntoElement {
         )
 }
 
-/// Design tab with nothing selected: the slide and its diagnostics.
-fn slide_design(editor: &EditorView, problems: Vec<(Severity, String)>) -> impl IntoElement {
+/// Design tab with nothing selected: the slide, its diagnostics and the
+/// fonts of the presentation.
+fn slide_design(
+    editor: &EditorView,
+    problems: Vec<(Severity, String)>,
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
     let number = editor
         .presentation
         .index_of(editor.current_slide)
@@ -175,7 +181,96 @@ fn slide_design(editor: &EditorView, problems: Vec<(Severity, String)>) -> impl 
             format!("Slide {number}"),
             format!("{} × {}", size.width, size.height),
         ))
+        .child(fonts_section(editor, cx))
         .child(diagnostics_section(problems))
+}
+
+/// The families embedded in the presentation, with their size, and a
+/// button that removes each one. Texts in a removed family change to Inter;
+/// Inter itself cannot go while texts use it.
+fn fonts_section(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+    let presentation = &editor.presentation;
+    let rows = crate::ui::inspector::embedded_families(presentation)
+        .into_iter()
+        .enumerate()
+        .map(|(ix, family)| {
+            let (faces, bytes) = presentation
+                .fonts
+                .iter()
+                .filter(|(face, _)| face.family == family)
+                .fold((0, 0), |(faces, bytes), (_, data)| {
+                    (faces + 1, bytes + data.bytes.len())
+                });
+            let users = crate::fonts::texts_using(presentation, &family).len();
+            let locked = family == crate::fonts::FALLBACK_FAMILY && users > 0;
+            let detail = format!(
+                "{faces} {} · {} KB",
+                if faces == 1 { "face" } else { "faces" },
+                bytes.div_ceil(1024)
+            );
+            let tooltip = if locked {
+                format!(
+                    "Used by {users} {}",
+                    if users == 1 { "text" } else { "texts" }
+                )
+            } else if users > 0 {
+                format!(
+                    "Remove: {users} {} change to Inter",
+                    if users == 1 { "text" } else { "texts" }
+                )
+            } else {
+                "Remove the font".to_string()
+            };
+            let label = family.clone();
+            let remove = Button::new(("remove-font", ix))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Trash)
+                .tooltip(tooltip)
+                .size(px(24.))
+                .flex_shrink_0()
+                .disabled(locked)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Err(error) = this.remove_font_family(&family) {
+                        crate::ui::show_error(error.to_string(), window, cx);
+                    }
+                    cx.notify();
+                }));
+            h_flex()
+                .gap(px(8.))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().child(label))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::text_muted())
+                                .child(detail),
+                        ),
+                )
+                .child(remove)
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+    let body = if rows.is_empty() {
+        vec![
+            div()
+                .text_color(theme::text_muted())
+                .child("No fonts yet")
+                .into_any_element(),
+        ]
+    } else {
+        rows
+    };
+    section().child(section_label("FONTS")).child(
+        v_flex()
+            .id("fonts")
+            .test_support()
+            .gap(px(8.))
+            .children(body),
+    )
 }
 
 fn element_font(element: &Element) -> String {
@@ -487,15 +582,31 @@ fn text_section(
 
     section()
         .child(section_label("TEXT"))
-        .child(select_field(
-            Select::new(&inputs.family)
-                .id("font-family")
-                .xsmall()
-                .appearance(false)
-                .search_placeholder("Search fonts")
-                .menu_width(px(232.))
-                .menu_max_h(px(320.)),
-        ))
+        .child(
+            h_flex()
+                .gap(px(8.))
+                .child(select_field(
+                    Select::new(&inputs.family)
+                        .id("font-family")
+                        .xsmall()
+                        .appearance(false)
+                        .search_placeholder("Search fonts")
+                        .menu_width(px(232.))
+                        .menu_max_h(px(320.)),
+                ))
+                .child(
+                    Button::new("upload-font")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Upload)
+                        .tooltip("Upload font files (TTF, OTF, TTC)")
+                        .size(px(28.))
+                        .flex_shrink_0()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.choose_font_files(window, cx);
+                        })),
+                ),
+        )
         .child(
             h_flex()
                 .gap(px(8.))

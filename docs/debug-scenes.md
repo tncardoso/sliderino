@@ -74,8 +74,8 @@ the same format (see `agent-api.md`).
 | `set_shape_style` | `id`, `patch` (`fill`, `stroke`, `corner_radius`, `start`, `end`; only the fields to change) |
 | `set_line_points` | `id`, `from` (`{"x": 0, "y": 0}`), `to` |
 | `replace_text` | `id`, `range` (`{"start": 0, "end": 5}`, in bytes), `text` |
-| `add_font` | `face` |
-| `remove_font` | `face` |
+| `add_font` | `face`, or `path` (from the folder of the scene) or `data` (base64) of a font file |
+| `remove_font` | `face`, or `family` |
 | `add_image` | `id` (optional), `path` (from the folder of the scene) or `data` (base64) |
 | `remove_image` | `id` |
 | `batch` | `ops` (a list of operations; all apply or none apply) |
@@ -91,6 +91,8 @@ Rules:
   from the fonts of Sliderino (Inter) or from the fonts of the system. If the
   license of the font does not permit embedding, the tool shows a warning.
   Scenes do not add fonts automatically, but the agent API does.
+- `add_font` with `path` adds the faces of a TTF, OTF or TTC file. See
+  `debug/scenes/custom-font.json` and "Fonts" in `agent-api.md`.
 - `sizing` is `auto_width`, `auto_height` or `fixed`.
 - An element has a `text`, a `group`, a `rectangle`, an `ellipse` or a
   `line`. A group has `children`, a list of elements. The last child is on
