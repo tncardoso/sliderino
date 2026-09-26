@@ -79,7 +79,10 @@ fn agent_status() -> impl IntoElement {
 }
 
 fn actions(editor: &EditorView) -> impl IntoElement {
-    let zoom = editor.camera.map(|camera| camera.label()).unwrap_or_default();
+    let zoom = editor
+        .camera
+        .map(|camera| camera.label())
+        .unwrap_or_default();
     h_flex()
         .gap(px(8.))
         .pr(px(12.))

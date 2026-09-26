@@ -7,6 +7,8 @@
 
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 use crate::document::{
     Element, ElementId, FontData, FontFace, HAlign, LineHeight, Rgb, Slide, SlideId, TextCase,
     TextSizing, TextStyle, VAlign,
@@ -75,8 +77,10 @@ pub enum Operation {
     Batch(Vec<Operation>),
 }
 
-/// Fields of a [`TextStyle`] to change; `None` leaves the field alone.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Fields of a [`TextStyle`] to change; `None` leaves the field alone. In
+/// JSON, omitted fields are `None`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TextStylePatch {
     pub font: Option<FontFace>,
     pub size: Option<f32>,
@@ -93,6 +97,30 @@ pub struct TextStylePatch {
 }
 
 impl TextStylePatch {
+    /// The undo step name of the change: the field's name when the patch
+    /// sets one field, "Text style" when it sets several.
+    pub fn label(&self) -> &'static str {
+        let fields = [
+            (self.font.is_some(), "Font"),
+            (self.size.is_some(), "Font size"),
+            (self.line_height.is_some(), "Line height"),
+            (self.letter_spacing.is_some(), "Letter spacing"),
+            (self.align.is_some(), "Text alignment"),
+            (self.vertical_align.is_some(), "Vertical alignment"),
+            (self.paragraph_spacing.is_some(), "Paragraph spacing"),
+            (self.underline.is_some(), "Underline"),
+            (self.strikethrough.is_some(), "Strikethrough"),
+            (self.case.is_some(), "Letter case"),
+            (self.color.is_some(), "Text color"),
+            (self.opacity.is_some(), "Text opacity"),
+        ];
+        let mut set = fields.iter().filter(|(set, _)| *set);
+        match (set.next(), set.next()) {
+            (Some((_, label)), None) => label,
+            _ => "Text style",
+        }
+    }
+
     /// Writes the set fields into `style` and returns a patch holding the
     /// values they replaced.
     pub fn apply_to(self, style: &mut TextStyle) -> TextStylePatch {

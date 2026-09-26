@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::text_layout;
 
 /// Size of every slide in the presentation, in slide units.
@@ -32,18 +34,21 @@ impl Default for SlideSize {
 /// Ids follow creation order. Reordering keeps them, and the id of a removed
 /// slide is never handed out again, so an external agent holding an id never
 /// ends up pointing at a different slide.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SlideId(pub u64);
 
 /// Stable identity of an element, unique across all slides of the
 /// presentation. Same rules as [`SlideId`]: never reused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ElementId(pub u64);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Slide {
     pub id: SlideId,
     /// Elements in paint order: the last one is on top.
+    #[serde(default)]
     pub elements: Vec<Element>,
 }
 
@@ -56,10 +61,14 @@ impl Slide {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// In JSON the kind is a key of the element: `{"id": 1, "frame": {..},
+/// "text": {..}}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Element {
     pub id: ElementId,
+    #[serde(default)]
     pub frame: Frame,
+    #[serde(flatten)]
     pub kind: ElementKind,
 }
 
@@ -79,7 +88,8 @@ impl Element {
 
 /// Position and size of an element, in slide units from the slide's top-left
 /// corner. Rotation is in degrees, clockwise, around the frame center.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Frame {
     pub x: f32,
     pub y: f32,
@@ -94,24 +104,30 @@ impl Frame {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ElementKind {
     Text(TextElement),
 }
 
 /// A text box. The frame only places the text: it has no fill or stroke.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextElement {
     /// Plain text; `\n` separates paragraphs.
     pub content: String,
+    #[serde(default)]
     pub style: TextStyle,
+    #[serde(default)]
     pub sizing: TextSizing,
 }
 
 /// How the frame of a text box follows its content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TextSizing {
     /// No wrapping; width and height follow the text.
+    #[default]
     AutoWidth,
     /// Wraps at the frame width; the height follows the text.
     AutoHeight,
@@ -123,12 +139,19 @@ pub enum TextSizing {
 /// A font face: the family name plus the weight and slant that pick one file
 /// of the family. Documents only reference faces present in their
 /// [`FontLibrary`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FontFace {
     pub family: String,
     /// CSS weight, 100 to 900.
+    #[serde(default = "regular_weight")]
     pub weight: u16,
+    #[serde(default)]
     pub italic: bool,
+}
+
+fn regular_weight() -> u16 {
+    400
 }
 
 impl FontFace {
@@ -162,7 +185,8 @@ impl FontFace {
     }
 }
 
-/// An RGB color, 0xRRGGBB.
+/// An RGB color, 0xRRGGBB. In JSON, a hex string such as "1A1A1A" or
+/// "#1A1A1A".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u32);
 
@@ -170,9 +194,36 @@ impl Rgb {
     pub fn hex(self) -> String {
         format!("{:06X}", self.0 & 0xFF_FFFF)
     }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let hex = text.trim().trim_start_matches('#');
+        if hex.len() != 6 {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok().map(Rgb)
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+impl Serialize for Rgb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgb {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Rgb::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "expected a hex color like \"1A1A1A\", got {text:?}"
+            ))
+        })
+    }
+}
+
+/// In JSON, `"auto"` or `{"percent": 120}`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LineHeight {
     /// The line spacing the face asks for: (ascent + descent + line gap) of
     /// the font. Exports write the resolved percentage.
@@ -181,7 +232,8 @@ pub enum LineHeight {
     Percent(f32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HAlign {
     Left,
     Center,
@@ -190,7 +242,8 @@ pub enum HAlign {
     Justify,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VAlign {
     Top,
     Middle,
@@ -199,13 +252,16 @@ pub enum VAlign {
 
 /// Letter case applied when drawing. Only transforms that PDF, PPTX and HTML
 /// all represent natively are offered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TextCase {
     Original,
     Upper,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// In JSON every field is optional and defaults to [`TextStyle::default`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TextStyle {
     pub font: FontFace,
     /// Font size in slide units.
@@ -288,6 +344,12 @@ pub struct Presentation {
     next_slide_id: u64,
     /// Id given to the next created element; only ever grows.
     next_element_id: u64,
+}
+
+impl Default for Presentation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Presentation {
@@ -1017,8 +1079,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn colors_print_as_hex() {
+    fn colors_parse_and_print_as_hex() {
+        assert_eq!(Rgb::parse("#1a1a1a"), Some(Rgb(0x1A1A1A)));
+        assert_eq!(Rgb::parse("F4F4F2"), Some(Rgb(0xF4F4F2)));
+        assert_eq!(Rgb::parse("F4F4"), None);
         assert_eq!(Rgb(0x00FF00).hex(), "00FF00");
-        assert_eq!(Rgb(0x1A1A1A).hex(), "1A1A1A");
+    }
+
+    #[test]
+    fn elements_read_from_json_with_style_defaults() {
+        let element: Element = serde_json::from_str(
+            r##"{"id": 3, "frame": {"x": 10, "width": 200},
+                "text": {"content": "Hi", "sizing": "auto_height",
+                         "style": {"size": 48, "color": "#FF0000",
+                                   "line_height": {"percent": 120}}}}"##,
+        )
+        .unwrap();
+        assert_eq!(element.id, ElementId(3));
+        assert_eq!(element.frame.width, 200.);
+        let text = element.as_text().unwrap();
+        assert_eq!(text.sizing, TextSizing::AutoHeight);
+        assert_eq!(text.style.size, 48.);
+        assert_eq!(text.style.color, Rgb(0xFF0000));
+        assert_eq!(text.style.line_height, LineHeight::Percent(120.));
+        assert_eq!(text.style.font, FontFace::new("Inter", 400, false));
+
+        let typo = serde_json::from_str::<TextStyle>(r#"{"sise": 12}"#);
+        assert!(typo.is_err(), "unknown style fields are rejected");
     }
 }

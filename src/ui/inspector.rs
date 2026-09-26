@@ -178,13 +178,10 @@ impl Inspector {
                 let ColorPickerEvent::Change(Some(color)) = event else {
                     return;
                 };
-                this.set_style(
-                    "Text color",
-                    TextStylePatch {
-                        color: Some(to_rgb(*color)),
-                        ..Default::default()
-                    },
-                );
+                this.set_style(TextStylePatch {
+                    color: Some(to_rgb(*color)),
+                    ..Default::default()
+                });
                 cx.notify();
             },
         ));
@@ -380,8 +377,9 @@ impl EditorView {
     }
 
     /// Changes style fields of the selected text as one undo step.
-    pub fn set_style(&mut self, label: &str, patch: TextStylePatch) {
+    pub fn set_style(&mut self, patch: TextStylePatch) {
         if let Some((id, ..)) = self.selected_text() {
+            let label = patch.label();
             self.commit(label, Operation::SetTextStyle { id, patch }, Some(id));
         }
     }

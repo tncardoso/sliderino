@@ -6417,7 +6417,9 @@ dependencies = [
  "fontdb",
  "gpui-kit",
  "rustybuzz",
+ "serde",
  "serde_json",
+ "tiny-skia",
  "ttf-parser",
  "unicode-linebreak",
 ]

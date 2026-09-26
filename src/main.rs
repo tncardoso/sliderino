@@ -1,50 +1,10 @@
-mod assets;
-mod camera;
-mod document;
-mod editor;
-mod fonts;
-mod history;
-mod mock;
-mod operation;
-mod shortcuts;
-mod snap;
-mod text_layout;
-mod theme;
-mod ui;
-
-use gpui_kit::component::{Root, TitleBar};
-use gpui_kit::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
-
-use crate::assets::AppAssets;
-use crate::editor::EditorView;
+use sliderino::app;
+use sliderino::document::Presentation;
+use sliderino::history::History;
 
 fn main() {
-    gpui_kit::application()
-        .with_assets(AppAssets)
-        .run(|cx: &mut App| {
-            gpui_kit::init(cx);
-            cx.text_system()
-                .add_fonts(assets::fonts())
-                .expect("embedded Inter fonts load");
-            theme::apply(cx);
-            fonts::preload();
-
-            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(960.), px(600.))),
-                app_id: Some("sliderino".into()),
-                ..TitleBar::window_options()
-            };
-
-            cx.spawn(async move |cx| {
-                cx.open_window(options, |window, cx| {
-                    let view = cx.new(|cx| EditorView::new(window, cx));
-                    window.focus(&view.read(cx).focus.clone(), cx);
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-                .expect("failed to open the editor window");
-            })
-            .detach();
-        });
+    app::application().run(|cx| {
+        app::init(cx);
+        app::open_editor(cx, Presentation::new(), History::default(), |_, _, _| {});
+    });
 }

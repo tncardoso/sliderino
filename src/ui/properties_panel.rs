@@ -283,13 +283,12 @@ fn style_segment(
     icon: IconName,
     selected: bool,
     disabled: bool,
-    label: &'static str,
     patch: TextStylePatch,
     cx: &mut Context<EditorView>,
 ) -> gpui_kit::base::ObservedElement<Stateful<Div>> {
     segment(id, icon, selected, disabled).when_enabled(!disabled, move |this| {
         this.on_click(cx.listener(move |this, _, _, cx| {
-            this.set_style(label, patch.clone());
+            this.set_style(patch.clone());
             cx.notify();
         }))
     })
@@ -352,7 +351,6 @@ fn text_section(
             icon,
             style.align == align,
             false,
-            "Text alignment",
             TextStylePatch {
                 align: Some(align),
                 ..patch()
@@ -367,7 +365,6 @@ fn text_section(
             icon,
             fixed && style.vertical_align == align,
             !fixed,
-            "Vertical alignment",
             TextStylePatch {
                 vertical_align: Some(align),
                 ..patch()
@@ -436,7 +433,6 @@ fn text_section(
                             IconName::Underline,
                             style.underline,
                             false,
-                            "Underline",
                             TextStylePatch {
                                 underline: Some(!style.underline),
                                 ..patch()
@@ -448,7 +444,6 @@ fn text_section(
                             IconName::Strikethrough,
                             style.strikethrough,
                             false,
-                            "Strikethrough",
                             TextStylePatch {
                                 strikethrough: Some(!style.strikethrough),
                                 ..patch()
@@ -464,7 +459,6 @@ fn text_section(
                             IconName::CaseSensitive,
                             style.case == TextCase::Original,
                             false,
-                            "Letter case",
                             TextStylePatch {
                                 case: Some(TextCase::Original),
                                 ..patch()
@@ -476,7 +470,6 @@ fn text_section(
                             IconName::CaseUpper,
                             style.case == TextCase::Upper,
                             false,
-                            "Letter case",
                             TextStylePatch {
                                 case: Some(TextCase::Upper),
                                 ..patch()

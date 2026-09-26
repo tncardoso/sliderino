@@ -161,6 +161,17 @@ pub struct EditorView {
 
 impl EditorView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_document(Presentation::new(), History::default(), window, cx)
+    }
+
+    /// An editor on an existing presentation and its undo history, showing
+    /// the first slide.
+    pub fn with_document(
+        presentation: Presentation,
+        history: History,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // A key up or mouse up lost while the window is inactive would leave
         // the hand tool or a pan stuck on.
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -170,14 +181,13 @@ impl EditorView {
                 cx.notify();
             }
         });
-        let presentation = Presentation::new();
         Self {
             current_slide: presentation.slides[0].id,
             library_tab: 0,
             inspector_tab: 0,
             active_tool: Tool::Move,
             presentation,
-            history: History::default(),
+            history,
             selection: None,
             text_edit: None,
             drag: None,
@@ -688,6 +698,14 @@ impl EditorView {
             f32::from(offset.x) / camera.zoom,
             f32::from(offset.y) / camera.zoom,
         ))
+    }
+
+    /// The part of the slide visible in the canvas, in window coordinates.
+    pub fn slide_bounds(&self) -> Option<Bounds<Pixels>> {
+        let camera = self.camera?;
+        let slide = camera.slide_rect(self.presentation.size, self.viewport);
+        let visible = slide.intersect(&self.viewport);
+        (!visible.is_empty()).then_some(visible)
     }
 
     /// Converts slide units to a window position.

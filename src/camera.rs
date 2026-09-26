@@ -65,7 +65,6 @@ impl Camera {
     }
 
     /// Where the slide sits on screen, given the viewport bounds.
-    #[allow(dead_code, reason = "used by tests; pointer hit-testing will need it")]
     pub fn slide_rect(&self, slide: SlideSize, viewport: Bounds<Pixels>) -> Bounds<Pixels> {
         let size = self.slide_size(slide);
         let center = viewport.center() + self.pan;
@@ -110,15 +109,15 @@ mod tests {
             left: px(50.),
         };
         let camera = Camera::fit(viewport().size, SLIDE, insets);
-        assert!((camera.zoom - 0.5625).abs() < 1e-6, "width limits: 900/1600");
+        assert!(
+            (camera.zoom - 0.5625).abs() < 1e-6,
+            "width limits: 900/1600"
+        );
         let rect = camera.slide_rect(SLIDE, viewport());
         assert!(close(rect.origin.x, px(150.)));
         assert!(close(rect.right(), px(1050.)));
         assert!(rect.origin.y >= px(90.) && rect.bottom() <= px(650.));
-        assert!(close(
-            rect.origin.y - px(90.),
-            px(650.) - rect.bottom()
-        ));
+        assert!(close(rect.origin.y - px(90.), px(650.) - rect.bottom()));
     }
 
     #[test]
