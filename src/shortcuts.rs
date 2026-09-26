@@ -101,6 +101,10 @@ pub struct Shortcuts {
     pub undo: KeyChord,
     /// Both chords redo.
     pub redo: [KeyChord; 2],
+    /// Puts the selection in a new group.
+    pub group: KeyChord,
+    /// Puts the children of the selected groups in their place.
+    pub ungroup: KeyChord,
     /// Holding this key while dragging turns snapping off.
     pub snap_off: SnapOffModifier,
 }
@@ -133,6 +137,8 @@ impl Default for Shortcuts {
             zoom_to_100: KeyChord::ctrl("0"),
             undo: KeyChord::ctrl("z"),
             redo: [KeyChord::ctrl_shift("z"), KeyChord::ctrl("y")],
+            group: KeyChord::ctrl("g"),
+            ungroup: KeyChord::ctrl_shift("g"),
             snap_off: SnapOffModifier::Ctrl,
         }
     }

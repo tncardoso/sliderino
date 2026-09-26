@@ -102,7 +102,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_selection",
-            description: "What the person sees and edits: the slide shown, the selected element and the text selection when a text box is being edited.",
+            description: "What the person sees and edits: the slide shown, the selected elements (a list) and the text selection when a text box is being edited.",
             schema: empty_schema(),
             target: Target::Instance,
             read_only: true,
@@ -232,7 +232,7 @@ pub fn spec(name: &str) -> Option<ToolSpec> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
     pub current_slide: SlideId,
-    pub selection: Option<ElementId>,
+    pub selection: Vec<ElementId>,
     /// Element being edited and its selected byte range.
     pub text_edit: Option<(ElementId, Range<usize>)>,
 }
@@ -260,13 +260,13 @@ pub const AGENT_OPTIONS: Options = Options {
 pub fn apply_and_record(
     presentation: &mut Presentation,
     history: &mut History,
-    selection: Option<ElementId>,
+    selection: Vec<ElementId>,
     label: &str,
     ops: Vec<Op>,
 ) -> Result<Applied, OpError> {
     let applied = ops::apply(presentation, ops, AGENT_OPTIONS)?;
     if !applied.steps.is_empty() {
-        history.record(label, applied.inverse(), selection, selection);
+        history.record(label, applied.inverse(), selection.clone(), selection);
     }
     Ok(applied)
 }
@@ -634,13 +634,19 @@ pub(crate) mod tests {
         fn view(&self) -> ViewState {
             ViewState {
                 current_slide: self.presentation.slides[0].id,
-                selection: None,
+                selection: Vec::new(),
                 text_edit: None,
             }
         }
 
         fn apply_ops(&mut self, label: &str, ops: Vec<Op>) -> Result<Applied, OpError> {
-            apply_and_record(&mut self.presentation, &mut self.history, None, label, ops)
+            apply_and_record(
+                &mut self.presentation,
+                &mut self.history,
+                vec![],
+                label,
+                ops,
+            )
         }
 
         fn undo(&mut self) -> Option<Result<(), ApplyError>> {

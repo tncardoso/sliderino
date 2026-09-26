@@ -19,8 +19,8 @@ pub struct Step {
     /// the redo stack).
     operation: Operation,
     /// Selection before and after the step, restored by undo and redo.
-    selection_before: Option<ElementId>,
-    selection_after: Option<ElementId>,
+    selection_before: Vec<ElementId>,
+    selection_after: Vec<ElementId>,
     burst: Option<Burst>,
 }
 
@@ -42,8 +42,8 @@ impl History {
         &mut self,
         label: impl Into<String>,
         inverse: Operation,
-        selection_before: Option<ElementId>,
-        selection_after: Option<ElementId>,
+        selection_before: Vec<ElementId>,
+        selection_after: Vec<ElementId>,
     ) {
         self.close_burst();
         self.redo.clear();
@@ -75,8 +75,8 @@ impl History {
         self.undo.push(Step {
             label: "Edit text".into(),
             operation: inverse,
-            selection_before: Some(element),
-            selection_after: Some(element),
+            selection_before: vec![element],
+            selection_after: vec![element],
             burst: Some(Burst { element, last: now }),
         });
     }
@@ -94,12 +94,12 @@ impl History {
     pub fn undo(
         &mut self,
         presentation: &mut Presentation,
-    ) -> Option<Result<Option<ElementId>, ApplyError>> {
+    ) -> Option<Result<Vec<ElementId>, ApplyError>> {
         let mut step = self.undo.pop()?;
         step.burst = None;
         match presentation.apply(step.operation.clone()) {
             Ok(redo) => {
-                let selection = step.selection_before;
+                let selection = step.selection_before.clone();
                 step.operation = redo;
                 self.redo.push(step);
                 Some(Ok(selection))
@@ -116,11 +116,11 @@ impl History {
     pub fn redo(
         &mut self,
         presentation: &mut Presentation,
-    ) -> Option<Result<Option<ElementId>, ApplyError>> {
+    ) -> Option<Result<Vec<ElementId>, ApplyError>> {
         let mut step = self.redo.pop()?;
         match presentation.apply(step.operation.clone()) {
             Ok(undo) => {
-                let selection = step.selection_after;
+                let selection = step.selection_after.clone();
                 step.operation = undo;
                 self.close_burst();
                 self.undo.push(step);
@@ -252,12 +252,12 @@ mod tests {
                 element,
             })
             .unwrap();
-        history.record("Create text", inverse, None, Some(id));
+        history.record("Create text", inverse, vec![], vec![id]);
 
-        assert_eq!(history.undo(&mut presentation), Some(Ok(None)));
+        assert_eq!(history.undo(&mut presentation), Some(Ok(vec![])));
         assert!(presentation.element(id).is_none());
         assert_eq!(history.undone().collect::<Vec<_>>(), ["Create text"]);
-        assert_eq!(history.redo(&mut presentation), Some(Ok(Some(id))));
+        assert_eq!(history.redo(&mut presentation), Some(Ok(vec![id])));
         assert!(presentation.element(id).is_some());
         assert_eq!(
             history.undo(&mut presentation).map(|r| r.is_ok()),

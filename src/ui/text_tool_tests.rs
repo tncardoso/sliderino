@@ -405,7 +405,7 @@ fn a_field_left_by_clicking_another_element_edits_the_first_one(cx: &mut TestApp
         window.input("Second", cx);
         key(window, "escape", true, cx);
     });
-    let second = read(cx, handle, |editor| editor.selection.unwrap());
+    let second = read(cx, handle, |editor| editor.single_selection().unwrap());
     let first_at = read(cx, handle, |editor| {
         let frame = editor.presentation.element(first).unwrap().frame;
         editor
@@ -413,7 +413,10 @@ fn a_field_left_by_clicking_another_element_edits_the_first_one(cx: &mut TestApp
             .unwrap()
     });
     with_window(cx, handle, |window, cx| click_at(window, first_at, 1, cx));
-    assert_eq!(read(cx, handle, |editor| editor.selection), Some(first));
+    assert_eq!(
+        read(cx, handle, |editor| editor.single_selection()),
+        Some(first)
+    );
 
     // Type a size, then click the other box without pressing Enter.
     let input = read(cx, handle, |editor| {
@@ -447,7 +450,7 @@ fn a_field_left_by_clicking_another_element_edits_the_first_one(cx: &mut TestApp
                 .style
                 .size
         };
-        (size(first), size(second), editor.selection)
+        (size(first), size(second), editor.single_selection())
     });
     assert_eq!(sizes, (50., 32., Some(second)));
 }
@@ -563,5 +566,8 @@ fn escape_cancels_a_drag(cx: &mut TestAppContext) {
     assert_eq!(history(cx, handle).len(), steps, "no step");
     let shown = read(cx, handle, |editor| editor.shown_frame(id).unwrap());
     assert_eq!(shown, origin);
-    assert_eq!(read(cx, handle, |editor| editor.selection), Some(id));
+    assert_eq!(
+        read(cx, handle, |editor| editor.single_selection()),
+        Some(id)
+    );
 }

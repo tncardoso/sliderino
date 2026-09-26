@@ -46,6 +46,11 @@ impl Field {
         Field::Opacity,
     ];
 
+    /// X, Y, width or height: the fields a group or several elements show.
+    pub fn is_position(self) -> bool {
+        matches!(self, Field::X | Field::Y | Field::Width | Field::Height)
+    }
+
     /// The field's text for a frame and style.
     fn show(self, frame: &Frame, style: &TextStyle) -> String {
         match self {
@@ -135,9 +140,12 @@ pub struct Inspector {
     families_loaded: bool,
     /// Family whose faces the face picker lists.
     faces_of: Option<String>,
-    /// Element the fields show. A field left by clicking another element
-    /// commits to this one, not to the new selection.
+    /// Text element the fields show. A field left by clicking another
+    /// element commits to this one, not to the new selection.
     shown: Option<ElementId>,
+    /// Elements whose union the position fields show when the selection is
+    /// a group or several elements.
+    shown_group: Vec<ElementId>,
     /// Fields the author typed into and has not committed yet.
     dirty: Vec<Field>,
     _subscriptions: Vec<Subscription>,
@@ -228,6 +236,7 @@ impl Inspector {
             families_loaded: false,
             faces_of: None,
             shown: None,
+            shown_group: Vec::new(),
             dirty: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -252,7 +261,7 @@ fn to_rgb(color: Hsla) -> Rgb {
 impl EditorView {
     /// The selected text element's id, frame, style and sizing.
     pub fn selected_text(&self) -> Option<(ElementId, Frame, TextStyle, TextSizing)> {
-        self.text_parts(self.selection?)
+        self.text_parts(self.single_selection()?)
     }
 
     fn text_parts(&self, id: ElementId) -> Option<(ElementId, Frame, TextStyle, TextSizing)> {
@@ -280,9 +289,25 @@ impl EditorView {
         }
         let Some((id, frame, style, _)) = self.selected_text() else {
             self.inspector.shown = None;
+            self.inspector.shown_group = self.selection_roots();
+            if let Some(frame) = self.selection_frame() {
+                let style = TextStyle::default();
+                for (field, input) in &self.inspector.fields {
+                    if !field.is_position() {
+                        continue;
+                    }
+                    let shown = field.show(&frame, &style);
+                    let state = input.read(cx);
+                    if !state.focus_handle(cx).is_focused(window) && state.value() != shown.as_str()
+                    {
+                        input.update(cx, |state, cx| state.set_value(shown, window, cx));
+                    }
+                }
+            }
             return;
         };
         self.inspector.shown = Some(id);
+        self.inspector.shown_group.clear();
         // While the element is dragged, the fields follow the preview.
         let frame = self.shown_frame(id).unwrap_or(frame);
         for (field, input) in &self.inspector.fields {
@@ -363,6 +388,7 @@ impl EditorView {
         let Some((id, frame, style, sizing)) =
             self.inspector.shown.and_then(|id| self.text_parts(id))
         else {
+            self.commit_group_field(field, window, cx);
             return;
         };
         let input = self.inspector.input(field).clone();
@@ -371,8 +397,8 @@ impl EditorView {
             return;
         }
         if let Some((label, operation)) = field_edit(field, &typed, id, &frame, &style, sizing) {
-            let selection = self.selection;
-            self.commit(label, operation, Some(id));
+            let selection = self.selection.clone();
+            self.commit(label, operation, vec![id]);
             self.selection = selection;
         }
         // Show the value the document ended up with.
@@ -383,11 +409,48 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Commits a position field typed for a group or several elements: they
+    /// move, or scale to the typed size.
+    fn commit_group_field(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.inspector.shown_group.clone();
+        let frames: Vec<Frame> = ids.iter().filter_map(|id| self.frame_of(*id)).collect();
+        let Some(from) = crate::document::union(&frames) else {
+            return;
+        };
+        let input = self.inspector.input(field).clone();
+        let typed = input.read(cx).value().to_string();
+        let style = TextStyle::default();
+        if let Some(value) = parse(&typed).filter(|_| field.is_position()) {
+            let mut to = from;
+            match field {
+                Field::X => to.x = value,
+                Field::Y => to.y = value,
+                Field::Width => to.width = value.max(crate::snap::MIN_SIZE),
+                _ => to.height = value.max(crate::snap::MIN_SIZE),
+            }
+            let operations = self.transform_operations(&ids, from, to);
+            if !operations.is_empty() {
+                let label = if matches!(field, Field::X | Field::Y) {
+                    "Move"
+                } else {
+                    "Resize"
+                };
+                let selection = self.selection.clone();
+                self.commit_pruning(label, operations, selection);
+            }
+        }
+        if let Some(frame) = self.selection_frame() {
+            let shown = field.show(&frame, &style);
+            input.update(cx, |state, cx| state.set_value(shown, window, cx));
+        }
+        cx.notify();
+    }
+
     /// Changes style fields of the selected text as one undo step.
     pub fn set_style(&mut self, patch: TextStylePatch) {
         if let Some((id, ..)) = self.selected_text() {
             let label = patch.label();
-            self.commit(label, Operation::SetTextStyle { id, patch }, Some(id));
+            self.commit(label, Operation::SetTextStyle { id, patch }, vec![id]);
         }
     }
 
@@ -399,14 +462,15 @@ impl EditorView {
             self.commit(
                 "Resizing",
                 Operation::SetTextSizing { id, sizing },
-                Some(id),
+                vec![id],
             );
         }
     }
 
     /// Moves the selection to an edge or the center of the slide.
     pub fn align_to_slide(&mut self, horizontal: Option<f32>, vertical: Option<f32>) {
-        let Some((id, frame, ..)) = self.selected_text() else {
+        let ids = self.selection_roots();
+        let Some(frame) = self.selection_frame() else {
             return;
         };
         let size = self.presentation.size;
@@ -417,12 +481,10 @@ impl EditorView {
         if let Some(t) = vertical {
             aligned.y = (size.height as f32 - frame.height) * t;
         }
-        if aligned != frame {
-            self.commit(
-                "Align",
-                Operation::SetFrame { id, frame: aligned },
-                Some(id),
-            );
+        let operations = self.transform_operations(&ids, frame, aligned);
+        if !operations.is_empty() {
+            let selection = self.selection.clone();
+            self.commit_pruning("Align", operations, selection);
         }
     }
 
@@ -455,7 +517,7 @@ impl EditorView {
                 ..Default::default()
             },
         });
-        self.commit("Font", Operation::Batch(operations), Some(id));
+        self.commit("Font", Operation::Batch(operations), vec![id]);
     }
 
     /// Uses another family for the selected text, keeping the face closest

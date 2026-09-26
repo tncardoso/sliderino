@@ -272,17 +272,22 @@ impl EditorView {
     /// the agent edited. With follow on, shows what the agent changed.
     fn after_agent_change(&mut self, change: AgentChange, applied: Option<&Applied>) {
         let stale_drag = match &self.drag {
-            Some(Drag::Move { id, origin, .. }) => self
-                .presentation
-                .element(*id)
-                .is_none_or(|element| element.frame != *origin),
+            Some(Drag::Move { ids, origin, .. } | Drag::ResizeGroup { ids, origin, .. }) => {
+                let frames: Option<Vec<_>> = ids
+                    .iter()
+                    .map(|id| self.presentation.element(*id).map(|element| element.frame))
+                    .collect();
+                frames.and_then(|frames| crate::document::union(&frames)) != Some(*origin)
+            }
             Some(Drag::Resize {
                 id, origin, sizing, ..
             }) => self.presentation.element(*id).is_none_or(|element| {
                 element.frame != *origin
                     || element.as_text().map(|text| text.sizing) != Some(*sizing)
             }),
-            Some(Drag::Create { .. }) => self.presentation.slide(self.current_slide).is_none(),
+            Some(Drag::Create { .. } | Drag::Marquee { .. }) => {
+                self.presentation.slide(self.current_slide).is_none()
+            }
             Some(Drag::SelectText { id }) => self.presentation.element(*id).is_none(),
             None => false,
         };
@@ -318,11 +323,11 @@ impl EditorView {
             self.select_slide(slide);
         }
         if let Some((id, _)) = element
-            && self.selection != Some(id)
+            && self.selection != [id]
             && self.text_edit.as_ref().is_none_or(|edit| edit.id != id)
         {
             self.end_text_edit();
-            self.selection = Some(id);
+            self.selection = vec![id];
         }
     }
 }
@@ -344,7 +349,7 @@ impl Host for EditorView {
     fn view(&self) -> ViewState {
         ViewState {
             current_slide: self.current_slide,
-            selection: self.selection,
+            selection: self.selection.clone(),
             text_edit: self
                 .text_edit
                 .as_ref()
@@ -357,7 +362,7 @@ impl Host for EditorView {
         let applied = tools::apply_and_record(
             &mut self.presentation,
             &mut self.history,
-            self.selection,
+            self.selection.clone(),
             label,
             ops,
         )?;

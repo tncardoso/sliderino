@@ -26,15 +26,20 @@ use crate::ui::widgets::{
 /// canvas already computed.
 pub fn diagnostics(editor: &mut EditorView) -> Vec<(Severity, String)> {
     let _span = crate::perf::span("diagnostics");
-    if let Some(id) = editor.selection
+    if let Some(id) = editor.single_selection()
         && let Some(element) = editor.presentation.element(id).cloned()
+        && element.as_text().is_some()
     {
         return editor
             .layout_of(id)
             .map(|layout| text_problems(&layout, &element_font(&element)))
             .unwrap_or_default();
     }
-    let elements = editor.current_slide().elements.clone();
+    let elements: Vec<Element> = editor
+        .current_slide()
+        .visible_texts()
+        .map(|(element, _)| element.clone())
+        .collect();
     let mut problems = Vec::new();
     for element in &elements {
         let name = element_name(element);
@@ -95,14 +100,26 @@ fn design_tab(
     problems: Vec<(Severity, String)>,
     cx: &mut Context<EditorView>,
 ) -> AnyElement {
-    let selected = editor.selection.and_then(|id| {
+    let selected = editor.single_selection().and_then(|id| {
         let element = editor.presentation.element(id)?;
         element.as_text().map(|_| element)
     });
-    match selected {
+    let content = match selected {
         Some(element) => text_design(editor, element, problems, cx).into_any_element(),
+        None if !editor.selection.is_empty() => selection_design(editor, cx).into_any_element(),
         None => slide_design(editor, problems).into_any_element(),
+    };
+    if !editor.selection_locked() {
+        return content;
     }
+    // A locked selection shows its properties read-only.
+    div()
+        .id("locked-design")
+        .test_support()
+        .relative()
+        .child(div().opacity(0.6).child(content))
+        .child(div().absolute().inset_0().occlude())
+        .into_any_element()
 }
 
 fn header(icon: IconName, title: String, subtitle: String) -> impl IntoElement {
@@ -165,10 +182,43 @@ fn element_font(element: &Element) -> String {
         .unwrap_or_default()
 }
 
-/// A short name for an element: the start of its text.
-fn element_name(element: &Element) -> String {
+/// Design tab for a group or several elements: their union's position
+/// and size.
+fn selection_design(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+    let (icon, title, subtitle) = match editor.single_selection() {
+        Some(id) => {
+            let element = editor.presentation.element(id);
+            let children = element.map_or(0, |element| element.children().len());
+            (
+                IconName::Group,
+                element.map(element_name).unwrap_or_default(),
+                format!("Group · {children} layers"),
+            )
+        }
+        None => (
+            IconName::Layers,
+            format!("{} elements", editor.selection.len()),
+            "Mixed selection".to_string(),
+        ),
+    };
+    let subtitle = if editor.selection_locked() {
+        format!("{subtitle} · Locked")
+    } else {
+        subtitle
+    };
+    v_flex()
+        .child(header(icon, title, subtitle))
+        .child(position_section(editor, 0., cx))
+}
+
+/// A short name for an element: its name, the start of its text, or
+/// "Group" and its id.
+pub fn element_name(element: &Element) -> String {
+    if let Some(name) = &element.name {
+        return name.clone();
+    }
     let Some(text) = element.as_text() else {
-        return "Element".into();
+        return format!("Group {}", element.id.0);
     };
     let first = text.content.lines().next().unwrap_or("").trim();
     if first.is_empty() {
@@ -203,7 +253,7 @@ fn text_design(
             element_name(element),
             sizing_name(text.sizing).into(),
         ))
-        .child(position_section(editor, element, cx))
+        .child(position_section(editor, element.frame.rotation, cx))
         .child(layout_section(text.sizing, cx))
         .child(text_section(editor, style, text.sizing, cx))
         .child(fill_section(editor, style))
@@ -216,7 +266,7 @@ fn field_row(left: impl IntoElement, right: impl IntoElement) -> impl IntoElemen
 
 fn position_section(
     editor: &EditorView,
-    element: &Element,
+    rotation: f32,
     cx: &mut Context<EditorView>,
 ) -> impl IntoElement {
     let inputs = &editor.inspector;
@@ -260,7 +310,7 @@ fn position_section(
         .child(field_row(
             field(
                 field_icon(IconName::RotateCw),
-                format!("{}°", number(element.frame.rotation)),
+                format!("{}°", number(rotation)),
             ),
             div().flex_1(),
         ))

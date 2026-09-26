@@ -182,7 +182,10 @@ fn select(cx: &mut TestAppContext, handle: WindowHandle<EditorView>, id: Element
     with_window(cx, handle, |window, cx| {
         crate::ui::test_support::click_at(window, middle, 1, cx);
     });
-    assert_eq!(read(cx, handle, |editor| editor.selection), Some(id));
+    assert_eq!(
+        read(cx, handle, |editor| editor.single_selection()),
+        Some(id)
+    );
 }
 
 fn bench_move(cx: &mut TestAppContext, presentation: Presentation, name: &str) {

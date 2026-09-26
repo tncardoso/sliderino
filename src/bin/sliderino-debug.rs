@@ -162,14 +162,19 @@ fn scene(
 
     let mut history = History::default();
     for step in applied {
-        history.record(format!("Scene: {}", step.label), step.inverse, None, None);
+        history.record(
+            format!("Scene: {}", step.label),
+            step.inverse,
+            vec![],
+            vec![],
+        );
     }
 
     app::application().run(move |cx| {
         app::init(cx);
         app::open_editor(cx, presentation, history, move |editor, window, cx| {
             editor.select_slide(shown);
-            editor.selection = select;
+            editor.selection = select.into_iter().collect();
             if let Some(output) = output {
                 let view = cx.weak_entity();
                 let capture = Capture {

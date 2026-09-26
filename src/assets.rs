@@ -46,6 +46,14 @@ icon_assets!(
         UnfoldVertical,
         ChevronsLeftRight,
         Pilcrow,
+        Group,
+        Layers,
+        Eye,
+        EyeOff,
+        Lock,
+        LockOpen,
+        ChevronRight,
+        ChevronDown,
     ]
 );
 

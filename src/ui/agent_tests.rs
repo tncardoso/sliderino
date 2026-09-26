@@ -26,7 +26,7 @@ fn create_text(cx: &mut TestAppContext, handle: WindowHandle<EditorView>, text: 
     with_editor(cx, handle, |editor, _| {
         editor.create_text(Frame::default(), TextSizing::AutoWidth);
         editor.type_text(0..0, text);
-        let id = editor.selection.unwrap();
+        let id = editor.single_selection().unwrap();
         editor.end_text_edit();
         id
     })
@@ -69,7 +69,8 @@ fn an_agent_edit_cancels_a_drag_of_the_element_it_changes(cx: &mut TestAppContex
     let start = |editor: &mut EditorView| {
         let origin = editor.presentation.element(id).unwrap().frame;
         editor.drag = Some(Drag::Move {
-            id,
+            ids: vec![id],
+            pressed: None,
             grab: Default::default(),
             origin,
             current: Frame { x: 50., ..origin },
@@ -138,7 +139,7 @@ fn deleting_the_edited_text_ends_its_editing(cx: &mut TestAppContext) {
     .unwrap();
     read(cx, handle, |editor| {
         assert!(editor.text_edit.is_none());
-        assert!(editor.selection.is_none());
+        assert!(editor.selection.is_empty());
     });
 }
 
@@ -156,6 +157,9 @@ fn the_view_follows_agent_edits_only_when_asked(cx: &mut TestAppContext) {
     let refs = call(cx, handle, "apply_operations", add).unwrap()["refs"].clone();
     read(cx, handle, |editor| {
         assert_eq!(editor.current_slide.0, refs["$s"]);
-        assert_eq!(editor.selection.map(|id| id.0), refs["$t"].as_u64());
+        assert_eq!(
+            editor.single_selection().map(|id| id.0),
+            refs["$t"].as_u64()
+        );
     });
 }

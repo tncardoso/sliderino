@@ -156,17 +156,28 @@ pub fn click_at(
     count: usize,
     cx: &mut gpui_kit::App,
 ) {
+    click_with(window, position, count, Modifiers::default(), cx);
+}
+
+/// A left click with modifiers held.
+pub fn click_with(
+    window: &mut gpui_kit::Window,
+    position: Point<Pixels>,
+    count: usize,
+    modifiers: Modifiers,
+    cx: &mut gpui_kit::App,
+) {
     let events = [
         MouseMoveEvent {
             position,
             pressed_button: None,
-            modifiers: Modifiers::default(),
+            modifiers,
         }
         .to_platform_input(),
         MouseDownEvent {
             button: MouseButton::Left,
             position,
-            modifiers: Modifiers::default(),
+            modifiers,
             click_count: count,
             first_mouse: false,
         }
@@ -174,7 +185,7 @@ pub fn click_at(
         MouseUpEvent {
             button: MouseButton::Left,
             position,
-            modifiers: Modifiers::default(),
+            modifiers,
             click_count: count,
         }
         .to_platform_input(),

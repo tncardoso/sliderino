@@ -5,7 +5,7 @@
 //! [`EditorView::commit`] (or typed into a text box), so it lands in the
 //! shared undo history.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -85,14 +85,36 @@ pub enum Drag {
         start: SlidePoint,
         current: SlidePoint,
     },
-    /// Moving an element. The document keeps `origin` until the drag ends;
-    /// the canvas shows `current`.
+    /// Moving the selection. `origin` is the union of the moved frames; the
+    /// document keeps it until the drag ends and the canvas shows `current`.
+    /// `pressed` is the element under the press: a click without a move
+    /// selects only it.
     Move {
-        id: ElementId,
+        ids: Vec<ElementId>,
+        pressed: Option<ElementId>,
         grab: SlidePoint,
         origin: Frame,
         current: Frame,
         moved: bool,
+    },
+    /// Resizing a group or several elements from a handle of their union
+    /// `origin`: positions and boxes scale, fonts do not.
+    ResizeGroup {
+        ids: Vec<ElementId>,
+        handle: Handle,
+        grab: SlidePoint,
+        origin: Frame,
+        current: Frame,
+    },
+    /// Drawing a selection rectangle. `base` stays selected (Shift adds);
+    /// `context` is the selection before the press, the groups the author
+    /// has entered; `deep` selects leaves instead.
+    Marquee {
+        start: SlidePoint,
+        current: SlidePoint,
+        base: Vec<ElementId>,
+        context: Vec<ElementId>,
+        deep: bool,
     },
     /// Resizing a text box from a handle. The document keeps `origin` and
     /// `sizing` until the drag ends; the canvas shows `current` laid out
@@ -108,6 +130,67 @@ pub enum Drag {
     },
     /// Extending the text selection of the box being edited.
     SelectText { id: ElementId },
+}
+
+/// How a drag changes the frames the canvas shows; see
+/// [`EditorView::drag_preview`].
+#[derive(Clone, Debug, Default)]
+pub enum Preview {
+    #[default]
+    None,
+    /// The elements and their descendants move by `dx`, `dy`.
+    Move {
+        ids: HashSet<ElementId>,
+        dx: f32,
+        dy: f32,
+    },
+    /// One text box takes another frame and sizing.
+    Resize {
+        id: ElementId,
+        frame: Frame,
+        sizing: TextSizing,
+    },
+    /// The elements and their descendants scale from `from` to `to`.
+    Scale {
+        ids: HashSet<ElementId>,
+        from: Frame,
+        to: Frame,
+    },
+}
+
+impl Preview {
+    /// The frame and, for text, the sizing the canvas shows for `element`.
+    pub fn apply(&self, element: &Element) -> (Frame, Option<TextSizing>) {
+        let sizing = element.as_text().map(|text| text.sizing);
+        match self {
+            Preview::Move { ids, dx, dy } if ids.contains(&element.id) => (
+                Frame {
+                    x: element.frame.x + dx,
+                    y: element.frame.y + dy,
+                    ..element.frame
+                },
+                sizing,
+            ),
+            Preview::Resize { id, frame, sizing } if *id == element.id => (*frame, Some(*sizing)),
+            Preview::Scale { ids, from, to } if ids.contains(&element.id) => (
+                crate::document::scale_frame(&element.frame, from, to, sizing),
+                sizing,
+            ),
+            _ => (element.frame, sizing),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Preview::None)
+    }
+}
+
+/// Adds the ids of the element and its descendants to `set`.
+fn collect_ids(element: &Element, set: &mut HashSet<ElementId>) {
+    set.insert(element.id);
+    for child in element.children() {
+        collect_ids(child, set);
+    }
 }
 
 /// Text layouts of the presentation's elements. A layout depends on the
@@ -200,10 +283,12 @@ pub struct EditorView {
     pub active_tool: Tool,
     pub presentation: Presentation,
     pub history: History,
-    /// Selected element, always on the current slide.
-    pub selection: Option<ElementId>,
+    /// Selected elements, always on the current slide, in selection order.
+    pub selection: Vec<ElementId>,
     pub text_edit: Option<TextEdit>,
     pub drag: Option<Drag>,
+    /// Layer under the pointer in the hierarchy, outlined on the canvas.
+    pub hovered_layer: Option<ElementId>,
     /// Snap guides of the drag in progress.
     pub guides: Vec<Guide>,
     pub layouts: LayoutCache,
@@ -263,9 +348,10 @@ impl EditorView {
             active_tool: Tool::Move,
             presentation,
             history,
-            selection: None,
+            selection: Vec::new(),
             text_edit: None,
             drag: None,
+            hovered_layer: None,
             guides: Vec::new(),
             layouts: LayoutCache::default(),
             fonts: FontRegistry::default(),
@@ -301,46 +387,126 @@ impl EditorView {
         self.layouts.get(&self.presentation, id)
     }
 
-    /// The element being moved or resized, with the frame and sizing the
-    /// canvas shows for it.
-    pub fn drag_preview(&self) -> Option<(ElementId, Frame, TextSizing)> {
+    /// How the drag in progress changes the frames the canvas shows.
+    pub fn drag_preview(&self) -> Preview {
+        let subtree = |ids: &[ElementId]| {
+            let mut set = HashSet::new();
+            for id in ids {
+                if let Some(element) = self.presentation.element(*id) {
+                    collect_ids(element, &mut set);
+                }
+            }
+            set
+        };
         match &self.drag {
             Some(Drag::Move {
-                id,
+                ids,
+                origin,
                 current,
                 moved: true,
                 ..
-            }) => {
-                let sizing = self.presentation.element(*id)?.as_text()?.sizing;
-                Some((*id, *current, sizing))
-            }
+            }) => Preview::Move {
+                ids: subtree(ids),
+                dx: current.x - origin.x,
+                dy: current.y - origin.y,
+            },
             Some(Drag::Resize {
                 id,
                 current,
                 current_sizing,
                 ..
-            }) => Some((*id, *current, *current_sizing)),
-            _ => None,
+            }) => Preview::Resize {
+                id: *id,
+                frame: *current,
+                sizing: *current_sizing,
+            },
+            Some(Drag::ResizeGroup {
+                ids,
+                origin,
+                current,
+                ..
+            }) => Preview::Scale {
+                ids: subtree(ids),
+                from: *origin,
+                to: *current,
+            },
+            _ => Preview::None,
         }
     }
 
     /// The frame the canvas shows for an element: the drag preview while it
     /// is dragged, else its frame in the document.
     pub fn shown_frame(&self, id: ElementId) -> Option<Frame> {
-        match self.drag_preview() {
-            Some((dragged, frame, _)) if dragged == id => Some(frame),
-            _ => self.presentation.element(id).map(|element| element.frame),
-        }
+        let element = self.presentation.element(id)?;
+        Some(self.drag_preview().apply(element).0)
     }
 
     /// The layout the canvas shows for an element; see [`Self::shown_frame`].
     pub fn shown_layout(&mut self, id: ElementId) -> Option<Arc<TextLayout>> {
-        match self.drag_preview() {
-            Some((dragged, frame, sizing)) if dragged == id => {
-                self.layouts.get_for(&self.presentation, id, frame, sizing)
-            }
-            _ => self.layout_of(id),
+        let element = self.presentation.element(id)?;
+        match self.drag_preview().apply(element) {
+            (frame, Some(sizing)) => self.layouts.get_for(&self.presentation, id, frame, sizing),
+            (_, None) => None,
         }
+    }
+
+    /// The selection if it is one element.
+    pub fn single_selection(&self) -> Option<ElementId> {
+        match self.selection.as_slice() {
+            [id] => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Selected elements without a selected ancestor: the ones a move or a
+    /// resize changes.
+    pub fn selection_roots(&self) -> Vec<ElementId> {
+        self.selection
+            .iter()
+            .copied()
+            .filter(|id| {
+                !self
+                    .presentation
+                    .ancestors(*id)
+                    .iter()
+                    .any(|ancestor| self.selection.contains(ancestor))
+            })
+            .collect()
+    }
+
+    /// Union of the frames the canvas shows for the selection.
+    pub fn selection_frame(&self) -> Option<Frame> {
+        let frames: Vec<Frame> = self
+            .selection_roots()
+            .into_iter()
+            .filter_map(|id| self.shown_frame(id))
+            .collect();
+        crate::document::union(&frames)
+    }
+
+    /// Some selected element is locked, directly or by an ancestor.
+    pub fn selection_locked(&self) -> bool {
+        self.selection
+            .iter()
+            .any(|id| self.presentation.is_locked(*id))
+    }
+
+    /// The operations that take `ids` from their union `from` to `to`:
+    /// positions and boxes scale, fonts do not. A move when the sizes match.
+    pub fn transform_operations(
+        &self,
+        ids: &[ElementId],
+        from: Frame,
+        to: Frame,
+    ) -> Vec<Operation> {
+        ids.iter()
+            .filter_map(|id| {
+                let element = self.presentation.element(*id)?;
+                let sizing = element.as_text().map(|text| text.sizing);
+                let frame = crate::document::scale_frame(&element.frame, &from, &to, sizing);
+                (frame != element.frame).then_some(Operation::SetFrame { id: *id, frame })
+            })
+            .collect()
     }
 
     /// Fits a previewed frame to its text like [`Presentation::apply`] does:
@@ -367,26 +533,85 @@ impl EditorView {
         self.drag.take().is_some_and(|drag| {
             matches!(
                 drag,
-                Drag::Move { .. } | Drag::Resize { .. } | Drag::Create { .. }
+                Drag::Move { .. }
+                    | Drag::Resize { .. }
+                    | Drag::ResizeGroup { .. }
+                    | Drag::Create { .. }
+                    | Drag::Marquee { .. }
             )
         })
     }
 
     /// Applies an edit and records it as one undo step, leaving `select`
     /// selected. Returns false (and changes nothing) when the edit fails.
-    pub fn commit(&mut self, label: &str, operation: Operation, select: Option<ElementId>) -> bool {
-        let before = self.selection;
-        match self.presentation.apply(operation) {
-            Ok(inverse) => {
-                self.selection = select;
-                self.history.record(label, inverse, before, select);
-                true
-            }
-            Err(error) => {
-                eprintln!("sliderino: {label} failed: {error}");
-                false
+    pub fn commit(&mut self, label: &str, operation: Operation, select: Vec<ElementId>) -> bool {
+        self.commit_pruning(label, vec![operation], select)
+    }
+
+    /// Like [`Self::commit`] for a batch of operations, and removes the groups
+    /// the batch leaves empty in the same undo step.
+    pub fn commit_pruning(
+        &mut self,
+        label: &str,
+        operations: Vec<Operation>,
+        select: Vec<ElementId>,
+    ) -> bool {
+        let mut candidates = Vec::new();
+        for operation in &operations {
+            if let Operation::MoveElement { id, .. } | Operation::RemoveElement { id } = operation {
+                candidates.extend(self.presentation.ancestors(*id));
             }
         }
+        candidates.sort();
+        candidates.dedup();
+        let operation = match <[Operation; 1]>::try_from(operations) {
+            Ok([operation]) => operation,
+            Err(operations) => Operation::Batch(operations),
+        };
+        let before = self.selection.clone();
+        let mut inverses = match self.presentation.apply(operation) {
+            Ok(inverse) => vec![inverse],
+            Err(error) => {
+                eprintln!("sliderino: {label} failed: {error}");
+                return false;
+            }
+        };
+        // Removing an empty group may empty its parent in turn.
+        loop {
+            let empty: Vec<Operation> = candidates
+                .iter()
+                .filter(|id| {
+                    self.presentation
+                        .element(**id)
+                        .and_then(Element::as_group)
+                        .is_some_and(|group| group.children.is_empty())
+                })
+                .map(|id| Operation::RemoveElement { id: *id })
+                .collect();
+            if empty.is_empty() {
+                break;
+            }
+            match self.presentation.apply(Operation::Batch(empty)) {
+                Ok(inverse) => inverses.push(inverse),
+                Err(error) => {
+                    eprintln!("sliderino: removing empty groups failed: {error}");
+                    break;
+                }
+            }
+        }
+        let inverse = if inverses.len() == 1 {
+            inverses.pop().expect("one inverse")
+        } else {
+            inverses.reverse();
+            Operation::Batch(inverses)
+        };
+        let select: Vec<ElementId> = select
+            .into_iter()
+            .filter(|id| self.presentation.element(*id).is_some())
+            .collect();
+        self.selection = select.clone();
+        self.history.record(label, inverse, before, select);
+        true
     }
 
     /// Reverts the latest step. `None` when there is nothing to undo.
@@ -406,12 +631,19 @@ impl EditorView {
     /// Restores the selection after undo or redo and shows the slide it is on.
     fn after_history(
         &mut self,
-        result: Result<Option<ElementId>, ApplyError>,
+        result: Result<Vec<ElementId>, ApplyError>,
         slide_index: Option<usize>,
     ) -> Result<(), ApplyError> {
         let selection = result.inspect_err(|error| eprintln!("sliderino: undo failed: {error}"))?;
-        self.selection = selection.filter(|id| self.presentation.element(*id).is_some());
-        if let Some(location) = self.selection.and_then(|id| self.presentation.locate(id)) {
+        self.selection = selection
+            .into_iter()
+            .filter(|id| self.presentation.element(*id).is_some())
+            .collect();
+        if let Some(location) = self
+            .selection
+            .first()
+            .and_then(|id| self.presentation.locate(*id))
+        {
             self.current_slide = location.slide;
         }
         self.repair_view(slide_index);
@@ -432,9 +664,11 @@ impl EditorView {
                 .locate(id)
                 .is_some_and(|location| location.slide == this.current_slide)
         };
-        if self.selection.is_some_and(|id| !on_slide(self, id)) {
-            self.selection = None;
-        }
+        let selection = std::mem::take(&mut self.selection);
+        self.selection = selection
+            .into_iter()
+            .filter(|id| on_slide(self, *id))
+            .collect();
         if let Some(edit) = &mut self.text_edit {
             let content = self
                 .presentation
@@ -442,7 +676,7 @@ impl EditorView {
                 .and_then(Element::as_text)
                 .map(|text| text.content.as_str());
             match content {
-                Some(content) if self.selection == Some(edit.id) => {
+                Some(content) if self.selection == [edit.id] => {
                     let clamp = |index: usize| floor_boundary(content, index.min(content.len()));
                     edit.caret = clamp(edit.caret);
                     edit.anchor = clamp(edit.anchor);
@@ -456,7 +690,7 @@ impl EditorView {
     /// Shows another slide, leaving any text being edited.
     pub fn select_slide(&mut self, id: SlideId) {
         self.end_text_edit();
-        self.selection = None;
+        self.selection.clear();
         self.current_slide = id;
     }
 
@@ -469,7 +703,7 @@ impl EditorView {
             .index_of(self.current_slide)
             .map_or(usize::MAX, |ix| ix + 1);
         let slide = Slide::new(id);
-        if self.commit("Add slide", Operation::AddSlide { index, slide }, None) {
+        if self.commit("Add slide", Operation::AddSlide { index, slide }, vec![]) {
             self.current_slide = id;
         }
     }
@@ -504,7 +738,7 @@ impl EditorView {
             ),
         });
         self.end_text_edit();
-        if self.commit("Create text", Operation::Batch(operations), Some(id)) {
+        if self.commit("Create text", Operation::Batch(operations), vec![id]) {
             self.begin_text_edit(id, 0, 0);
         }
     }
@@ -515,7 +749,7 @@ impl EditorView {
             self.end_text_edit();
         }
         self.history.close_burst();
-        self.selection = Some(id);
+        self.selection = vec![id];
         self.text_edit = Some(TextEdit {
             id,
             caret,
@@ -540,7 +774,7 @@ impl EditorView {
             self.commit(
                 "Delete text",
                 Operation::RemoveElement { id: edit.id },
-                None,
+                vec![],
             );
         }
     }
@@ -812,7 +1046,7 @@ impl EditorView {
         cx.stop_propagation();
     }
 
-    /// Undo, redo and the keys that act on the selected element.
+    /// Undo, redo and the keys that act on the selection.
     fn on_editor_key(&mut self, keystroke: &Keystroke) -> bool {
         if self.shortcuts.undo.matches(keystroke) {
             self.undo();
@@ -827,29 +1061,119 @@ impl EditorView {
             self.redo();
             return true;
         }
-        let Some(id) = self.selection else {
+        if self.selection.is_empty() {
             return false;
-        };
+        }
+        if self.shortcuts.group.matches(keystroke) {
+            self.group_selection();
+            return true;
+        }
+        if self.shortcuts.ungroup.matches(keystroke) {
+            self.ungroup_selection();
+            return true;
+        }
         let plain = !keystroke.modifiers.modified();
         match keystroke.key.as_str() {
-            "backspace" | "delete" if plain => {
-                self.commit("Delete", Operation::RemoveElement { id }, None);
-            }
-            "enter" if plain => {
-                let len = self
-                    .presentation
-                    .element(id)
-                    .and_then(Element::as_text)
-                    .map(|text| text.content.len());
-                match len {
-                    Some(len) => self.begin_text_edit(id, 0, len),
-                    None => return false,
-                }
-            }
-            "escape" => self.selection = None,
+            "backspace" | "delete" if plain => self.delete_selection(),
+            "enter" if plain => return self.enter_selection(),
+            "escape" => self.select_parent(),
             _ => return false,
         }
         true
+    }
+
+    /// Selected roots that are not locked: the ones group, ungroup and
+    /// delete act on.
+    fn editable_roots(&self) -> Vec<ElementId> {
+        self.selection_roots()
+            .into_iter()
+            .filter(|id| !self.presentation.is_locked(*id))
+            .collect()
+    }
+
+    /// Puts the selection in a new group and selects it.
+    pub fn group_selection(&mut self) {
+        let ids = self.editable_roots();
+        if ids.is_empty() {
+            return;
+        }
+        self.end_text_edit();
+        let group = self.presentation.new_element_id();
+        match self.presentation.group_operations(group, &ids) {
+            Ok(operations) => {
+                self.commit_pruning("Group", operations, vec![group]);
+            }
+            Err(error) => eprintln!("sliderino: Group failed: {error}"),
+        }
+    }
+
+    /// Puts the children of each selected group in its place and selects
+    /// them.
+    pub fn ungroup_selection(&mut self) {
+        let mut operations = Vec::new();
+        let mut select = Vec::new();
+        for id in self.editable_roots() {
+            let Some(group) = self.presentation.element(id).and_then(Element::as_group) else {
+                continue;
+            };
+            select.extend(group.children.iter().map(|child| child.id));
+            match self.presentation.ungroup_operations(id) {
+                Ok(ungroup) => operations.push(Operation::Batch(ungroup)),
+                Err(error) => eprintln!("sliderino: Ungroup failed: {error}"),
+            }
+        }
+        if !operations.is_empty() {
+            self.end_text_edit();
+            self.commit_pruning("Ungroup", operations, select);
+        }
+    }
+
+    /// Removes the selection, and the groups it leaves empty.
+    pub fn delete_selection(&mut self) {
+        let operations: Vec<Operation> = self
+            .editable_roots()
+            .into_iter()
+            .map(|id| Operation::RemoveElement { id })
+            .collect();
+        if !operations.is_empty() {
+            self.commit_pruning("Delete", operations, vec![]);
+        }
+    }
+
+    /// Enter: selects the children of a selected group, or edits a selected
+    /// text. Returns false when the key does nothing.
+    fn enter_selection(&mut self) -> bool {
+        let Some(id) = self.single_selection() else {
+            return false;
+        };
+        if self.presentation.is_locked(id) {
+            return false;
+        }
+        let Some(element) = self.presentation.element(id) else {
+            return false;
+        };
+        if let Some(group) = element.as_group() {
+            self.selection = group.children.iter().map(|child| child.id).collect();
+            return true;
+        }
+        match element.as_text().map(|text| text.content.len()) {
+            Some(len) => {
+                self.begin_text_edit(id, 0, len);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Escape: selects the group holding the selection, or clears the
+    /// selection at the top level.
+    pub fn select_parent(&mut self) {
+        let parent = self
+            .selection
+            .first()
+            .and_then(|id| self.presentation.locate(*id))
+            .and_then(|location| location.parent);
+        self.selection = parent.into_iter().collect();
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {

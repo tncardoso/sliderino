@@ -2,6 +2,7 @@
 //! elements, direct manipulation (create, select, move, resize, edit text)
 //! and the tool palette.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
@@ -19,7 +20,7 @@ use crate::camera::Camera;
 use crate::document::{
     ElementId, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
 };
-use crate::editor::{Drag, EditorView, SlidePoint, Tool};
+use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
 use crate::snap::{Guide, Handle, ResizeMode, Targets, resize, snap_move, snap_resize};
 use crate::text_layout::{BoxRect, TextLayout};
@@ -63,14 +64,18 @@ pub struct PaintText {
 /// Everything the canvas paints over the slide, in slide units.
 pub struct CanvasScene {
     texts: Vec<PaintText>,
-    /// Outline of the selected element, whether it shows resize handles and
-    /// whether its text overflows.
+    /// Outline of the selection (the union of its frames), whether it shows
+    /// resize handles and whether its text overflows.
     selection: Option<(Frame, bool, bool)>,
+    /// Thin outlines: each element of a multiple selection, and the layer
+    /// under the pointer in the hierarchy.
+    outlines: Vec<Frame>,
     highlight: Vec<BoxRect>,
     caret: Option<BoxRect>,
     /// Stretch of text an input method is composing, underlined.
     marked: Vec<BoxRect>,
     preview: Option<Frame>,
+    marquee: Option<Frame>,
     guides: Vec<Guide>,
     /// Size label, "216 × 148", and the area it sits under.
     badge: Option<(Frame, String)>,
@@ -78,20 +83,22 @@ pub struct CanvasScene {
 }
 
 impl EditorView {
-    /// Text elements of a slide, laid out and ready to paint. With
-    /// `preview`, a dragged element shows its drag preview; without, the
+    /// Visible text elements of a slide, laid out and ready to paint. With
+    /// `preview`, dragged elements show their drag preview; without, the
     /// document (the thumbnails change when the drag ends).
     pub fn paint_texts(&mut self, slide: SlideId, preview: bool, cx: &App) -> Vec<PaintText> {
+        let dragged = if preview {
+            self.drag_preview()
+        } else {
+            Preview::None
+        };
         let Some(slide) = self.presentation.slide(slide) else {
             return Vec::new();
         };
-        let dragged = self.drag_preview().filter(|_| preview);
         let mut texts = Vec::new();
         for (element, text) in slide.visible_texts() {
-            let (frame, sizing) = match dragged {
-                Some((id, frame, sizing)) if id == element.id => (frame, sizing),
-                _ => (element.frame, text.sizing),
-            };
+            let (frame, sizing) = dragged.apply(element);
+            let sizing = sizing.unwrap_or(text.sizing);
             let Some(layout) = self
                 .layouts
                 .get_for(&self.presentation, element.id, frame, sizing)
@@ -123,24 +130,36 @@ impl EditorView {
         let mut scene = CanvasScene {
             texts,
             selection: None,
+            outlines: Vec::new(),
             highlight: Vec::new(),
             caret: None,
             marked: Vec::new(),
             preview: None,
+            marquee: None,
             guides: self.guides.clone(),
             badge: None,
             editing: self.text_edit.is_some(),
         };
-        if let Some(id) = self.selection
-            && let Some(frame) = self.shown_frame(id)
-        {
-            let overflow = self
-                .shown_layout(id)
-                .is_some_and(|layout| layout.overflow() > 0.);
-            scene.selection = Some((frame, self.text_edit.is_none(), overflow));
+        if let Some(frame) = self.selection_frame() {
+            let text = self.single_selection().filter(|id| {
+                self.presentation
+                    .element(*id)
+                    .is_some_and(|element| element.as_text().is_some())
+            });
+            let layout = text.and_then(|id| self.shown_layout(id));
+            let overflow = layout.as_ref().is_some_and(|layout| layout.overflow() > 0.);
+            let handles = self.text_edit.is_none() && !self.selection_locked();
+            scene.selection = Some((frame, handles, overflow));
+            if self.selection.len() > 1 {
+                scene.outlines = self
+                    .selection_roots()
+                    .into_iter()
+                    .filter_map(|id| self.shown_frame(id))
+                    .collect();
+            }
             if self.text_edit.is_none() {
                 // Below the text that overflows the box, so it stays readable.
-                let bottom = self.shown_layout(id).map_or(0., |layout| {
+                let bottom = layout.map_or(0., |layout| {
                     layout
                         .lines
                         .last()
@@ -155,6 +174,13 @@ impl EditorView {
                     format!("{} × {}", frame.width.round(), frame.height.round()),
                 ));
             }
+        }
+        if let Some(id) = self.hovered_layer
+            && !self.selection.contains(&id)
+            && !self.presentation.is_hidden(id)
+            && let Some(frame) = self.shown_frame(id)
+        {
+            scene.outlines.push(frame);
         }
         if let Some(edit) = self.text_edit.clone()
             && let Some(layout) = self.layout_of(edit.id)
@@ -180,8 +206,14 @@ impl EditorView {
             }
             scene.caret = Some(offset(layout.caret(edit.caret)));
         }
-        if let Some(Drag::Create { start, current }) = &self.drag {
-            scene.preview = Some(normalized(*start, *current));
+        match &self.drag {
+            Some(Drag::Create { start, current }) => {
+                scene.preview = Some(normalized(*start, *current));
+            }
+            Some(Drag::Marquee { start, current, .. }) => {
+                scene.marquee = Some(normalized(*start, *current));
+            }
+            _ => {}
         }
         scene
     }
@@ -190,23 +222,79 @@ impl EditorView {
         self.presentation.element(id).map(|element| element.frame)
     }
 
-    /// Topmost element of the current slide under a slide point.
-    fn element_at(&self, at: SlidePoint) -> Option<ElementId> {
+    /// Topmost visible, unlocked leaf of the current slide under a slide
+    /// point.
+    fn leaf_at(&self, at: SlidePoint) -> Option<ElementId> {
         let reach = self.camera.map_or(0., |camera| DRAG_START / camera.zoom);
         self.current_slide()
-            .elements
-            .iter()
+            .walk()
+            .into_iter()
             .rev()
-            .find(|element| inflate(&element.frame, reach).contains(at.x, at.y))
-            .map(|element| element.id)
+            .filter(|node| !node.hidden && !node.locked && node.element.as_group().is_none())
+            .find(|node| inflate(&node.element.frame, reach).contains(at.x, at.y))
+            .map(|node| node.element.id)
+    }
+
+    /// The element a click on `leaf` selects, like Figma: the outermost
+    /// group holding it, unless the author has entered a group by selecting
+    /// inside it (`context`); then the element at that depth.
+    pub fn selectable_for(&self, leaf: ElementId, context: &[ElementId]) -> ElementId {
+        let mut path = self.presentation.ancestors(leaf);
+        path.reverse();
+        path.push(leaf);
+        let entered: HashSet<ElementId> = context
+            .iter()
+            .flat_map(|id| self.presentation.ancestors(*id))
+            .collect();
+        let mut target = path[0];
+        for pair in path.windows(2) {
+            if entered.contains(&pair[0]) {
+                target = pair[1];
+            }
+        }
+        target
+    }
+
+    /// The child of `group` on the way down to `leaf`.
+    fn child_toward(&self, group: ElementId, leaf: ElementId) -> Option<ElementId> {
+        let mut path = self.presentation.ancestors(leaf);
+        path.reverse();
+        path.push(leaf);
+        let index = path.iter().position(|id| *id == group)?;
+        path.get(index + 1).copied()
+    }
+
+    /// Elements a selection rectangle touches: the elements of the context
+    /// holding the touched leaves, or the leaves themselves when `deep`.
+    fn marquee_hits(&self, rect: Frame, context: &[ElementId], deep: bool) -> Vec<ElementId> {
+        let leaves: Vec<ElementId> = self
+            .current_slide()
+            .walk()
+            .into_iter()
+            .filter(|node| !node.hidden && !node.locked && node.element.as_group().is_none())
+            .filter(|node| intersects(&node.element.frame, &rect))
+            .map(|node| node.element.id)
+            .collect();
+        let mut hits = Vec::new();
+        for leaf in leaves {
+            let target = if deep {
+                leaf
+            } else {
+                self.selectable_for(leaf, context)
+            };
+            if !hits.contains(&target) {
+                hits.push(target);
+            }
+        }
+        hits
     }
 
     /// The resize handle of the selection under a window position.
     fn handle_at(&self, position: Point<Pixels>) -> Option<Handle> {
-        if self.text_edit.is_some() {
+        if self.text_edit.is_some() || self.selection_locked() {
             return None;
         }
-        let frame = self.frame_of(self.selection?)?;
+        let frame = self.selection_frame()?;
         Handle::ALL.into_iter().find(|handle| {
             let (x, y) = handle.position(&frame);
             self.to_window(x, y).is_some_and(|at| {
@@ -216,20 +304,38 @@ impl EditorView {
         })
     }
 
-    /// Lines and baselines the element at `id` snaps to.
-    fn snap_targets(&mut self, id: ElementId) -> Targets {
+    /// Lines and baselines the dragged elements snap to: every other visible
+    /// element, leaving out their descendants and the groups holding them.
+    fn snap_targets(&mut self, ids: &[ElementId]) -> Targets {
         let size = self.presentation.size;
         let mut targets = Targets::new(size.width as f32, size.height as f32);
-        let others: Vec<(ElementId, Frame)> = self
+        let mut excluded: HashSet<ElementId> = HashSet::new();
+        for id in ids {
+            excluded.extend(self.presentation.ancestors(*id));
+        }
+        let others: Vec<(ElementId, Frame, bool)> = self
             .current_slide()
-            .elements
-            .iter()
-            .filter(|element| element.id != id)
-            .map(|element| (element.id, element.frame))
+            .walk()
+            .into_iter()
+            .filter(|node| !node.hidden)
+            .filter(|node| {
+                let id = node.element.id;
+                !excluded.contains(&id)
+                    && !ids.contains(&id)
+                    && !self
+                        .presentation
+                        .ancestors(id)
+                        .iter()
+                        .any(|ancestor| ids.contains(ancestor))
+            })
+            .map(|node| {
+                let text = node.element.as_text().is_some();
+                (node.element.id, node.element.frame, text)
+            })
             .collect();
-        for (other, frame) in others {
+        for (other, frame, text) in others {
             targets.add_frame(&frame);
-            if let Some(layout) = self.layout_of(other) {
+            if text && let Some(layout) = self.layout_of(other) {
                 targets.baselines.push(frame.y + layout.first_baseline());
             }
         }
@@ -272,48 +378,108 @@ impl EditorView {
         self.drag = Some(Drag::SelectText { id });
     }
 
+    /// Starts moving the selected roots, unless one is locked.
+    fn start_move(&mut self, at: SlidePoint, pressed: Option<ElementId>) {
+        if self.selection_locked() {
+            return;
+        }
+        let ids = self.selection_roots();
+        if let Some(origin) = self.selection_frame() {
+            self.drag = Some(Drag::Move {
+                ids,
+                pressed,
+                grab: at,
+                origin,
+                current: origin,
+                moved: false,
+            });
+        }
+    }
+
     fn press_with_move_tool(&mut self, at: SlidePoint, event: &MouseDownEvent) {
         if let Some(edit) = &self.text_edit {
             let id = edit.id;
-            if self.element_at(at) == Some(id) {
+            if self.leaf_at(at) == Some(id) {
                 self.press_text(id, at, event);
                 return;
             }
             self.end_text_edit();
         }
-        if let Some(handle) = self.handle_at(event.position)
-            && let Some(id) = self.selection
-            && let Some(element) = self.presentation.element(id)
-            && let Some(text) = element.as_text()
-        {
-            self.drag = Some(Drag::Resize {
-                id,
-                handle,
-                grab: at,
-                origin: element.frame,
-                sizing: text.sizing,
-                current: element.frame,
-                current_sizing: text.sizing,
+        if let Some(handle) = self.handle_at(event.position) {
+            let text = self.single_selection().and_then(|id| {
+                let element = self.presentation.element(id)?;
+                Some((id, element.frame, element.as_text()?.sizing))
             });
-            return;
-        }
-        match self.element_at(at) {
-            Some(id) if event.click_count >= 2 => {
-                self.selection = Some(id);
-                self.press_text(id, at, event);
-            }
-            Some(id) => {
-                self.selection = Some(id);
-                let origin = self.frame_of(id).expect("the hit element exists");
-                self.drag = Some(Drag::Move {
+            if let Some((id, frame, sizing)) = text {
+                self.drag = Some(Drag::Resize {
                     id,
+                    handle,
+                    grab: at,
+                    origin: frame,
+                    sizing,
+                    current: frame,
+                    current_sizing: sizing,
+                });
+            } else if let Some(origin) = self.selection_frame() {
+                self.drag = Some(Drag::ResizeGroup {
+                    ids: self.selection_roots(),
+                    handle,
                     grab: at,
                     origin,
                     current: origin,
-                    moved: false,
                 });
             }
-            None => self.selection = None,
+            return;
+        }
+        let deep = event.modifiers.secondary();
+        let shift = event.modifiers.shift;
+        let Some(leaf) = self.leaf_at(at) else {
+            let context = std::mem::take(&mut self.selection);
+            let base = if shift { context.clone() } else { Vec::new() };
+            self.selection = base.clone();
+            self.drag = Some(Drag::Marquee {
+                start: at,
+                current: at,
+                base,
+                context,
+                deep,
+            });
+            return;
+        };
+        let target = if deep {
+            leaf
+        } else {
+            self.selectable_for(leaf, &self.selection)
+        };
+        let is_group = |this: &Self, id| {
+            this.presentation
+                .element(id)
+                .is_some_and(|element| element.as_group().is_some())
+        };
+        if event.click_count >= 2 && !shift {
+            if is_group(self, target) {
+                // Enters the group: selects its child under the pointer.
+                let child = self.child_toward(target, leaf).unwrap_or(leaf);
+                self.selection = vec![child];
+                self.start_move(at, None);
+            } else {
+                self.selection = vec![target];
+                self.press_text(target, at, event);
+            }
+            return;
+        }
+        if shift {
+            if let Some(index) = self.selection.iter().position(|id| *id == target) {
+                self.selection.remove(index);
+            } else {
+                self.selection.push(target);
+                self.start_move(at, None);
+            }
+        } else if self.selection.contains(&target) {
+            self.start_move(at, Some(target));
+        } else {
+            self.selection = vec![target];
+            self.start_move(at, None);
         }
     }
 
@@ -343,12 +509,17 @@ impl EditorView {
         };
         match self.effective_tool() {
             Tool::Text => {
-                if let Some(id) = self.element_at(at) {
+                let text = self.leaf_at(at).filter(|id| {
+                    self.presentation
+                        .element(*id)
+                        .is_some_and(|element| element.as_text().is_some())
+                });
+                if let Some(id) = text {
                     self.active_tool = Tool::Move;
                     self.press_text(id, at, event);
                 } else {
                     self.end_text_edit();
-                    self.selection = None;
+                    self.selection.clear();
                     self.drag = Some(Drag::Create {
                         start: at,
                         current: at,
@@ -385,8 +556,28 @@ impl EditorView {
             Drag::Create { start, .. } => {
                 self.drag = Some(Drag::Create { start, current: at });
             }
+            Drag::Marquee {
+                start,
+                base,
+                context,
+                deep,
+                ..
+            } => {
+                let hits = self.marquee_hits(normalized(start, at), &context, deep);
+                let mut selection = base.clone();
+                selection.extend(hits.into_iter().filter(|id| !base.contains(id)));
+                self.selection = selection;
+                self.drag = Some(Drag::Marquee {
+                    start,
+                    current: at,
+                    base,
+                    context,
+                    deep,
+                });
+            }
             Drag::Move {
-                id,
+                ids,
+                pressed,
                 grab,
                 origin,
                 moved,
@@ -404,13 +595,17 @@ impl EditorView {
                 self.guides.clear();
                 if snap {
                     let _span = crate::perf::span("snap");
-                    let targets = self.snap_targets(id);
-                    let baseline = self.layout_of(id).map(|layout| layout.first_baseline());
+                    let targets = self.snap_targets(&ids);
+                    let baseline = match ids.as_slice() {
+                        [id] => self.layout_of(*id).map(|layout| layout.first_baseline()),
+                        _ => None,
+                    };
                     (frame, self.guides) = snap_move(&frame, baseline, &targets, threshold);
                 }
                 // The document changes once, when the drag ends.
                 self.drag = Some(Drag::Move {
-                    id,
+                    ids,
+                    pressed,
                     grab,
                     origin,
                     current: frame,
@@ -432,7 +627,7 @@ impl EditorView {
                 let mut frame = resize(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
                 self.guides.clear();
                 if snap && mode == ResizeMode::default() {
-                    let targets = self.snap_targets(id);
+                    let targets = self.snap_targets(&[id]);
                     (frame, self.guides) = snap_resize(&frame, handle, &targets, threshold);
                 }
                 let current_sizing = resized_sizing(sizing, handle);
@@ -445,6 +640,31 @@ impl EditorView {
                     sizing,
                     current,
                     current_sizing,
+                });
+            }
+            Drag::ResizeGroup {
+                ids,
+                handle,
+                grab,
+                origin,
+                ..
+            } => {
+                let mode = ResizeMode {
+                    keep_ratio: event.modifiers.shift,
+                    from_center: event.modifiers.alt,
+                };
+                let mut frame = resize(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
+                self.guides.clear();
+                if snap && mode == ResizeMode::default() {
+                    let targets = self.snap_targets(&ids);
+                    (frame, self.guides) = snap_resize(&frame, handle, &targets, threshold);
+                }
+                self.drag = Some(Drag::ResizeGroup {
+                    ids,
+                    handle,
+                    grab,
+                    origin,
+                    current: frame,
                 });
             }
             Drag::SelectText { id } => {
@@ -473,7 +693,7 @@ impl EditorView {
             return;
         };
         self.guides.clear();
-        let selection = self.selection;
+        let selection = self.selection.clone();
         match drag {
             Drag::Create { start, current } => {
                 let zoom = self.camera.map_or(1., |camera| camera.zoom);
@@ -495,20 +715,22 @@ impl EditorView {
                 self.active_tool = Tool::Move;
             }
             Drag::Move {
-                id,
+                ids,
                 origin,
                 current,
                 moved: true,
                 ..
             } => {
-                if current != origin {
-                    self.commit(
-                        "Move",
-                        Operation::SetFrame { id, frame: current },
-                        selection,
-                    );
+                let operations = self.transform_operations(&ids, origin, current);
+                if !operations.is_empty() {
+                    self.commit_pruning("Move", operations, selection);
                 }
             }
+            Drag::Move {
+                pressed: Some(pressed),
+                moved: false,
+                ..
+            } => self.selection = vec![pressed],
             Drag::Resize {
                 id,
                 origin,
@@ -529,10 +751,25 @@ impl EditorView {
                     self.commit("Resize", Operation::Batch(operations), selection);
                 }
             }
-            Drag::Move { .. } | Drag::SelectText { .. } => {}
+            Drag::ResizeGroup {
+                ids,
+                origin,
+                current,
+                ..
+            } => {
+                let operations = self.transform_operations(&ids, origin, current);
+                if !operations.is_empty() {
+                    self.commit_pruning("Resize", operations, selection);
+                }
+            }
+            Drag::Move { .. } | Drag::SelectText { .. } | Drag::Marquee { .. } => {}
         }
         cx.notify();
     }
+}
+
+fn intersects(a: &Frame, b: &Frame) -> bool {
+    a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
 }
 
 /// The sizing a text box takes when resized from `handle`: dragging a side
@@ -578,7 +815,9 @@ pub fn canvas(
     ) {
         (true, _, _) => CursorStyle::ClosedHand,
         (false, Tool::Hand, _) => CursorStyle::OpenHand,
-        (false, _, Some(Drag::Resize { handle, .. })) => resize_cursor(*handle),
+        (false, _, Some(Drag::Resize { handle, .. } | Drag::ResizeGroup { handle, .. })) => {
+            resize_cursor(*handle)
+        }
         (false, Tool::Text, _) | (false, _, Some(Drag::SelectText { .. })) => CursorStyle::IBeam,
         _ => CursorStyle::Arrow,
     };
