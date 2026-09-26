@@ -373,6 +373,7 @@ impl Compiler {
                 self.applied.last_slide = Some(slide);
                 Operation::AddElement {
                     slide,
+                    parent: None,
                     index,
                     element,
                 }
@@ -443,8 +444,9 @@ impl Compiler {
         element: NewElement,
         out: &mut Vec<Operation>,
     ) -> Result<Element, OpErrorKind> {
-        let ElementKind::Text(text) = &element.kind;
-        self.ensure_font(presentation, &text.style.font, out)?;
+        if let ElementKind::Text(text) = &element.kind {
+            self.ensure_font(presentation, &text.style.font, out)?;
+        }
         let id = match element.id {
             Some(IdRef::Id(id)) => ElementId(id),
             Some(IdRef::Ref(name)) => {
@@ -455,11 +457,7 @@ impl Compiler {
             None => presentation.new_element_id(),
         };
         self.applied.last_element = Some(id);
-        Ok(Element {
-            id,
-            frame: element.frame,
-            kind: element.kind,
-        })
+        Ok(Element::new(id, element.frame, element.kind))
     }
 
     fn name(&mut self, name: String, made: Made) -> Result<(), OpErrorKind> {
@@ -501,8 +499,8 @@ impl Compiler {
     fn touch(&mut self, presentation: &Presentation, id: &IdRef) -> Result<ElementId, OpErrorKind> {
         let id = self.element(id)?;
         self.applied.last_element = Some(id);
-        if let Some((slide, _)) = presentation.locate(id) {
-            self.applied.last_slide = Some(slide);
+        if let Some(location) = presentation.locate(id) {
+            self.applied.last_slide = Some(location.slide);
         }
         Ok(id)
     }
@@ -570,7 +568,7 @@ mod tests {
         let applied = apply(&mut presentation, ops, AGENT).unwrap();
         let title = ElementId(applied.refs["$title"]);
         let slide = SlideId(applied.refs["$s"]);
-        assert_eq!(presentation.locate(title).unwrap().0, slide);
+        assert_eq!(presentation.locate(title).unwrap().slide, slide);
         let text = presentation.element(title).unwrap().as_text().unwrap();
         assert_eq!(text.style.size, 80.);
         assert_eq!(applied.last_element, Some(title));

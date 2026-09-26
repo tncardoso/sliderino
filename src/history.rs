@@ -239,14 +239,15 @@ mod tests {
         let mut history = History::default();
         let id = presentation.new_element_id();
         let slide = presentation.slides[0].id;
-        let element = crate::document::Element {
+        let element = crate::document::Element::new(
             id,
-            frame: Frame::default(),
-            kind: crate::document::tests::text("Hi", TextSizing::AutoWidth),
-        };
+            Frame::default(),
+            crate::document::tests::text("Hi", TextSizing::AutoWidth),
+        );
         let inverse = presentation
             .apply(Operation::AddElement {
                 slide,
+                parent: None,
                 index: 0,
                 element,
             })

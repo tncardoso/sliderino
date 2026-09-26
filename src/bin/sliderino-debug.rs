@@ -155,7 +155,7 @@ fn scene(
         check_capture_tools()?;
     }
     let shown = select
-        .and_then(|id| presentation.locate(id).map(|(slide, _)| slide))
+        .and_then(|id| presentation.locate(id).map(|location| location.slide))
         .or(slide)
         .unwrap_or(presentation.slides[0].id);
     print_report(&presentation, shown);

@@ -384,7 +384,7 @@ fn basic_info(host: &dyn Host) -> Value {
     let slides: Vec<Value> = presentation
         .slides
         .iter()
-        .map(|slide| json!({"id": slide.id, "elements": slide.elements.len()}))
+        .map(|slide| json!({"id": slide.id, "elements": slide.walk().len()}))
         .collect();
     let fonts: Vec<_> = presentation.fonts.faces().collect();
     json!({
@@ -436,7 +436,7 @@ fn get_elements(host: &dyn Host, args: ElementsArgs) -> Result<ToolOutput, ApiEr
             ));
         };
         let mut value = serde_json::to_value(element).expect("elements serialize");
-        value["slide"] = json!(presentation.locate(id).map(|(slide, _)| slide));
+        value["slide"] = json!(presentation.locate(id).map(|location| location.slide));
         if let Some(layout) = presentation.text_layout(id) {
             value["layout"] = json!({
                 "lines": layout.lines.len(),
@@ -463,9 +463,9 @@ fn find_elements(host: &dyn Host, args: FindArgs) -> Result<ToolOutput, ApiError
         .filter(|slide| args.slide.is_none_or(|id| slide.id.0 == id))
         .flat_map(|slide| {
             slide
-                .elements
-                .iter()
-                .map(move |element| (slide.id, element))
+                .walk()
+                .into_iter()
+                .map(move |node| (slide.id, node.element))
         })
         .filter_map(|(slide, element)| {
             let text = element.as_text()?;

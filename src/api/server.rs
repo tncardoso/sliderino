@@ -307,7 +307,7 @@ impl EditorView {
     fn follow(&mut self, applied: &Applied) {
         let element = applied
             .last_element
-            .and_then(|id| Some((id, self.presentation.locate(id)?.0)));
+            .and_then(|id| Some((id, self.presentation.locate(id)?.slide)));
         let slide = element
             .map(|(_, slide)| slide)
             .or(applied.last_slide)

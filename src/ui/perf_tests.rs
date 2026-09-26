@@ -241,21 +241,22 @@ fn cold_scene() -> Presentation {
     presentation
         .apply(Operation::AddElement {
             slide,
+            parent: None,
             index: 0,
-            element: Element {
-                id: ElementId(1),
-                frame: Frame {
+            element: Element::new(
+                ElementId(1),
+                Frame {
                     x: 100.,
                     y: 100.,
                     width: 600.,
                     ..Frame::default()
                 },
-                kind: ElementKind::Text(TextElement {
+                ElementKind::Text(TextElement {
                     content: "Activation grew faster than signups".into(),
                     style: TextStyle::default(),
                     sizing: TextSizing::AutoHeight,
                 }),
-            },
+            ),
         })
         .unwrap();
     presentation

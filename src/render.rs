@@ -53,9 +53,8 @@ pub fn render_slide(
     let transform = Transform::from_scale(scale, scale);
 
     let texts: Vec<(&Element, TextLayout)> = slide
-        .elements
-        .iter()
-        .filter_map(|element| Some((element, presentation.text_layout(element.id)?)))
+        .visible_texts()
+        .filter_map(|(element, _)| Some((element, presentation.text_layout(element.id)?)))
         .collect();
 
     if overlay {
@@ -291,15 +290,14 @@ impl std::fmt::Display for TextReport {
     }
 }
 
-/// Reports every text box of a slide, in paint order.
+/// Reports every visible text box of a slide, in paint order.
 pub fn report(presentation: &Presentation, slide: SlideId) -> Vec<TextReport> {
     let Some(slide) = presentation.slide(slide) else {
         return Vec::new();
     };
     slide
-        .elements
-        .iter()
-        .filter_map(|element| {
+        .visible_texts()
+        .filter_map(|(element, _)| {
             let layout = presentation.text_layout(element.id)?;
             Some(TextReport {
                 id: element.id,

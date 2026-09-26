@@ -10,8 +10,8 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    Element, ElementId, FontData, FontFace, HAlign, LineHeight, Rgb, Slide, SlideId, TextCase,
-    TextSizing, TextStyle, VAlign,
+    Element, ElementId, FontData, FontFace, Frame, HAlign, LineHeight, Rgb, Slide, SlideId,
+    TextCase, TextSizing, TextStyle, VAlign,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,20 +33,44 @@ pub enum Operation {
         id: SlideId,
         index: usize,
     },
-    /// Inserts an element at `index` of the slide's paint order (clamped).
+    /// Inserts an element at `index` of the paint order of `parent`, a group
+    /// of the slide, or of the slide itself when `parent` is `None`
+    /// (clamped).
     AddElement {
         slide: SlideId,
+        parent: Option<ElementId>,
         index: usize,
         element: Element,
     },
     RemoveElement {
         id: ElementId,
     },
+    /// Moves an element to `index` of the children of `parent` (clamped), a
+    /// group of the same slide, or of the slide itself when `parent` is
+    /// `None`. Frames do not change.
+    MoveElement {
+        id: ElementId,
+        parent: Option<ElementId>,
+        index: usize,
+    },
     /// Moves or resizes an element. Auto-sized text keeps the dimensions its
-    /// content dictates.
+    /// content dictates. A group moves its descendants; resized, it scales
+    /// their positions and boxes but not their fonts.
     SetFrame {
         id: ElementId,
-        frame: crate::document::Frame,
+        frame: Frame,
+    },
+    /// Sets frames of descendants of group `id`, checking only the lock of
+    /// the group. It undoes the resize of a group.
+    SetGroupFrames {
+        id: ElementId,
+        frames: Vec<(ElementId, Frame)>,
+    },
+    /// Changes the name, visibility or lock of an element. The only
+    /// operation a locked element accepts.
+    SetLayer {
+        id: ElementId,
+        patch: LayerPatch,
     },
     SetTextSizing {
         id: ElementId,
@@ -75,6 +99,60 @@ pub enum Operation {
     /// Applies the operations in order, all or nothing. Its inverse is a
     /// batch of the inverses in reverse order.
     Batch(Vec<Operation>),
+}
+
+/// Layer fields of an [`Element`] to change; `None` leaves the field alone.
+/// `name: Some(None)` clears the name. In JSON, omitted fields are `None` and
+/// `"name": null` clears it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LayerPatch {
+    #[serde(
+        deserialize_with = "some_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub name: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+}
+
+/// Reads a present field, `null` included, as `Some`.
+fn some_option<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+impl LayerPatch {
+    /// The undo step name of the change.
+    pub fn label(&self) -> &'static str {
+        match (&self.name, self.hidden, self.locked) {
+            (Some(_), None, None) => "Rename",
+            (None, Some(true), None) => "Hide",
+            (None, Some(false), None) => "Show",
+            (None, None, Some(true)) => "Lock",
+            (None, None, Some(false)) => "Unlock",
+            _ => "Layer",
+        }
+    }
+
+    /// Writes the set fields into `element` and returns a patch holding the
+    /// values they replaced. An empty name clears the name.
+    pub fn apply_to(self, element: &mut Element) -> LayerPatch {
+        fn swap<T>(new: Option<T>, field: &mut T) -> Option<T> {
+            new.map(|value| std::mem::replace(field, value))
+        }
+        let name = self
+            .name
+            .map(|name| name.filter(|name| !name.trim().is_empty()));
+        LayerPatch {
+            name: swap(name, &mut element.name),
+            hidden: swap(self.hidden, &mut element.hidden),
+            locked: swap(self.locked, &mut element.locked),
+        }
+    }
 }
 
 /// Fields of a [`TextStyle`] to change; `None` leaves the field alone. In
@@ -181,6 +259,15 @@ pub enum ApplyError {
     FontInUse(FontFace),
     /// The embedded bytes are not a readable font.
     BadFont(FontFace),
+    /// The element or one of its ancestors is locked.
+    Locked(ElementId),
+    NotGroup(ElementId),
+    /// The parent is on another slide, or inside the moved element.
+    InvalidParent(ElementId),
+    /// A group frame changes only by moving or resizing: its rotation is 0.
+    GroupFrame,
+    GroupAcrossSlides,
+    EmptyGroup,
 }
 
 impl std::fmt::Display for ApplyError {
@@ -199,6 +286,16 @@ impl std::fmt::Display for ApplyError {
             ApplyError::DuplicateFont(face) => write!(f, "font {face:?} is already embedded"),
             ApplyError::FontInUse(face) => write!(f, "font {face:?} is in use"),
             ApplyError::BadFont(face) => write!(f, "font {face:?} cannot be read"),
+            ApplyError::Locked(id) => write!(f, "element {} is locked", id.0),
+            ApplyError::NotGroup(id) => write!(f, "element {} is not a group", id.0),
+            ApplyError::InvalidParent(id) => {
+                write!(f, "element {} cannot hold this element", id.0)
+            }
+            ApplyError::GroupFrame => write!(f, "a group cannot rotate"),
+            ApplyError::GroupAcrossSlides => {
+                write!(f, "grouped elements must be on the same slide")
+            }
+            ApplyError::EmptyGroup => write!(f, "a new group needs at least one element"),
         }
     }
 }

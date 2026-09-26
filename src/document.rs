@@ -59,6 +59,184 @@ impl Slide {
             elements: Vec::new(),
         }
     }
+
+    /// Every element of the slide, depth first in paint order: a group comes
+    /// before its children.
+    pub fn walk(&self) -> Vec<Node<'_>> {
+        let mut nodes = Vec::new();
+        walk_into(&self.elements, None, &mut nodes);
+        nodes
+    }
+
+    /// The text elements drawn on the slide, in paint order: hidden ones and
+    /// the children of hidden groups are left out.
+    pub fn visible_texts(&self) -> impl Iterator<Item = (&Element, &TextElement)> {
+        self.walk()
+            .into_iter()
+            .filter(|node| !node.hidden)
+            .filter_map(|node| Some((node.element, node.element.as_text()?)))
+    }
+}
+
+/// An element met by [`Slide::walk`].
+#[derive(Clone, Copy, Debug)]
+pub struct Node<'a> {
+    pub element: &'a Element,
+    pub parent: Option<ElementId>,
+    /// 0 for the elements of the slide itself.
+    pub depth: usize,
+    /// The element or one of its ancestors is hidden.
+    pub hidden: bool,
+    /// The element or one of its ancestors is locked.
+    pub locked: bool,
+}
+
+fn walk_into<'a>(elements: &'a [Element], parent: Option<&Node<'a>>, nodes: &mut Vec<Node<'a>>) {
+    for element in elements {
+        let node = Node {
+            element,
+            parent: parent.map(|parent| parent.element.id),
+            depth: parent.map_or(0, |parent| parent.depth + 1),
+            hidden: element.hidden || parent.is_some_and(|parent| parent.hidden),
+            locked: element.locked || parent.is_some_and(|parent| parent.locked),
+        };
+        nodes.push(node);
+        walk_into(element.children(), Some(&node), nodes);
+    }
+}
+
+/// Where an element sits: its slide, its parent group (`None` for the slide
+/// itself) and its index among its siblings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub slide: SlideId,
+    pub parent: Option<ElementId>,
+    pub index: usize,
+}
+
+fn find(elements: &[Element], id: ElementId) -> Option<&Element> {
+    elements.iter().find_map(|element| {
+        if element.id == id {
+            Some(element)
+        } else {
+            find(element.children(), id)
+        }
+    })
+}
+
+fn find_mut(elements: &mut [Element], id: ElementId) -> Option<&mut Element> {
+    for element in elements {
+        if element.id == id {
+            return Some(element);
+        }
+        if let Some(group) = element.as_group_mut()
+            && let Some(found) = find_mut(&mut group.children, id)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Parent and index of `id` among `elements` and their descendants.
+fn position(
+    elements: &[Element],
+    parent: Option<ElementId>,
+    id: ElementId,
+) -> Option<(Option<ElementId>, usize)> {
+    elements.iter().enumerate().find_map(|(index, element)| {
+        if element.id == id {
+            Some((parent, index))
+        } else {
+            position(element.children(), Some(element.id), id)
+        }
+    })
+}
+
+/// Calls `f` on the element and each of its descendants.
+fn each_in_tree<'a>(element: &'a Element, f: &mut impl FnMut(&'a Element)) {
+    f(element);
+    for child in element.children() {
+        each_in_tree(child, f);
+    }
+}
+
+/// Moves the frames of the element and its descendants by `dx`, `dy`.
+fn translate(element: &mut Element, dx: f32, dy: f32) {
+    element.frame.x += dx;
+    element.frame.y += dy;
+    if let Some(group) = element.as_group_mut() {
+        for child in &mut group.children {
+            translate(child, dx, dy);
+        }
+    }
+}
+
+/// Sets the frame of each group to the union of its children's frames,
+/// children first. An empty group keeps its frame.
+fn refit_groups(elements: &mut [Element]) {
+    for element in elements {
+        let Some(group) = element.as_group_mut() else {
+            continue;
+        };
+        refit_groups(&mut group.children);
+        if let Some(bounds) = union(group.children.iter().map(|child| &child.frame)) {
+            element.frame = bounds;
+        }
+    }
+}
+
+/// The smallest unrotated frame holding every frame; `None` for none.
+pub fn union<'a>(frames: impl IntoIterator<Item = &'a Frame>) -> Option<Frame> {
+    frames.into_iter().fold(None, |acc: Option<Frame>, frame| {
+        let (left, top) = (frame.x, frame.y);
+        let (right, bottom) = (frame.x + frame.width, frame.y + frame.height);
+        Some(match acc {
+            None => Frame {
+                x: left,
+                y: top,
+                width: frame.width,
+                height: frame.height,
+                rotation: 0.,
+            },
+            Some(acc) => {
+                let x = acc.x.min(left);
+                let y = acc.y.min(top);
+                Frame {
+                    x,
+                    y,
+                    width: (acc.x + acc.width).max(right) - x,
+                    height: (acc.y + acc.height).max(bottom) - y,
+                    rotation: 0.,
+                }
+            }
+        })
+    })
+}
+
+/// The frame a child takes when its group goes from `from` to `to`: its
+/// position scales with the group, and so does its size unless the text
+/// sizes its own width. Font sizes do not change.
+pub fn scale_frame(child: &Frame, from: &Frame, to: &Frame, sizing: Option<TextSizing>) -> Frame {
+    let ratio = |to: f32, from: f32| if from > 0. { to / from } else { 1. };
+    let sx = ratio(to.width, from.width);
+    let sy = ratio(to.height, from.height);
+    let keeps_size = sizing == Some(TextSizing::AutoWidth);
+    Frame {
+        x: to.x + (child.x - from.x) * sx,
+        y: to.y + (child.y - from.y) * sy,
+        width: if keeps_size {
+            child.width
+        } else {
+            child.width * sx
+        },
+        height: if keeps_size {
+            child.height
+        } else {
+            child.height * sy
+        },
+        rotation: child.rotation,
+    }
 }
 
 /// In JSON the kind is a key of the element: `{"id": 1, "frame": {..},
@@ -66,23 +244,71 @@ impl Slide {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Element {
     pub id: ElementId,
+    /// Name shown in the hierarchy; `None` shows a name made from the
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Not drawn, exported or reported. Hides the children of a group.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+    /// Rejects every operation but [`Operation::SetLayer`] on the element and
+    /// its descendants. An unlocked ancestor still moves it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
     #[serde(default)]
     pub frame: Frame,
     #[serde(flatten)]
     pub kind: ElementKind,
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 impl Element {
+    /// A visible, unlocked element without a name.
+    pub fn new(id: ElementId, frame: Frame, kind: ElementKind) -> Self {
+        Self {
+            id,
+            name: None,
+            hidden: false,
+            locked: false,
+            frame,
+            kind,
+        }
+    }
+
     pub fn as_text(&self) -> Option<&TextElement> {
         match &self.kind {
             ElementKind::Text(text) => Some(text),
+            ElementKind::Group(_) => None,
         }
     }
 
     fn as_text_mut(&mut self) -> Option<&mut TextElement> {
         match &mut self.kind {
             ElementKind::Text(text) => Some(text),
+            ElementKind::Group(_) => None,
         }
+    }
+
+    pub fn as_group(&self) -> Option<&GroupElement> {
+        match &self.kind {
+            ElementKind::Group(group) => Some(group),
+            ElementKind::Text(_) => None,
+        }
+    }
+
+    fn as_group_mut(&mut self) -> Option<&mut GroupElement> {
+        match &mut self.kind {
+            ElementKind::Group(group) => Some(group),
+            ElementKind::Text(_) => None,
+        }
+    }
+
+    /// The element's children; empty for an element that is not a group.
+    pub fn children(&self) -> &[Element] {
+        self.as_group().map_or(&[], |group| &group.children)
     }
 }
 
@@ -108,6 +334,18 @@ impl Frame {
 #[serde(rename_all = "snake_case")]
 pub enum ElementKind {
     Text(TextElement),
+    Group(GroupElement),
+}
+
+/// Elements moved and resized together. The frame of a group is the union
+/// of its children's frames, kept by [`Presentation::apply`]; its rotation
+/// is always 0. Children frames stay in slide units, like every frame.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupElement {
+    /// Children in paint order: the last one is on top.
+    #[serde(default)]
+    pub children: Vec<Element>,
 }
 
 /// A text box. The frame only places the text: it has no fill or stroke.
@@ -413,24 +651,177 @@ impl Presentation {
     pub fn element(&self, id: ElementId) -> Option<&Element> {
         self.slides
             .iter()
-            .flat_map(|slide| &slide.elements)
-            .find(|element| element.id == id)
+            .find_map(|slide| find(&slide.elements, id))
     }
 
-    /// The slide holding the element and the element's index in it.
-    pub fn locate(&self, id: ElementId) -> Option<(SlideId, usize)> {
+    /// The slide, parent and index of the element.
+    pub fn locate(&self, id: ElementId) -> Option<Location> {
         self.slides.iter().find_map(|slide| {
-            let index = slide.elements.iter().position(|element| element.id == id)?;
-            Some((slide.id, index))
+            let (parent, index) = position(&slide.elements, None, id)?;
+            Some(Location {
+                slide: slide.id,
+                parent,
+                index,
+            })
         })
+    }
+
+    /// Groups holding the element, from its parent up to the slide.
+    pub fn ancestors(&self, id: ElementId) -> Vec<ElementId> {
+        let mut ancestors = Vec::new();
+        let mut current = id;
+        while let Some(parent) = self.locate(current).and_then(|location| location.parent) {
+            ancestors.push(parent);
+            current = parent;
+        }
+        ancestors
+    }
+
+    /// The element or one of its ancestors is locked.
+    pub fn is_locked(&self, id: ElementId) -> bool {
+        self.flag_in_chain(id, |element| element.locked)
+    }
+
+    /// The element or one of its ancestors is hidden.
+    pub fn is_hidden(&self, id: ElementId) -> bool {
+        self.flag_in_chain(id, |element| element.hidden)
+    }
+
+    fn flag_in_chain(&self, id: ElementId, flag: impl Fn(&Element) -> bool) -> bool {
+        std::iter::once(id)
+            .chain(self.ancestors(id))
+            .any(|id| self.element(id).is_some_and(&flag))
+    }
+
+    fn check_unlocked(&self, id: ElementId) -> Result<(), ApplyError> {
+        if self.is_locked(id) {
+            Err(ApplyError::Locked(id))
+        } else {
+            Ok(())
+        }
     }
 
     fn element_mut(&mut self, id: ElementId) -> Result<&mut Element, ApplyError> {
         self.slides
             .iter_mut()
-            .flat_map(|slide| &mut slide.elements)
-            .find(|element| element.id == id)
+            .find_map(|slide| find_mut(&mut slide.elements, id))
             .ok_or(ApplyError::UnknownElement(id))
+    }
+
+    /// The children of `parent` on the slide at `slide_index`, or the
+    /// elements of the slide itself when `parent` is `None`.
+    fn children_mut(
+        &mut self,
+        slide_index: usize,
+        parent: Option<ElementId>,
+    ) -> Result<&mut Vec<Element>, ApplyError> {
+        let slide = &mut self.slides[slide_index];
+        match parent {
+            None => Ok(&mut slide.elements),
+            Some(parent) => {
+                let element = find_mut(&mut slide.elements, parent)
+                    .ok_or(ApplyError::UnknownElement(parent))?;
+                Ok(&mut element
+                    .as_group_mut()
+                    .ok_or(ApplyError::NotGroup(parent))?
+                    .children)
+            }
+        }
+    }
+
+    /// Checks that `parent` can receive a child on `slide`.
+    fn check_parent(&self, slide: SlideId, parent: Option<ElementId>) -> Result<(), ApplyError> {
+        let Some(parent) = parent else {
+            return Ok(());
+        };
+        let location = self
+            .locate(parent)
+            .ok_or(ApplyError::UnknownElement(parent))?;
+        if location.slide != slide {
+            return Err(ApplyError::InvalidParent(parent));
+        }
+        if self.element(parent).and_then(Element::as_group).is_none() {
+            return Err(ApplyError::NotGroup(parent));
+        }
+        self.check_unlocked(parent)
+    }
+
+    /// The operations that put the elements in a new group `group`, as one
+    /// batch. The group takes the place of the topmost element; the elements
+    /// keep their paint order. An element inside another listed element
+    /// stays where it is.
+    pub fn group_operations(
+        &self,
+        group: ElementId,
+        ids: &[ElementId],
+    ) -> Result<Vec<Operation>, ApplyError> {
+        let mut located = Vec::new();
+        for &id in ids {
+            let location = self.locate(id).ok_or(ApplyError::UnknownElement(id))?;
+            located.push((id, location));
+        }
+        let Some(&(_, first)) = located.first() else {
+            return Err(ApplyError::EmptyGroup);
+        };
+        if located
+            .iter()
+            .any(|(_, location)| location.slide != first.slide)
+        {
+            return Err(ApplyError::GroupAcrossSlides);
+        }
+        let slide = self.slide(first.slide).expect("located slide exists");
+        let order: Vec<ElementId> = slide.walk().iter().map(|node| node.element.id).collect();
+        let mut members: Vec<ElementId> = located
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| {
+                !self
+                    .ancestors(*id)
+                    .iter()
+                    .any(|ancestor| ids.contains(ancestor))
+            })
+            .collect();
+        members.sort_by_key(|id| order.iter().position(|other| other == id));
+        members.dedup();
+        let top = *members.last().expect("at least one element");
+        let place = self.locate(top).expect("located above");
+        let frames: Vec<Frame> = members
+            .iter()
+            .filter_map(|id| self.element(*id).map(|element| element.frame))
+            .collect();
+        let frame = union(&frames).unwrap_or_default();
+        let mut operations = vec![Operation::AddElement {
+            slide: place.slide,
+            parent: place.parent,
+            index: place.index + 1,
+            element: Element::new(group, frame, ElementKind::Group(GroupElement::default())),
+        }];
+        operations.extend(members.into_iter().map(|id| Operation::MoveElement {
+            id,
+            parent: Some(group),
+            index: usize::MAX,
+        }));
+        Ok(operations)
+    }
+
+    /// The operations that put the children of a group in its place and
+    /// remove it, as one batch.
+    pub fn ungroup_operations(&self, id: ElementId) -> Result<Vec<Operation>, ApplyError> {
+        let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
+        let group = element.as_group().ok_or(ApplyError::NotGroup(id))?;
+        let place = self.locate(id).expect("the element exists");
+        let mut operations: Vec<Operation> = group
+            .children
+            .iter()
+            .enumerate()
+            .map(|(offset, child)| Operation::MoveElement {
+                id: child.id,
+                parent: place.parent,
+                index: place.index + offset,
+            })
+            .collect();
+        operations.push(Operation::RemoveElement { id });
+        Ok(operations)
     }
 
     fn text_mut(&mut self, id: ElementId) -> Result<&mut TextElement, ApplyError> {
@@ -488,22 +879,35 @@ impl Presentation {
         Ok(inverse)
     }
 
+    /// Applies one operation and, unless it is a batch, fits the frames of
+    /// the groups to their children again.
     fn apply_one(&mut self, operation: Operation) -> Result<Operation, ApplyError> {
+        let batch = matches!(operation, Operation::Batch(_));
+        let inverse = self.apply_op(operation)?;
+        if !batch {
+            for slide in &mut self.slides {
+                refit_groups(&mut slide.elements);
+            }
+        }
+        Ok(inverse)
+    }
+
+    fn apply_op(&mut self, operation: Operation) -> Result<Operation, ApplyError> {
         match operation {
             Operation::AddSlide { index, slide } => {
                 if self.index_of(slide.id).is_some() {
                     return Err(ApplyError::DuplicateSlide(slide.id));
                 }
-                if let Some(element) = slide
-                    .elements
+                let nodes = slide.walk();
+                if let Some(node) = nodes
                     .iter()
-                    .find(|element| self.element(element.id).is_some())
+                    .find(|node| self.element(node.element.id).is_some())
                 {
-                    return Err(ApplyError::DuplicateElement(element.id));
+                    return Err(ApplyError::DuplicateElement(node.element.id));
                 }
                 self.next_slide_id = self.next_slide_id.max(slide.id.0 + 1);
-                for element in &slide.elements {
-                    self.next_element_id = self.next_element_id.max(element.id.0 + 1);
+                for node in &nodes {
+                    self.next_element_id = self.next_element_id.max(node.element.id.0 + 1);
                 }
                 let id = slide.id;
                 let index = index.min(self.slides.len());
@@ -527,41 +931,84 @@ impl Presentation {
             }
             Operation::AddElement {
                 slide,
+                parent,
                 index,
                 element,
             } => {
                 let slide_index = self
                     .index_of(slide)
                     .ok_or(ApplyError::UnknownSlide(slide))?;
-                if self.element(element.id).is_some() {
-                    return Err(ApplyError::DuplicateElement(element.id));
+                self.check_parent(slide, parent)?;
+                let mut tree = Vec::new();
+                each_in_tree(&element, &mut |element| tree.push(element));
+                let mut seen = std::collections::HashSet::new();
+                for node in &tree {
+                    if self.element(node.id).is_some() || !seen.insert(node.id) {
+                        return Err(ApplyError::DuplicateElement(node.id));
+                    }
+                    if let Some(text) = node.as_text() {
+                        self.check_font(&text.style.font)?;
+                    }
+                    check_frame(&node.frame)?;
                 }
-                if let Some(text) = element.as_text() {
-                    self.check_font(&text.style.font)?;
-                }
-                check_frame(&element.frame)?;
+                let ids: Vec<ElementId> = tree.iter().map(|node| node.id).collect();
                 let id = element.id;
-                self.next_element_id = self.next_element_id.max(id.0 + 1);
-                let elements = &mut self.slides[slide_index].elements;
+                for &id in &ids {
+                    self.next_element_id = self.next_element_id.max(id.0 + 1);
+                }
+                let elements = self.children_mut(slide_index, parent)?;
                 let index = index.min(elements.len());
                 elements.insert(index, element);
-                self.fit(id)?;
+                for id in ids {
+                    self.fit(id)?;
+                }
                 Ok(Operation::RemoveElement { id })
             }
             Operation::RemoveElement { id } => {
-                let (slide, index) = self.locate(id).ok_or(ApplyError::UnknownElement(id))?;
-                let slide_index = self.index_of(slide).expect("located slide exists");
-                let element = self.slides[slide_index].elements.remove(index);
+                let location = self.locate(id).ok_or(ApplyError::UnknownElement(id))?;
+                self.check_unlocked(id)?;
+                let slide_index = self.index_of(location.slide).expect("located slide exists");
+                let element = self
+                    .children_mut(slide_index, location.parent)?
+                    .remove(location.index);
                 Ok(Operation::AddElement {
-                    slide,
-                    index,
+                    slide: location.slide,
+                    parent: location.parent,
+                    index: location.index,
                     element,
+                })
+            }
+            Operation::MoveElement { id, parent, index } => {
+                let from = self.locate(id).ok_or(ApplyError::UnknownElement(id))?;
+                self.check_unlocked(id)?;
+                self.check_parent(from.slide, parent)?;
+                if let Some(parent) = parent
+                    && (parent == id || self.ancestors(parent).contains(&id))
+                {
+                    return Err(ApplyError::InvalidParent(parent));
+                }
+                let slide_index = self.index_of(from.slide).expect("located slide exists");
+                let element = self
+                    .children_mut(slide_index, from.parent)?
+                    .remove(from.index);
+                let elements = self.children_mut(slide_index, parent)?;
+                let index = index.min(elements.len());
+                elements.insert(index, element);
+                Ok(Operation::MoveElement {
+                    id,
+                    parent: from.parent,
+                    index: from.index,
                 })
             }
             Operation::SetFrame { id, frame } => {
                 check_frame(&frame)?;
+                self.check_unlocked(id)?;
                 let element = self.element_mut(id)?;
-                let old = std::mem::replace(&mut element.frame, frame);
+                let old = element.frame;
+                if element.as_group().is_some() {
+                    return self.set_group_frame(id, old, frame);
+                }
+                element.frame = frame;
                 // A frame is always fitted to its text, so a move alone
                 // cannot change the size the text needs.
                 if old.width != frame.width || old.height != frame.height {
@@ -569,7 +1016,32 @@ impl Presentation {
                 }
                 Ok(Operation::SetFrame { id, frame: old })
             }
+            Operation::SetGroupFrames { id, frames } => {
+                self.check_unlocked(id)?;
+                if self.element(id).and_then(Element::as_group).is_none() {
+                    return Err(ApplyError::NotGroup(id));
+                }
+                for (child, frame) in &frames {
+                    check_frame(frame)?;
+                    if !self.ancestors(*child).contains(&id) {
+                        return Err(ApplyError::InvalidParent(id));
+                    }
+                }
+                let mut old = Vec::with_capacity(frames.len());
+                for (child, frame) in frames {
+                    let element = self.element_mut(child)?;
+                    old.push((child, std::mem::replace(&mut element.frame, frame)));
+                    self.fit(child)?;
+                }
+                Ok(Operation::SetGroupFrames { id, frames: old })
+            }
+            Operation::SetLayer { id, patch } => {
+                let element = self.element_mut(id)?;
+                let old = patch.apply_to(element);
+                Ok(Operation::SetLayer { id, patch: old })
+            }
             Operation::SetTextSizing { id, sizing } => {
+                self.check_unlocked(id)?;
                 let frame = self
                     .element(id)
                     .ok_or(ApplyError::UnknownElement(id))?
@@ -597,12 +1069,14 @@ impl Presentation {
                     self.check_font(font)?;
                 }
                 patch.validate()?;
+                self.check_unlocked(id)?;
                 let text = self.text_mut(id)?;
                 let old = patch.apply_to(&mut text.style);
                 self.fit(id)?;
                 Ok(Operation::SetTextStyle { id, patch: old })
             }
             Operation::ReplaceText { id, range, text } => {
+                self.check_unlocked(id)?;
                 let content = &mut self.text_mut(id)?.content;
                 if range.start > range.end
                     || range.end > content.len()
@@ -632,12 +1106,13 @@ impl Presentation {
                 Ok(Operation::RemoveFont { face })
             }
             Operation::RemoveFont { face } => {
-                let in_use = self
-                    .slides
-                    .iter()
-                    .flat_map(|slide| &slide.elements)
-                    .filter_map(Element::as_text)
-                    .any(|text| text.style.font == face);
+                let in_use = self.slides.iter().any(|slide| {
+                    slide
+                        .walk()
+                        .iter()
+                        .filter_map(|node| node.element.as_text())
+                        .any(|text| text.style.font == face)
+                });
                 if in_use {
                     return Err(ApplyError::FontInUse(face));
                 }
@@ -668,6 +1143,42 @@ impl Presentation {
         }
     }
 
+    /// Moves a group, or resizes it by scaling its descendants with
+    /// [`scale_frame`]. A resize is undone by restoring each descendant's
+    /// frame: the text fitted after scaling cannot be scaled back exactly.
+    fn set_group_frame(
+        &mut self,
+        id: ElementId,
+        old: Frame,
+        frame: Frame,
+    ) -> Result<Operation, ApplyError> {
+        if frame.rotation != 0. {
+            return Err(ApplyError::GroupFrame);
+        }
+        if frame.width == old.width && frame.height == old.height {
+            let element = self.element_mut(id)?;
+            translate(element, frame.x - old.x, frame.y - old.y);
+            return Ok(Operation::SetFrame { id, frame: old });
+        }
+        let mut leaves = Vec::new();
+        let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
+        each_in_tree(element, &mut |node| {
+            if node.as_group().is_none() {
+                leaves.push((node.id, node.frame, node.as_text().map(|text| text.sizing)));
+            }
+        });
+        let mut restore = Vec::with_capacity(leaves.len());
+        for (leaf, before, sizing) in leaves {
+            self.element_mut(leaf)?.frame = scale_frame(&before, &old, &frame, sizing);
+            self.fit(leaf)?;
+            restore.push((leaf, before));
+        }
+        Ok(Operation::SetGroupFrames {
+            id,
+            frames: restore,
+        })
+    }
+
     fn check_font(&self, face: &FontFace) -> Result<(), ApplyError> {
         if self.fonts.contains(face) {
             Ok(())
@@ -686,7 +1197,7 @@ fn check_frame(frame: &Frame) -> Result<(), ApplyError> {
     }
 }
 
-pub use crate::operation::{ApplyError, Operation, TextStylePatch};
+pub use crate::operation::{ApplyError, LayerPatch, Operation, TextStylePatch};
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -730,12 +1241,9 @@ pub(crate) mod tests {
         presentation
             .apply(Operation::AddElement {
                 slide,
+                parent: None,
                 index: usize::MAX,
-                element: Element {
-                    id,
-                    frame,
-                    kind: text(content, sizing),
-                },
+                element: Element::new(id, frame, text(content, sizing)),
             })
             .unwrap();
         id
@@ -959,13 +1467,10 @@ pub(crate) mod tests {
         let mut presentation = Presentation::new();
         let id = presentation.new_element_id();
         let slide = presentation.slides[0].id;
-        let element = Element {
-            id,
-            frame: Frame::default(),
-            kind: text("Hi", TextSizing::AutoWidth),
-        };
+        let element = Element::new(id, Frame::default(), text("Hi", TextSizing::AutoWidth));
         let add = Operation::AddElement {
             slide,
+            parent: None,
             index: 0,
             element,
         };
@@ -1167,5 +1672,317 @@ pub(crate) mod tests {
 
         let typo = serde_json::from_str::<TextStyle>(r#"{"sise": 12}"#);
         assert!(typo.is_err(), "unknown style fields are rejected");
+    }
+
+    fn at(x: f32, y: f32, width: f32) -> Frame {
+        Frame {
+            x,
+            y,
+            width,
+            ..Frame::default()
+        }
+    }
+
+    /// Two wrapping texts grouped on the first slide: (group, first, second).
+    fn grouped() -> (Presentation, ElementId, ElementId, ElementId) {
+        let mut presentation = with_inter();
+        let first = add_text(
+            &mut presentation,
+            "One",
+            TextSizing::AutoHeight,
+            at(100., 100., 200.),
+        );
+        let second = add_text(
+            &mut presentation,
+            "Two",
+            TextSizing::AutoWidth,
+            at(400., 300., 0.),
+        );
+        let group = presentation.new_element_id();
+        let operations = presentation
+            .group_operations(group, &[second, first])
+            .unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        (presentation, group, first, second)
+    }
+
+    fn frame(presentation: &Presentation, id: ElementId) -> Frame {
+        presentation.element(id).unwrap().frame
+    }
+
+    #[test]
+    fn grouping_keeps_paint_order_and_fits_the_group_frame() {
+        let (presentation, group, first, second) = grouped();
+        let slide = &presentation.slides[0];
+        assert_eq!(slide.elements.len(), 1);
+        let children: Vec<_> = slide.elements[0].children().iter().map(|e| e.id).collect();
+        assert_eq!(children, [first, second]);
+        let bounds = frame(&presentation, group);
+        let second_frame = frame(&presentation, second);
+        assert_eq!((bounds.x, bounds.y), (100., 100.));
+        assert_eq!(bounds.x + bounds.width, second_frame.x + second_frame.width);
+        assert_eq!(
+            presentation.locate(second),
+            Some(Location {
+                slide: slide.id,
+                parent: Some(group),
+                index: 1
+            })
+        );
+        let nodes = slide.walk();
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[2].depth, 1);
+    }
+
+    #[test]
+    fn group_and_ungroup_undo_to_the_same_document() {
+        let mut presentation = with_inter();
+        let first = add_text(
+            &mut presentation,
+            "A",
+            TextSizing::AutoWidth,
+            at(0., 0., 0.),
+        );
+        let second = add_text(
+            &mut presentation,
+            "B",
+            TextSizing::AutoWidth,
+            at(50., 50., 0.),
+        );
+        let group = presentation.new_element_id();
+        let operations = presentation
+            .group_operations(group, &[first, second])
+            .unwrap();
+        round_trip(&mut presentation, Operation::Batch(operations.clone()));
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let operations = presentation.ungroup_operations(group).unwrap();
+        round_trip(&mut presentation, Operation::Batch(operations.clone()));
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let ids: Vec<_> = presentation.slides[0]
+            .elements
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, [first, second]);
+    }
+
+    #[test]
+    fn moving_a_group_moves_its_descendants() {
+        let (mut presentation, group, first, second) = grouped();
+        let outer = presentation.new_element_id();
+        let operations = presentation.group_operations(outer, &[group]).unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let before = frame(&presentation, second);
+        let moved = Frame {
+            x: frame(&presentation, outer).x + 10.,
+            y: frame(&presentation, outer).y - 20.,
+            ..frame(&presentation, outer)
+        };
+        round_trip(
+            &mut presentation,
+            Operation::SetFrame {
+                id: outer,
+                frame: moved,
+            },
+        );
+        presentation
+            .apply(Operation::SetFrame {
+                id: outer,
+                frame: moved,
+            })
+            .unwrap();
+        let after = frame(&presentation, second);
+        assert_eq!((after.x, after.y), (before.x + 10., before.y - 20.));
+        assert_eq!(frame(&presentation, first).x, 110.);
+        assert_eq!(frame(&presentation, group).x, 110.);
+    }
+
+    #[test]
+    fn resizing_a_group_scales_boxes_but_not_fonts() {
+        let (mut presentation, group, first, second) = grouped();
+        let old = frame(&presentation, group);
+        let size = |p: &Presentation, id| p.element(id).unwrap().as_text().unwrap().style.size;
+        let resized = Frame {
+            width: old.width * 2.,
+            height: old.height * 2.,
+            ..old
+        };
+        let second_before = frame(&presentation, second);
+        round_trip(
+            &mut presentation,
+            Operation::SetFrame {
+                id: group,
+                frame: resized,
+            },
+        );
+        presentation
+            .apply(Operation::SetFrame {
+                id: group,
+                frame: resized,
+            })
+            .unwrap();
+        // The wrapping text doubles its width; the auto-width one only moves.
+        assert_eq!(frame(&presentation, first).width, 400.);
+        let second_after = frame(&presentation, second);
+        assert_eq!(second_after.width, second_before.width);
+        assert_eq!(second_after.x, old.x + (second_before.x - old.x) * 2.);
+        assert_eq!(size(&presentation, first), TextStyle::default().size);
+        let rotated = Frame {
+            rotation: 10.,
+            ..resized
+        };
+        assert_eq!(
+            presentation.apply(Operation::SetFrame {
+                id: group,
+                frame: rotated
+            }),
+            Err(ApplyError::GroupFrame)
+        );
+    }
+
+    #[test]
+    fn an_element_cannot_move_into_itself_or_a_descendant() {
+        let (mut presentation, group, first, _) = grouped();
+        let outer = presentation.new_element_id();
+        let operations = presentation.group_operations(outer, &[group]).unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        for parent in [outer, group] {
+            assert_eq!(
+                presentation.apply(Operation::MoveElement {
+                    id: outer,
+                    parent: Some(parent),
+                    index: 0,
+                }),
+                Err(ApplyError::InvalidParent(parent))
+            );
+        }
+        assert_eq!(
+            presentation.apply(Operation::MoveElement {
+                id: group,
+                parent: Some(first),
+                index: 0,
+            }),
+            Err(ApplyError::NotGroup(first))
+        );
+        round_trip(
+            &mut presentation,
+            Operation::MoveElement {
+                id: first,
+                parent: None,
+                index: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn locked_elements_accept_only_layer_changes() {
+        let (mut presentation, group, first, _) = grouped();
+        let lock = |locked| Operation::SetLayer {
+            id: group,
+            patch: LayerPatch {
+                locked: Some(locked),
+                ..LayerPatch::default()
+            },
+        };
+        let undo_lock = presentation.apply(lock(true)).unwrap();
+        assert!(presentation.is_locked(first));
+        let edits = [
+            Operation::RemoveElement { id: first },
+            Operation::ReplaceText {
+                id: first,
+                range: 0..0,
+                text: "x".into(),
+            },
+            Operation::SetFrame {
+                id: first,
+                frame: at(0., 0., 10.),
+            },
+            Operation::MoveElement {
+                id: first,
+                parent: None,
+                index: 0,
+            },
+        ];
+        for edit in edits {
+            assert_eq!(
+                presentation.apply(edit.clone()),
+                Err(ApplyError::Locked(first)),
+                "{edit:?}"
+            );
+        }
+        let rename = Operation::SetLayer {
+            id: first,
+            patch: LayerPatch {
+                name: Some(Some("Title".into())),
+                ..LayerPatch::default()
+            },
+        };
+        round_trip(&mut presentation, rename);
+        // Undoing the lock unlocks: the history stays usable.
+        presentation.apply(undo_lock).unwrap();
+        assert!(!presentation.is_locked(first));
+    }
+
+    #[test]
+    fn an_unlocked_ancestor_moves_a_locked_child() {
+        let (mut presentation, group, first, _) = grouped();
+        presentation
+            .apply(Operation::SetLayer {
+                id: first,
+                patch: LayerPatch {
+                    locked: Some(true),
+                    ..LayerPatch::default()
+                },
+            })
+            .unwrap();
+        let old = frame(&presentation, group);
+        let resized = Frame {
+            width: old.width + 100.,
+            ..old
+        };
+        round_trip(
+            &mut presentation,
+            Operation::SetFrame {
+                id: group,
+                frame: resized,
+            },
+        );
+    }
+
+    #[test]
+    fn hidden_texts_are_not_drawn_and_fonts_in_groups_stay_in_use() {
+        let (mut presentation, group, _, _) = grouped();
+        let face = TextStyle::default().font;
+        assert_eq!(
+            presentation.apply(Operation::RemoveFont { face: face.clone() }),
+            Err(ApplyError::FontInUse(face))
+        );
+        assert_eq!(presentation.slides[0].visible_texts().count(), 2);
+        presentation
+            .apply(Operation::SetLayer {
+                id: group,
+                patch: LayerPatch {
+                    hidden: Some(true),
+                    ..LayerPatch::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(presentation.slides[0].visible_texts().count(), 0);
+    }
+
+    #[test]
+    fn groups_read_and_write_json() {
+        let (presentation, group, _, _) = grouped();
+        let element = presentation.element(group).unwrap();
+        let json = serde_json::to_value(element).unwrap();
+        assert!(json["group"]["children"].is_array());
+        assert!(
+            json.get("hidden").is_none(),
+            "default layer fields are left out"
+        );
+        let back: Element = serde_json::from_value(json).unwrap();
+        assert_eq!(&back, element);
+        let patch: LayerPatch = serde_json::from_str(r#"{"name": null}"#).unwrap();
+        assert_eq!(patch.name, Some(None));
     }
 }

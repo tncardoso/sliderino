@@ -87,10 +87,7 @@ impl EditorView {
         };
         let dragged = self.drag_preview().filter(|_| preview);
         let mut texts = Vec::new();
-        for element in &slide.elements {
-            let Some(text) = element.as_text() else {
-                continue;
-            };
+        for (element, text) in slide.visible_texts() {
             let (frame, sizing) = match dragged {
                 Some((id, frame, sizing)) if id == element.id => (frame, sizing),
                 _ => (element.frame, text.sizing),

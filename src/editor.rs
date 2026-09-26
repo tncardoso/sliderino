@@ -411,8 +411,8 @@ impl EditorView {
     ) -> Result<(), ApplyError> {
         let selection = result.inspect_err(|error| eprintln!("sliderino: undo failed: {error}"))?;
         self.selection = selection.filter(|id| self.presentation.element(*id).is_some());
-        if let Some((slide, _)) = self.selection.and_then(|id| self.presentation.locate(id)) {
-            self.current_slide = slide;
+        if let Some(location) = self.selection.and_then(|id| self.presentation.locate(id)) {
+            self.current_slide = location.slide;
         }
         self.repair_view(slide_index);
         Ok(())
@@ -430,7 +430,7 @@ impl EditorView {
         let on_slide = |this: &Self, id: ElementId| {
             this.presentation
                 .locate(id)
-                .is_some_and(|(slide, _)| slide == this.current_slide)
+                .is_some_and(|location| location.slide == this.current_slide)
         };
         if self.selection.is_some_and(|id| !on_slide(self, id)) {
             self.selection = None;
@@ -491,16 +491,17 @@ impl EditorView {
         let id = self.presentation.new_element_id();
         operations.push(Operation::AddElement {
             slide: self.current_slide,
+            parent: None,
             index: usize::MAX,
-            element: Element {
+            element: Element::new(
                 id,
                 frame,
-                kind: ElementKind::Text(TextElement {
+                ElementKind::Text(TextElement {
                     content: String::new(),
                     style,
                     sizing,
                 }),
-            },
+            ),
         });
         self.end_text_edit();
         if self.commit("Create text", Operation::Batch(operations), Some(id)) {
