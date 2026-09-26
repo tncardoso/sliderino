@@ -21,8 +21,8 @@ use gpui_kit::{
 use crate::api::server::Agents;
 use crate::camera::Camera;
 use crate::document::{
-    ApplyError, Element, ElementId, ElementKind, Frame, Operation, Presentation, Slide, SlideId,
-    TextElement, TextSizing, TextStyle,
+    ApplyError, Element, ElementId, ElementKind, EllipseElement, Frame, LineElement, Operation,
+    Presentation, RectangleElement, Slide, SlideId, TextElement, TextSizing, TextStyle,
 };
 use crate::fonts::FontRegistry;
 use crate::history::History;
@@ -84,6 +84,25 @@ pub enum Drag {
     Create {
         start: SlidePoint,
         current: SlidePoint,
+    },
+    /// Drawing a new rectangle, ellipse or line with its tool. `square`
+    /// (Shift) draws a square, a circle or a line at a multiple of 45°;
+    /// `from_center` (Alt) draws from the press point outward.
+    Draw {
+        tool: Tool,
+        start: SlidePoint,
+        current: SlidePoint,
+        square: bool,
+        from_center: bool,
+    },
+    /// Moving one end of a line; the other end stays. The document keeps
+    /// `origin` until the drag ends and the canvas shows `current`.
+    LineEnd {
+        id: ElementId,
+        /// The end of the line, not its start.
+        end: bool,
+        origin: Frame,
+        current: Frame,
     },
     /// Moving the selection. `origin` is the union of the moved frames; the
     /// document keeps it until the drag ends and the canvas shows `current`.
@@ -156,11 +175,11 @@ pub enum Preview {
         dx: f32,
         dy: f32,
     },
-    /// One text box takes another frame and sizing.
+    /// One element takes another frame and, for text, sizing.
     Resize {
         id: ElementId,
         frame: Frame,
-        sizing: TextSizing,
+        sizing: Option<TextSizing>,
     },
     /// The elements and their descendants scale from `from` to `to`.
     Scale {
@@ -189,7 +208,11 @@ impl Preview {
                 },
                 sizing,
             ),
-            Preview::Resize { id, frame, sizing } if *id == element.id => (*frame, Some(*sizing)),
+            Preview::Resize {
+                id,
+                frame,
+                sizing: resized,
+            } if *id == element.id => (*frame, resized.or(sizing)),
             Preview::Scale { ids, from, to } if ids.contains(&element.id) => (
                 crate::document::map_frame(
                     &element.frame,
@@ -464,7 +487,12 @@ impl EditorView {
             }) => Preview::Resize {
                 id: *id,
                 frame: *current,
-                sizing: *current_sizing,
+                sizing: Some(*current_sizing),
+            },
+            Some(Drag::LineEnd { id, current, .. }) => Preview::Resize {
+                id: *id,
+                frame: *current,
+                sizing: None,
             },
             Some(Drag::ResizeGroup {
                 ids,
@@ -636,6 +664,8 @@ impl EditorView {
                     | Drag::Resize { .. }
                     | Drag::ResizeGroup { .. }
                     | Drag::Create { .. }
+                    | Drag::Draw { .. }
+                    | Drag::LineEnd { .. }
                     | Drag::Marquee { .. }
                     | Drag::Rotate { .. }
             )
@@ -841,6 +871,36 @@ impl EditorView {
         if self.commit("Create text", Operation::Batch(operations), vec![id]) {
             self.begin_text_edit(id, 0, 0);
         }
+    }
+
+    /// Adds a rectangle, an ellipse or a line in the default style on top of
+    /// the current slide, selects it and goes back to the Move tool.
+    pub fn create_shape(&mut self, tool: Tool, frame: Frame) {
+        let (label, kind) = match tool {
+            Tool::Rectangle => (
+                "Create rectangle",
+                ElementKind::Rectangle(RectangleElement::default()),
+            ),
+            Tool::Ellipse => (
+                "Create ellipse",
+                ElementKind::Ellipse(EllipseElement::default()),
+            ),
+            Tool::Line => ("Create line", ElementKind::Line(LineElement::default())),
+            _ => return,
+        };
+        let id = self.presentation.new_element_id();
+        self.end_text_edit();
+        self.commit(
+            label,
+            Operation::AddElement {
+                slide: self.current_slide,
+                parent: None,
+                index: usize::MAX,
+                element: Element::new(id, frame, kind),
+            },
+            vec![id],
+        );
+        self.active_tool = Tool::Move;
     }
 
     /// Enters text editing with the given selection.
@@ -1101,7 +1161,13 @@ impl EditorView {
         if keystroke.key == "escape"
             && matches!(
                 self.drag,
-                Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Create { .. })
+                Some(
+                    Drag::Move { .. }
+                        | Drag::Resize { .. }
+                        | Drag::Create { .. }
+                        | Drag::Draw { .. }
+                        | Drag::LineEnd { .. }
+                )
             )
         {
             self.cancel_drag();

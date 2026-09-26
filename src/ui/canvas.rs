@@ -20,8 +20,8 @@ use gpui_kit::{
 
 use crate::camera::Camera;
 use crate::document::{
-    Element, ElementId, FontData, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing,
-    TextStyle, normalize_degrees,
+    Element, ElementId, ElementKind, EllipseElement, FontData, Frame, LineElement, Operation,
+    RectangleElement, SlideId, SlideSize, TextElement, TextSizing, TextStyle, normalize_degrees,
 };
 use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
@@ -105,6 +105,10 @@ pub struct CanvasScene {
     /// Stretch of text an input method is composing, underlined.
     marked: Vec<BoxRect>,
     preview: Option<Frame>,
+    /// The shape being drawn with a shape tool, in the default style.
+    ghost: Option<PaintShape>,
+    /// The ends of the selected line, drawn as round handles.
+    line_ends: Option<((f32, f32), (f32, f32))>,
     marquee: Option<Frame>,
     guides: Vec<Guide>,
     /// Size label, "216 × 148", and the area it sits under.
@@ -181,6 +185,8 @@ impl EditorView {
             caret: None,
             marked: Vec::new(),
             preview: None,
+            ghost: None,
+            line_ends: None,
             marquee: None,
             guides: self.guides.clone(),
             badge: None,
@@ -195,7 +201,11 @@ impl EditorView {
             let layout = text.and_then(|id| self.shown_layout(id));
             let overflow = layout.as_ref().is_some_and(|layout| layout.overflow() > 0.);
             let handles = self.text_edit.is_none() && !self.selection_locked();
-            scene.selection = Some((frame, handles, overflow));
+            let line = self.selected_line();
+            scene.selection = Some((frame, handles && line.is_none(), overflow));
+            if handles && line.is_some() {
+                scene.line_ends = Some(frame.line_ends());
+            }
             if self.selection.len() > 1 {
                 scene.outlines = self
                     .selection_roots()
@@ -224,6 +234,11 @@ impl EditorView {
                     }) => format!(
                         "{}°",
                         crate::ui::inspector::number(normalize_degrees(origin_rotation + delta))
+                    ),
+                    _ if line.is_some() => format!(
+                        "{} · {}°",
+                        frame.width.round(),
+                        crate::ui::inspector::number(frame.rotation)
                     ),
                     _ => format!("{} × {}", frame.width.round(), frame.height.round()),
                 };
@@ -255,6 +270,36 @@ impl EditorView {
             }
             Some(Drag::Marquee { start, current, .. }) => {
                 scene.marquee = Some(normalized(*start, *current));
+            }
+            Some(Drag::Draw {
+                tool,
+                start,
+                current,
+                square,
+                from_center,
+            }) => {
+                let frame = drawn_frame(*tool, *start, *current, *square, *from_center);
+                let kind = match tool {
+                    Tool::Rectangle => ElementKind::Rectangle(RectangleElement::default()),
+                    Tool::Ellipse => ElementKind::Ellipse(EllipseElement::default()),
+                    _ => ElementKind::Line(LineElement::default()),
+                };
+                scene.ghost = Some(PaintShape {
+                    element: Element::new(ElementId(u64::MAX), frame, kind),
+                    opacity: 1.,
+                });
+                scene.badge = Some((
+                    frame.bounds(),
+                    if *tool == Tool::Line {
+                        format!(
+                            "{} · {}°",
+                            frame.width.round(),
+                            crate::ui::inspector::number(frame.rotation)
+                        )
+                    } else {
+                        format!("{} × {}", frame.width.round(), frame.height.round())
+                    },
+                ));
             }
             _ => {}
         }
@@ -339,9 +384,43 @@ impl EditorView {
         hits
     }
 
-    /// The resize handle of the selection under a window position.
-    fn handle_at(&self, position: Point<Pixels>) -> Option<Handle> {
+    /// The selected line, when the selection is one line.
+    pub fn selected_line(&self) -> Option<ElementId> {
+        self.single_selection().filter(|id| {
+            self.presentation
+                .element(*id)
+                .is_some_and(|element| element.is_line())
+        })
+    }
+
+    /// The end of the selected line under a window position: true for its
+    /// end, false for its start.
+    fn line_end_at(&self, position: Point<Pixels>) -> Option<bool> {
         if self.text_edit.is_some() || self.selection_locked() {
+            return None;
+        }
+        let frame = self.shown_frame(self.selected_line()?)?;
+        let (start, end) = frame.line_ends();
+        let near = |(x, y): (f32, f32)| {
+            self.to_window(x, y).is_some_and(|at| {
+                f32::from(at.x - position.x).hypot(f32::from(at.y - position.y)) <= HANDLE_REACH
+            })
+        };
+        // The end wins when both are under the pointer, so that a line of
+        // no length can grow.
+        if near(end) {
+            Some(true)
+        } else if near(start) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// The resize handle of the selection under a window position. A line
+    /// has its two ends instead.
+    fn handle_at(&self, position: Point<Pixels>) -> Option<Handle> {
+        if self.text_edit.is_some() || self.selection_locked() || self.selected_line().is_some() {
             return None;
         }
         let frame = self.selection_box()?;
@@ -360,6 +439,7 @@ impl EditorView {
         if self.effective_tool() != Tool::Move
             || self.text_edit.is_some()
             || self.selection_locked()
+            || self.selected_line().is_some()
             || self.handle_at(position).is_some()
         {
             return false;
@@ -504,6 +584,18 @@ impl EditorView {
                 return;
             }
             self.end_text_edit();
+        }
+        if let Some(end) = self.line_end_at(event.position)
+            && let Some(id) = self.selected_line()
+            && let Some(origin) = self.frame_of(id)
+        {
+            self.drag = Some(Drag::LineEnd {
+                id,
+                end,
+                origin,
+                current: origin,
+            });
+            return;
         }
         if let Some(handle) = self.handle_at(event.position) {
             let text = self.single_selection().and_then(|id| {
@@ -656,6 +748,17 @@ impl EditorView {
                     });
                 }
             }
+            Tool::Rectangle | Tool::Ellipse | Tool::Line => {
+                self.end_text_edit();
+                self.selection.clear();
+                self.drag = Some(Drag::Draw {
+                    tool: self.effective_tool(),
+                    start: at,
+                    current: at,
+                    square: event.modifiers.shift,
+                    from_center: event.modifiers.alt,
+                });
+            }
             Tool::Move => self.press_with_move_tool(at, event),
             _ => return,
         }
@@ -693,6 +796,47 @@ impl EditorView {
         match drag {
             Drag::Create { start, .. } => {
                 self.drag = Some(Drag::Create { start, current: at });
+            }
+            Drag::Draw { tool, start, .. } => {
+                self.drag = Some(Drag::Draw {
+                    tool,
+                    start,
+                    current: at,
+                    square: event.modifiers.shift,
+                    from_center: event.modifiers.alt,
+                });
+            }
+            Drag::LineEnd {
+                id, end, origin, ..
+            } => {
+                let (start, finish) = origin.line_ends();
+                let fixed = if end { start } else { finish };
+                let mut moved = (at.x, at.y);
+                self.guides.clear();
+                if event.modifiers.shift {
+                    moved = snap_direction(fixed, moved, ROTATE_STEP);
+                } else if snap {
+                    let targets = self.snap_targets(&[id]);
+                    let point = Frame {
+                        x: moved.0,
+                        y: moved.1,
+                        ..Frame::default()
+                    };
+                    let (snapped, guides) = snap_move(&point, None, &targets, threshold);
+                    moved = (snapped.x, snapped.y);
+                    self.guides = guides;
+                }
+                let current = if end {
+                    Frame::from_line(fixed, moved, origin.rotation)
+                } else {
+                    Frame::from_line(moved, fixed, origin.rotation)
+                };
+                self.drag = Some(Drag::LineEnd {
+                    id,
+                    end,
+                    origin,
+                    current,
+                });
             }
             Drag::Marquee {
                 start,
@@ -874,6 +1018,36 @@ impl EditorView {
                 }
                 self.active_tool = Tool::Move;
             }
+            Drag::Draw {
+                tool,
+                start,
+                current,
+                square,
+                from_center,
+            } => {
+                let zoom = self.camera.map_or(1., |camera| camera.zoom);
+                let dragged = (current.x - start.x).hypot(current.y - start.y) * zoom >= DRAG_START;
+                let frame = if dragged {
+                    drawn_frame(tool, start, current, square, from_center)
+                } else {
+                    default_shape_frame(tool, start)
+                };
+                self.create_shape(tool, frame);
+            }
+            Drag::LineEnd {
+                id,
+                origin,
+                current,
+                ..
+            } => {
+                if current != origin {
+                    self.commit(
+                        "Move line end",
+                        Operation::SetFrame { id, frame: current },
+                        selection,
+                    );
+                }
+            }
             Drag::Move {
                 ids,
                 origin,
@@ -941,6 +1115,74 @@ fn angle_to(pivot: SlidePoint, at: SlidePoint) -> f32 {
     (at.y - pivot.y).atan2(at.x - pivot.x).to_degrees()
 }
 
+/// `to` turned around `from` to the nearest multiple of `step` degrees,
+/// at the same distance.
+fn snap_direction(from: (f32, f32), to: (f32, f32), step: f32) -> (f32, f32) {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let length = dx.hypot(dy);
+    let angle = (dy.atan2(dx).to_degrees() / step).round() * step;
+    let (x, y) = crate::document::rotate_vector(length, 0., angle);
+    (from.0 + x, from.1 + y)
+}
+
+/// Side of a shape, and length of a line, made by a click without a drag.
+const DEFAULT_SHAPE_SIZE: f32 = 100.;
+
+/// The frame of a shape drawn from `start` to `current`: `square` makes
+/// the sides equal, or turns a line to a multiple of 45°; `from_center`
+/// grows it both ways from `start`.
+pub fn drawn_frame(
+    tool: Tool,
+    start: SlidePoint,
+    current: SlidePoint,
+    square: bool,
+    from_center: bool,
+) -> Frame {
+    let (mut dx, mut dy) = (current.x - start.x, current.y - start.y);
+    if tool == Tool::Line {
+        let from = (start.x, start.y);
+        let mut to = (current.x, current.y);
+        if square {
+            to = snap_direction(from, to, 45.);
+        }
+        if from_center {
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            return Frame::from_line((from.0 - dx, from.1 - dy), to, 0.);
+        }
+        return Frame::from_line(from, to, 0.);
+    }
+    if square {
+        let side = dx.abs().max(dy.abs());
+        dx = side.copysign(dx);
+        dy = side.copysign(dy);
+    }
+    let (a, b) = if from_center {
+        (
+            point(start.x - dx, start.y - dy),
+            point(start.x + dx, start.y + dy),
+        )
+    } else {
+        (start, point(start.x + dx, start.y + dy))
+    };
+    normalized(a, b)
+}
+
+/// The shape a click makes: a square centered on the click, or a
+/// horizontal line.
+fn default_shape_frame(tool: Tool, at: SlidePoint) -> Frame {
+    let half = DEFAULT_SHAPE_SIZE / 2.;
+    if tool == Tool::Line {
+        return Frame::from_line((at.x - half, at.y), (at.x + half, at.y), 0.);
+    }
+    Frame {
+        x: at.x - half,
+        y: at.y - half,
+        width: DEFAULT_SHAPE_SIZE,
+        height: DEFAULT_SHAPE_SIZE,
+        rotation: 0.,
+    }
+}
+
 /// The angle a rotation drag gives: steps of [`ROTATE_STEP`] with `step`
 /// (Shift), else pulled to a quarter turn within [`ROTATE_SNAP`] when
 /// snapping is on.
@@ -1006,6 +1248,7 @@ pub fn canvas(
         (false, _, Some(Drag::Rotate { .. })) => CursorStyle::Crosshair,
         (false, Tool::Move, None) if editor.hover_rotate => CursorStyle::Crosshair,
         (false, Tool::Text, _) | (false, _, Some(Drag::SelectText { .. })) => CursorStyle::IBeam,
+        (false, Tool::Rectangle | Tool::Ellipse | Tool::Line, _) => CursorStyle::Crosshair,
         _ => CursorStyle::Arrow,
     };
 
@@ -1717,6 +1960,33 @@ fn content_layer(
                             BorderStyle::Solid,
                         ));
                     }
+                }
+            }
+            if let Some(ghost) = &scene.ghost {
+                paint_shape(ghost, slide.origin, zoom, window);
+                outline_turned(
+                    window,
+                    &ghost.element.frame,
+                    slide.origin,
+                    zoom,
+                    theme::accent(),
+                );
+            }
+            if let Some((start, end)) = scene.line_ends {
+                for (x, y) in [start, end] {
+                    let center = at(x, y);
+                    let half = px(HANDLE_SIZE / 2. + 1.);
+                    window.paint_quad(gpui_kit::quad(
+                        gpui_kit::Bounds::from_corners(
+                            center - point(half, half),
+                            center + point(half, half),
+                        ),
+                        half,
+                        theme::background(),
+                        px(1.),
+                        theme::accent(),
+                        BorderStyle::Solid,
+                    ));
                 }
             }
             if let Some(frame) = scene.preview {

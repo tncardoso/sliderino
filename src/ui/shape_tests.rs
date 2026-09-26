@@ -8,7 +8,7 @@ use crate::document::{
     ElementId, ElementKind, EllipseElement, Fill, Frame, LineElement, Presentation,
     RectangleElement, Stroke, TextSizing,
 };
-use crate::editor::EditorView;
+use crate::editor::{EditorView, Tool};
 use crate::ui::test_support::{click_at, drag_with, key, open_with, read, with_window};
 
 fn frame(x: f32, y: f32, width: f32, height: f32) -> Frame {
@@ -173,4 +173,161 @@ fn a_double_click_on_a_shape_keeps_it_selected(cx: &mut TestAppContext) {
     with_window(cx, handle, |window, cx| click_at(window, position, 2, cx));
     assert_eq!(selection(cx, handle), vec![id]);
     assert!(read(cx, handle, |editor| editor.text_edit.is_none()));
+}
+
+fn pick(cx: &mut TestAppContext, handle: WindowHandle<EditorView>, tool: Tool) {
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| editor.active_tool = tool);
+}
+
+fn drag_on_slide(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<EditorView>,
+    from: (f32, f32),
+    to: (f32, f32),
+    modifiers: Modifiers,
+) {
+    let (from, to) = (at(cx, handle, from.0, from.1), at(cx, handle, to.0, to.1));
+    with_window(cx, handle, |window, cx| {
+        drag_with(window, MouseButton::Left, from, to, modifiers, cx)
+    });
+}
+
+fn only_element(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<EditorView>,
+) -> crate::document::Element {
+    read(cx, handle, |editor| {
+        let elements = &editor.current_slide().elements;
+        assert_eq!(elements.len(), 1);
+        elements[0].clone()
+    })
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 2.
+}
+
+#[gpui_kit::test]
+fn dragging_with_the_rectangle_tool_draws_one_undoable_rectangle(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Presentation::new());
+    pick(cx, handle, Tool::Rectangle);
+    drag_on_slide(cx, handle, (100., 100.), (400., 300.), Modifiers::default());
+    let element = only_element(cx, handle);
+    assert!(matches!(element.kind, ElementKind::Rectangle(_)));
+    let frame = element.frame;
+    assert!(near(frame.x, 100.) && near(frame.width, 300.) && near(frame.height, 200.));
+    assert_eq!(selection(cx, handle), vec![element.id]);
+    assert_eq!(read(cx, handle, |editor| editor.active_tool), Tool::Move);
+    with_window(cx, handle, |window, cx| key(window, "ctrl-z", true, cx));
+    assert!(read(cx, handle, |editor| editor
+        .current_slide()
+        .elements
+        .is_empty()));
+}
+
+#[gpui_kit::test]
+fn shift_draws_a_circle_and_alt_draws_from_the_center(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Presentation::new());
+    pick(cx, handle, Tool::Ellipse);
+    let modifiers = Modifiers {
+        shift: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    drag_on_slide(cx, handle, (500., 400.), (600., 450.), modifiers);
+    let frame = only_element(cx, handle).frame;
+    assert!(
+        near(frame.width, 200.) && near(frame.height, 200.),
+        "{frame:?}"
+    );
+    assert!(near(frame.center().0, 500.) && near(frame.center().1, 400.));
+}
+
+#[gpui_kit::test]
+fn a_click_with_a_shape_tool_makes_a_default_shape(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Presentation::new());
+    pick(cx, handle, Tool::Line);
+    click(cx, handle, 500., 400.);
+    let element = only_element(cx, handle);
+    assert!(element.is_line());
+    let (start, end) = element.frame.line_ends();
+    assert!(near(start.0, 450.) && near(end.0, 550.) && near(end.1, 400.));
+}
+
+#[gpui_kit::test]
+fn shift_turns_a_drawn_line_to_45_degrees(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Presentation::new());
+    pick(cx, handle, Tool::Line);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    drag_on_slide(cx, handle, (100., 100.), (400., 380.), shift);
+    let frame = only_element(cx, handle).frame;
+    assert_eq!(frame.rotation, 45.);
+}
+
+fn a_line(presentation: &mut Presentation) -> ElementId {
+    add_shape(
+        presentation,
+        Frame::from_line((200., 200.), (600., 200.), 0.),
+        ElementKind::Line(LineElement::default()),
+    )
+}
+
+#[gpui_kit::test]
+fn dragging_an_end_moves_it_and_keeps_the_other(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = a_line(&mut presentation);
+    let handle = open_with(cx, presentation);
+    click(cx, handle, 400., 200.);
+    assert_eq!(selection(cx, handle), vec![id]);
+    let snap_off = Modifiers::default();
+    drag_on_slide(cx, handle, (600., 200.), (613., 517.), snap_off);
+    let (start, end) = element_frame(cx, handle, id).line_ends();
+    assert!(near(start.0, 200.) && near(start.1, 200.), "{start:?}");
+    assert!(near(end.0, 613.) && near(end.1, 517.), "{end:?}");
+    with_window(cx, handle, |window, cx| key(window, "ctrl-z", true, cx));
+    assert_eq!(
+        element_frame(cx, handle, id),
+        Frame::from_line((200., 200.), (600., 200.), 0.)
+    );
+}
+
+#[gpui_kit::test]
+fn a_locked_line_has_no_end_handles(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = a_line(&mut presentation);
+    presentation
+        .apply(crate::document::Operation::SetLayer {
+            id,
+            patch: crate::document::LayerPatch {
+                locked: Some(true),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    let handle = open_with(cx, presentation);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| editor.selection = vec![id]);
+    drag_on_slide(cx, handle, (600., 200.), (600., 500.), Modifiers::default());
+    assert_eq!(
+        element_frame(cx, handle, id),
+        Frame::from_line((200., 200.), (600., 200.), 0.)
+    );
+}
+
+#[gpui_kit::test]
+fn shift_keeps_a_circle_round_while_it_resizes(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let handle = open_with(cx, presentation);
+    click(cx, handle, 200., 200.);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    drag_on_slide(cx, handle, (300., 300.), (450., 350.), shift);
+    let resized = element_frame(cx, handle, id);
+    assert!(near(resized.width, resized.height), "{resized:?}");
+    assert!(resized.width > 250., "{resized:?}");
 }

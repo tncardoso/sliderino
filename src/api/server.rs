@@ -299,9 +299,13 @@ impl EditorView {
                 element.frame != *origin
                     || element.as_text().map(|text| text.sizing) != Some(*sizing)
             }),
-            Some(Drag::Create { .. } | Drag::Marquee { .. }) => {
+            Some(Drag::Create { .. } | Drag::Draw { .. } | Drag::Marquee { .. }) => {
                 self.presentation.slide(self.current_slide).is_none()
             }
+            Some(Drag::LineEnd { id, origin, .. }) => self
+                .presentation
+                .element(*id)
+                .is_none_or(|element| element.frame != *origin),
             Some(Drag::SelectText { id }) => self.presentation.element(*id).is_none(),
             None => false,
         };
