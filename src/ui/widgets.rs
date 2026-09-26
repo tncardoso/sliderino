@@ -5,8 +5,8 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    BoxShadow, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, Stateful, Styled, TestSupportExt as _, div, hsla, point, px,
+    BoxShadow, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement, SharedString, Stateful, Styled, TestSupportExt as _, div, hsla, point, px,
 };
 
 use crate::theme;
@@ -92,8 +92,40 @@ pub fn segmented() -> Div {
 /// One button of a [`segmented`] row; the selected one sits on a white chip.
 /// Disabled buttons are faded and ignore clicks.
 pub fn segment(
-    id: &'static str,
+    id: impl Into<ElementId>,
     icon: IconName,
+    selected: bool,
+    disabled: bool,
+) -> gpui_kit::base::ObservedElement<Stateful<Div>> {
+    segment_shell(id, selected, disabled).child(Icon::new(icon).size(px(14.)).text_color(
+        if disabled {
+            theme::text_faint()
+        } else if selected {
+            theme::ink()
+        } else {
+            theme::text_muted()
+        },
+    ))
+}
+
+/// A [`segment`] that shows a short label instead of an icon.
+pub fn text_segment(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    selected: bool,
+) -> gpui_kit::base::ObservedElement<Stateful<Div>> {
+    segment_shell(id, selected, false)
+        .text_size(px(11.))
+        .text_color(if selected {
+            theme::ink()
+        } else {
+            theme::text_muted()
+        })
+        .child(label)
+}
+
+fn segment_shell(
+    id: impl Into<ElementId>,
     selected: bool,
     disabled: bool,
 ) -> gpui_kit::base::ObservedElement<Stateful<Div>> {
@@ -116,11 +148,4 @@ pub fn segment(
             }])
         })
         .when(!disabled, |this| this.cursor_pointer())
-        .child(Icon::new(icon).size(px(14.)).text_color(if disabled {
-            theme::text_faint()
-        } else if selected {
-            theme::ink()
-        } else {
-            theme::text_muted()
-        }))
 }

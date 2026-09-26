@@ -1,14 +1,18 @@
-//! End-to-end tests of shapes on the canvas: hit testing, paint order,
-//! marquee, moving, drawing with the shape tools and editing line ends.
+//! End-to-end tests of shapes on the canvas and in the inspector: hit
+//! testing, paint order, marquee, moving, drawing with the shape tools,
+//! editing line ends and the style fields.
 
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{Modifiers, MouseButton, Pixels, Point, TestAppContext, WindowHandle};
 
 use crate::document::tests::{add_shape, add_text, with_inter};
 use crate::document::{
-    ElementId, ElementKind, EllipseElement, Fill, Frame, LineElement, Presentation,
-    RectangleElement, Stroke, TextSizing,
+    Arrowhead, ElementId, ElementKind, EllipseElement, Fill, Frame, HeadKind, HeadSize,
+    LineElement, Presentation, RectangleElement, Stroke, TextSizing,
 };
 use crate::editor::{EditorView, Tool};
+use crate::ui::inspector::Field;
+use crate::ui::shape_inspector::{FillType, ShapeField};
 use crate::ui::test_support::{click_at, drag_with, key, open_with, read, with_window};
 
 fn frame(x: f32, y: f32, width: f32, height: f32) -> Frame {
@@ -330,4 +334,203 @@ fn shift_keeps_a_circle_round_while_it_resizes(cx: &mut TestAppContext) {
     let resized = element_frame(cx, handle, id);
     assert!(near(resized.width, resized.height), "{resized:?}");
     assert!(resized.width > 250., "{resized:?}");
+}
+
+fn type_shape_field(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<EditorView>,
+    field: ShapeField,
+    text: &str,
+) {
+    handle
+        .update(cx, |editor, window, cx| {
+            let input = editor.shape_inspector.input(field).clone();
+            input.update(cx, |state, cx| {
+                state.set_value(text.to_string(), window, cx)
+            });
+            editor.commit_shape_field(field, window, cx);
+        })
+        .unwrap();
+    with_window(cx, handle, |window, cx| window.render_frame(cx));
+}
+
+fn shape_field(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<EditorView>,
+    field: ShapeField,
+) -> String {
+    handle
+        .update(cx, |editor, _, cx| {
+            editor
+                .shape_inspector
+                .input(field)
+                .read(cx)
+                .value()
+                .to_string()
+        })
+        .unwrap()
+}
+
+fn history(cx: &mut TestAppContext, handle: WindowHandle<EditorView>) -> Vec<String> {
+    read(cx, handle, |editor| {
+        editor.history.done().map(String::from).collect()
+    })
+}
+
+fn kind(cx: &mut TestAppContext, handle: WindowHandle<EditorView>, id: ElementId) -> ElementKind {
+    read(cx, handle, |editor| {
+        editor.presentation.element(id).unwrap().kind.clone()
+    })
+}
+
+fn stroked() -> ElementKind {
+    ElementKind::Rectangle(RectangleElement {
+        stroke: Some(Stroke::default()),
+        ..RectangleElement::default()
+    })
+}
+
+fn select(cx: &mut TestAppContext, handle: WindowHandle<EditorView>, ids: Vec<ElementId>) {
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| editor.selection = ids);
+}
+
+#[gpui_kit::test]
+fn the_stroke_width_field_is_one_undo_step(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), stroked());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    assert_eq!(shape_field(cx, handle, ShapeField::StrokeWidth), "4");
+    type_shape_field(cx, handle, ShapeField::StrokeWidth, "12");
+    assert_eq!(kind(cx, handle, id).stroke().unwrap().width, 12.);
+    assert_eq!(history(cx, handle), vec!["Stroke width"]);
+    with_window(cx, handle, |window, cx| key(window, "ctrl-z", true, cx));
+    assert_eq!(kind(cx, handle, id).stroke().unwrap().width, 4.);
+}
+
+#[gpui_kit::test]
+fn removing_the_fill_undoes_back_to_the_solid_fill(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_fill_type(FillType::None)
+    });
+    assert_eq!(kind(cx, handle, id).fill(), Some(&Fill::None));
+    with_window(cx, handle, |window, cx| key(window, "ctrl-z", true, cx));
+    assert_eq!(kind(cx, handle, id).fill(), Some(&Fill::default()));
+}
+
+#[gpui_kit::test]
+fn gradients_keep_two_to_ten_stops(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    let stops = |cx: &mut TestAppContext| {
+        kind(cx, handle, id)
+            .fill()
+            .unwrap()
+            .stops()
+            .map_or(0, <[_]>::len)
+    };
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_fill_type(FillType::Radial);
+        editor.remove_gradient_stop(0);
+    });
+    assert_eq!(stops(cx), 2);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        for _ in 0..12 {
+            editor.add_gradient_stop();
+        }
+    });
+    assert_eq!(stops(cx), crate::style::MAX_STOPS);
+    let fill = kind(cx, handle, id).fill().unwrap().clone();
+    assert!(fill.validate().is_ok());
+}
+
+#[gpui_kit::test]
+fn line_ends_change_kind_size_and_side(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = a_line(&mut presentation);
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_arrowhead(false, Some(HeadKind::Triangle), None);
+        editor.set_arrowhead(false, None, Some(HeadSize::Large));
+        editor.swap_arrowheads();
+    });
+    let ElementKind::Line(line) = kind(cx, handle, id) else {
+        panic!("a line");
+    };
+    assert_eq!(
+        line.start,
+        Arrowhead::new(HeadKind::Triangle, HeadSize::Large)
+    );
+    assert!(line.end.is_none());
+    assert_eq!(
+        history(cx, handle),
+        vec!["Line end", "Line end", "Swap line ends"]
+    );
+}
+
+#[gpui_kit::test]
+fn several_shapes_show_mixed_values_and_change_together(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let thin = add_shape(&mut presentation, frame(100., 100., 200., 200.), stroked());
+    let line = a_line(&mut presentation);
+    crate::document::tests::set_style(
+        &mut presentation,
+        thin,
+        crate::document::ShapeStylePatch {
+            stroke: Some(Some(Stroke {
+                width: 1.,
+                ..Stroke::default()
+            })),
+            ..Default::default()
+        },
+    );
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![thin, line]);
+    assert_eq!(shape_field(cx, handle, ShapeField::StrokeWidth), "Mixed");
+    type_shape_field(cx, handle, ShapeField::StrokeWidth, "7");
+    assert_eq!(kind(cx, handle, thin).stroke().unwrap().width, 7.);
+    assert_eq!(kind(cx, handle, line).stroke().unwrap().width, 7.);
+    assert_eq!(history(cx, handle), vec!["Stroke width"]);
+    assert_eq!(shape_field(cx, handle, ShapeField::StrokeWidth), "7");
+    // Only the rectangle has a fill: the fill section is left out, and a
+    // change of fill skips the line.
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_dash(crate::document::Dash::Dotted)
+    });
+    assert_eq!(
+        kind(cx, handle, line).stroke().unwrap().dash,
+        crate::document::Dash::Dotted
+    );
+}
+
+#[gpui_kit::test]
+fn the_opacity_field_sets_the_opacity_of_each_element(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let a = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let b = add_shape(&mut presentation, frame(400., 100., 200., 200.), stroked());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![a, b]);
+    handle
+        .update(cx, |editor, window, cx| {
+            let input = editor.inspector.input(Field::Opacity).clone();
+            input.update(cx, |state, cx| {
+                state.set_value("40".to_string(), window, cx)
+            });
+            editor.commit_field(Field::Opacity, window, cx);
+        })
+        .unwrap();
+    let opacity = |cx: &mut TestAppContext, id| {
+        read(cx, handle, |editor| {
+            editor.presentation.element(id).unwrap().opacity
+        })
+    };
+    assert_eq!((opacity(cx, a), opacity(cx, b)), (0.4, 0.4));
+    assert_eq!(history(cx, handle), vec!["Opacity"]);
 }

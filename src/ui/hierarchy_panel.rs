@@ -18,7 +18,7 @@ use gpui_kit::{
 use crate::document::{Element, ElementId, LayerPatch, Operation, Presentation};
 use crate::editor::EditorView;
 use crate::theme;
-use crate::ui::properties_panel::element_name;
+use crate::ui::properties_panel::{element_icon, element_name};
 
 /// Indent of one level of the tree.
 const INDENT: f32 = 16.;
@@ -74,6 +74,7 @@ struct Row {
     id: ElementId,
     depth: usize,
     name: String,
+    icon: IconName,
     group: bool,
     expanded: bool,
     /// The layer's own flags, shown by the eye and the lock.
@@ -107,6 +108,7 @@ impl EditorView {
                     id: element.id,
                     depth,
                     name: element_name(element),
+                    icon: element_icon(element),
                     group,
                     expanded,
                     hidden: element.hidden,
@@ -606,17 +608,13 @@ fn layer_row(
         .text_color(theme::text())
         .child(chevron)
         .child(
-            Icon::new(if row.group {
-                IconName::Group
-            } else {
-                IconName::Type
-            })
-            .size(px(13.))
-            .text_color(if row.selected {
-                theme::accent()
-            } else {
-                theme::text_muted()
-            }),
+            Icon::new(row.icon)
+                .size(px(13.))
+                .text_color(if row.selected {
+                    theme::accent()
+                } else {
+                    theme::text_muted()
+                }),
         )
         .child(name)
         .child(eye)

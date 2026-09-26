@@ -33,6 +33,7 @@ use crate::theme;
 use crate::ui::canvas::canvas;
 use crate::ui::inspector::Inspector;
 use crate::ui::properties_panel::properties_panel;
+use crate::ui::shape_inspector::ShapeInspector;
 use crate::ui::slides_panel::slides_panel;
 use crate::ui::top_bar::top_bar;
 
@@ -358,6 +359,7 @@ pub struct EditorView {
     pub layouts: LayoutCache,
     pub fonts: FontRegistry,
     pub inspector: Inspector,
+    pub shape_inspector: ShapeInspector,
     pub shortcuts: Shortcuts,
     /// None until the canvas is first measured; then it is fitted.
     pub camera: Option<Camera>,
@@ -425,6 +427,7 @@ impl EditorView {
             layouts: LayoutCache::default(),
             fonts: FontRegistry::default(),
             inspector: Inspector::new(window, cx),
+            shape_inspector: ShapeInspector::new(window, cx),
             shortcuts: Shortcuts::default(),
             camera: None,
             viewport: Bounds::default(),
@@ -1426,6 +1429,7 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = crate::perf::span("render");
         self.sync_inspector(window, cx);
+        self.sync_shape_inspector(window, cx);
         let scene = self.canvas_scene(cx);
         let problems = crate::ui::properties_panel::diagnostics(self);
         v_flex()

@@ -2620,6 +2620,13 @@ pub(crate) mod tests {
         id
     }
 
+    /// Changes the style of a shape.
+    pub fn set_style(presentation: &mut Presentation, id: ElementId, patch: ShapeStylePatch) {
+        presentation
+            .apply(Operation::SetShapeStyle { id, patch })
+            .unwrap();
+    }
+
     fn line() -> ElementKind {
         ElementKind::Line(LineElement::default())
     }

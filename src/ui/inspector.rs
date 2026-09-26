@@ -94,7 +94,7 @@ pub fn number(value: f32) -> String {
 
 /// Parses what the author typed: a number, optionally followed by "%" or
 /// "°".
-fn parse(text: &str) -> Option<f32> {
+pub fn parse(text: &str) -> Option<f32> {
     let value: f32 = text
         .trim()
         .trim_end_matches(['%', '°'])
@@ -314,12 +314,14 @@ impl EditorView {
             if let Some(frame) = self.selection_box() {
                 let style = TextStyle::default();
                 let rotation = self.group_rotation_label();
+                let opacity = self.group_opacity_label();
                 for (field, input) in &self.inspector.fields {
-                    if !field.is_position() {
+                    if !field.is_position() && *field != Field::Opacity {
                         continue;
                     }
                     let shown = match field {
                         Field::Rotation => rotation.clone(),
+                        Field::Opacity => opacity.clone(),
                         _ => field.show(&frame, &style, 1.),
                     };
                     let state = input.read(cx);
@@ -453,11 +455,53 @@ impl EditorView {
         }
     }
 
+    /// What the opacity field shows for a group or several elements: the
+    /// opacity they share, or "Mixed".
+    fn group_opacity_label(&self) -> String {
+        let opacities = self
+            .selection_roots()
+            .into_iter()
+            .map(|id| self.opacity_of(id));
+        match crate::ui::shape_inspector::common(opacities) {
+            Some(opacity) => format!("{}%", number(opacity * 100.)),
+            None if self.selection.is_empty() => String::new(),
+            None => "Mixed".into(),
+        }
+    }
+
     /// Commits a position field typed for a group or several elements: they
     /// move, scale to the typed size, or each turn to the typed angle around
-    /// its own center.
+    /// its own center. The opacity field sets the opacity of each.
     fn commit_group_field(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
         let ids = self.inspector.shown_group.clone();
+        if field == Field::Opacity {
+            let input = self.inspector.input(field).clone();
+            let typed = input.read(cx).value().to_string();
+            if typed != self.group_opacity_label()
+                && let Some(value) = parse(&typed).filter(|value| (0. ..=100.).contains(value))
+            {
+                let opacity = value / 100.;
+                let operations: Vec<Operation> = ids
+                    .iter()
+                    .filter(|id| self.opacity_of(**id) != opacity)
+                    .map(|id| Operation::SetLayer {
+                        id: *id,
+                        patch: LayerPatch {
+                            opacity: Some(opacity),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                if !operations.is_empty() {
+                    let selection = self.selection.clone();
+                    self.commit_pruning("Opacity", operations, selection);
+                }
+            }
+            let shown = self.group_opacity_label();
+            input.update(cx, |state, cx| state.set_value(shown, window, cx));
+            cx.notify();
+            return;
+        }
         let frames: Vec<Frame> = ids.iter().filter_map(|id| self.frame_of(*id)).collect();
         // The box the fields show: the frame of one element, the union of
         // several.

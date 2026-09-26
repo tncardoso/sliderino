@@ -54,6 +54,13 @@ icon_assets!(
         LockOpen,
         ChevronRight,
         ChevronDown,
+        ChevronLeft,
+        Minus,
+        Triangle,
+        Diamond,
+        X,
+        Blend,
+        SquareRoundCorner,
     ]
 );
 

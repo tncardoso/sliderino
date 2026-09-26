@@ -12,13 +12,17 @@ use gpui_kit::{
     ParentElement, Stateful, StatefulInteractiveElement as _, Styled, TestSupportExt as _, div, px,
 };
 
-use crate::document::{Element, HAlign, TextCase, TextSizing, TextStyle, TextStylePatch, VAlign};
+use crate::document::{
+    Dash, Element, ElementKind, Fill, HAlign, HeadKind, HeadSize, TextCase, TextSizing, TextStyle,
+    TextStylePatch, VAlign,
+};
 use crate::editor::EditorView;
 use crate::text_layout::TextLayout;
 use crate::theme;
 use crate::ui::inspector::{Field, number};
+use crate::ui::shape_inspector::{FillType, ShapeField, common};
 use crate::ui::widgets::{
-    field_icon, field_letter, input_field, section, section_label, segment, segmented,
+    field_icon, field_letter, input_field, section, section_label, segment, segmented, text_segment,
 };
 
 /// The diagnostics the Design tab shows: those of the selected text, or of
@@ -104,10 +108,14 @@ fn design_tab(
         let element = editor.presentation.element(id)?;
         element.as_text().map(|_| element)
     });
-    let content = match selected {
-        Some(element) => text_design(editor, element, problems, cx).into_any_element(),
-        None if !editor.selection.is_empty() => selection_design(editor, cx).into_any_element(),
-        None => slide_design(editor, problems).into_any_element(),
+    let shapes = editor.selected_shapes();
+    let content = match (selected, shapes) {
+        (Some(element), _) => text_design(editor, element, problems, cx).into_any_element(),
+        (None, Some(ids)) => shape_design(editor, &ids, cx).into_any_element(),
+        (None, None) if !editor.selection.is_empty() => {
+            selection_design(editor, cx).into_any_element()
+        }
+        (None, None) => slide_design(editor, problems).into_any_element(),
     };
     if !editor.selection_locked() {
         return content;
@@ -208,17 +216,42 @@ fn selection_design(editor: &EditorView, cx: &mut Context<EditorView>) -> impl I
     };
     v_flex()
         .child(header(icon, title, subtitle))
-        .child(position_section(editor, cx))
+        .child(position_section(editor, false, cx))
 }
 
-/// A short name for an element: its name, the start of its text, or
-/// "Group" and its id.
+/// The kind of an element as the panels name it. A rectangle filled with
+/// an image is an image.
+pub fn kind_name(element: &Element) -> &'static str {
+    match &element.kind {
+        ElementKind::Text(_) => "Text",
+        ElementKind::Group(_) => "Group",
+        ElementKind::Rectangle(shape) if matches!(shape.fill, Fill::Image(_)) => "Image",
+        ElementKind::Rectangle(_) => "Rectangle",
+        ElementKind::Ellipse(_) => "Ellipse",
+        ElementKind::Line(_) => "Line",
+    }
+}
+
+/// The icon of an element's kind in the hierarchy and the inspector.
+pub fn element_icon(element: &Element) -> IconName {
+    match kind_name(element) {
+        "Text" => IconName::Type,
+        "Group" => IconName::Group,
+        "Image" => IconName::Image,
+        "Rectangle" => IconName::Square,
+        "Ellipse" => IconName::Circle,
+        _ => IconName::Slash,
+    }
+}
+
+/// A short name for an element: its name, the start of its text, or its
+/// kind and its id, such as "Group 4".
 pub fn element_name(element: &Element) -> String {
     if let Some(name) = &element.name {
         return name.clone();
     }
     let Some(text) = element.as_text() else {
-        return format!("Group {}", element.id.0);
+        return format!("{} {}", kind_name(element), element.id.0);
     };
     let first = text.content.lines().next().unwrap_or("").trim();
     if first.is_empty() {
@@ -253,7 +286,7 @@ fn text_design(
             element_name(element),
             sizing_name(text.sizing).into(),
         ))
-        .child(position_section(editor, cx))
+        .child(position_section(editor, false, cx))
         .child(layout_section(text.sizing, cx))
         .child(text_section(editor, style, text.sizing, cx))
         .child(fill_section(editor, style))
@@ -264,7 +297,13 @@ fn field_row(left: impl IntoElement, right: impl IntoElement) -> impl IntoElemen
     h_flex().gap(px(8.)).child(left).child(right)
 }
 
-fn position_section(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+/// Position, size, rotation and opacity. A line shows its length (L) and
+/// no height.
+fn position_section(
+    editor: &EditorView,
+    line: bool,
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
     let inputs = &editor.inspector;
     // Horizontal left, center, right, then vertical top, middle, bottom.
     let aligns: [(&'static str, IconName, Option<f32>, Option<f32>); 6] = [
@@ -299,16 +338,25 @@ fn position_section(editor: &EditorView, cx: &mut Context<EditorView>) -> impl I
             input_field(field_letter("X"), inputs.input(Field::X)),
             input_field(field_letter("Y"), inputs.input(Field::Y)),
         ))
-        .child(field_row(
-            input_field(field_letter("W"), inputs.input(Field::Width)),
-            input_field(field_letter("H"), inputs.input(Field::Height)),
-        ))
+        .child(if line {
+            field_row(
+                input_field(field_letter("L"), inputs.input(Field::Width)),
+                div().flex_1(),
+            )
+            .into_any_element()
+        } else {
+            field_row(
+                input_field(field_letter("W"), inputs.input(Field::Width)),
+                input_field(field_letter("H"), inputs.input(Field::Height)),
+            )
+            .into_any_element()
+        })
         .child(field_row(
             input_field(
                 field_icon(IconName::RotateCw),
                 inputs.input(Field::Rotation),
             ),
-            div().flex_1(),
+            input_field(field_icon(IconName::Blend), inputs.input(Field::Opacity)),
         ))
 }
 
@@ -570,15 +618,411 @@ fn fill_section(editor: &EditorView, style: &TextStyle) -> impl IntoElement {
                     .flex_1()
                     .text_color(theme::text())
                     .child(style.color.hex()),
-            )
-            .child(
-                div()
-                    .w(px(64.))
-                    .flex_shrink_0()
-                    .flex()
-                    .child(input_field(div(), editor.inspector.input(Field::Opacity))),
             ),
     )
+}
+
+/// Design tab for one shape or several: position, then the style
+/// sections every selected shape has.
+fn shape_design(
+    editor: &EditorView,
+    ids: &[crate::document::ElementId],
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let elements: Vec<&Element> = ids
+        .iter()
+        .filter_map(|id| editor.presentation.element(*id))
+        .collect();
+    let kinds: Vec<&ElementKind> = elements.iter().map(|element| &element.kind).collect();
+    let lines = kinds
+        .iter()
+        .all(|kind| matches!(kind, ElementKind::Line(_)));
+    let rectangles = kinds
+        .iter()
+        .all(|kind| matches!(kind, ElementKind::Rectangle(_)));
+    let filled = kinds.iter().all(|kind| kind.fill().is_some());
+    let (icon, title, subtitle) = match elements.as_slice() {
+        [element] => (
+            element_icon(element),
+            element_name(element),
+            kind_name(element).to_string(),
+        ),
+        _ => (
+            IconName::Layers,
+            format!("{} shapes", elements.len()),
+            "Shapes".to_string(),
+        ),
+    };
+    let subtitle = if editor.selection_locked() {
+        format!("{subtitle} · Locked")
+    } else {
+        subtitle
+    };
+    v_flex()
+        .child(header(icon, title, subtitle))
+        .child(position_section(editor, lines && ids.len() == 1, cx))
+        .when_enabled(rectangles, |this| this.child(corners_section(editor)))
+        .when_enabled(filled, |this| {
+            this.child(shape_fill_section(editor, &kinds, cx))
+        })
+        .child(stroke_section(editor, &kinds, cx))
+        .when_enabled(lines, |this| this.child(line_ends_section(&kinds, cx)))
+}
+
+fn shape_input(editor: &EditorView, prefix: impl IntoElement, field: ShapeField) -> Div {
+    input_field(prefix, editor.shape_inspector.input(field))
+}
+
+fn corners_section(editor: &EditorView) -> impl IntoElement {
+    section().child(section_label("CORNERS")).child(field_row(
+        shape_input(
+            editor,
+            field_icon(IconName::SquareRoundCorner),
+            ShapeField::CornerRadius,
+        ),
+        div().flex_1(),
+    ))
+}
+
+/// A color swatch with the hex value or "Mixed", and a field after it.
+fn color_row(
+    picker: &gpui_kit::Entity<gpui_kit::component::color_picker::ColorPickerState>,
+    color: Option<crate::document::Rgb>,
+    trailing: impl IntoElement,
+) -> impl IntoElement {
+    h_flex()
+        .gap(px(8.))
+        .child(
+            h_flex()
+                .flex_1()
+                .h(px(28.))
+                .pl(px(4.))
+                .gap(px(6.))
+                .rounded(px(6.))
+                .bg(theme::field())
+                .child(ColorPicker::new(picker).xsmall())
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::text())
+                        .child(color.map_or("Mixed".to_string(), |color| color.hex())),
+                ),
+        )
+        .child(div().w(px(72.)).flex_shrink_0().flex().child(trailing))
+}
+
+fn shape_fill_section(
+    editor: &EditorView,
+    kinds: &[&ElementKind],
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let fills: Vec<&Fill> = kinds.iter().filter_map(|kind| kind.fill()).collect();
+    let fill_type = common(fills.iter().map(|fill| FillType::of(fill)));
+    let types = [
+        ("fill-none", "None", FillType::None),
+        ("fill-solid", "Solid", FillType::Solid),
+        ("fill-linear", "Linear", FillType::Linear),
+        ("fill-radial", "Radial", FillType::Radial),
+    ];
+    let picker = segmented().children(types.into_iter().map(|(id, label, kind)| {
+        text_segment(id, label, fill_type == Some(kind)).on_click(cx.listener(
+            move |this, _, _, cx| {
+                this.set_fill_type(kind);
+                cx.notify();
+            },
+        ))
+    }));
+    let inspector = &editor.shape_inspector;
+    let mut section = section().child(section_label("FILL")).child(picker);
+    match fill_type {
+        Some(FillType::Solid) => {
+            let color = common(fills.iter().filter_map(|fill| match fill {
+                Fill::Solid(solid) => Some(solid.color),
+                _ => None,
+            }));
+            section = section.child(color_row(
+                &inspector.fill_color,
+                color,
+                shape_input(editor, div(), ShapeField::FillOpacity),
+            ));
+        }
+        Some(FillType::Linear) => {
+            section = section
+                .child(field_row(
+                    shape_input(
+                        editor,
+                        field_icon(IconName::RotateCw),
+                        ShapeField::GradientAngle,
+                    ),
+                    div().flex_1(),
+                ))
+                .child(stops(editor, &fills, cx));
+        }
+        Some(FillType::Radial) => {
+            section = section
+                .child(field_row(
+                    shape_input(editor, field_letter("X"), ShapeField::CenterX),
+                    shape_input(editor, field_letter("Y"), ShapeField::CenterY),
+                ))
+                .child(field_row(
+                    shape_input(editor, field_letter("W"), ShapeField::RadiusX),
+                    shape_input(editor, field_letter("H"), ShapeField::RadiusY),
+                ))
+                .child(stops(editor, &fills, cx));
+        }
+        _ => {}
+    }
+    section
+}
+
+/// One row per gradient stop, when the gradients have the same number of
+/// stops, and a button that adds one.
+fn stops(editor: &EditorView, fills: &[&Fill], cx: &mut Context<EditorView>) -> AnyElement {
+    let Some(count) = common(fills.iter().filter_map(|fill| fill.stops()).map(<[_]>::len)) else {
+        return div()
+            .text_color(theme::text_muted())
+            .child("Mixed stops")
+            .into_any_element();
+    };
+    let inspector = &editor.shape_inspector;
+    let rows = (0..count).map(|index| {
+        let color = common(
+            fills
+                .iter()
+                .filter_map(|fill| Some(fill.stops()?.get(index)?.color)),
+        );
+        let remove = div()
+            .id(("remove-stop", index))
+            .test_support()
+            .size(px(20.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .when_enabled(count > 2, |this| {
+                this.cursor_pointer()
+                    .hover(|style| style.bg(theme::field()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_gradient_stop(index);
+                        cx.notify();
+                    }))
+            })
+            .child(
+                Icon::new(IconName::X)
+                    .size(px(12.))
+                    .text_color(if count > 2 {
+                        theme::text_muted()
+                    } else {
+                        theme::text_faint()
+                    }),
+            );
+        h_flex()
+            .gap(px(4.))
+            .child(div().flex_1().child(color_row(
+                &inspector.stop_colors[index],
+                color,
+                shape_input(editor, div(), ShapeField::StopPosition(index)),
+            )))
+            .child(remove)
+    });
+    let full = count >= crate::style::MAX_STOPS;
+    v_flex()
+        .gap(px(8.))
+        .children(rows)
+        .child(
+            h_flex()
+                .id("add-stop")
+                .test_support()
+                .h(px(24.))
+                .gap(px(6.))
+                .text_color(if full {
+                    theme::text_faint()
+                } else {
+                    theme::text_muted()
+                })
+                .when_enabled(!full, |this| {
+                    this.cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_gradient_stop();
+                            cx.notify();
+                        }))
+                })
+                .child(Icon::new(IconName::Plus).size(px(12.)))
+                .child("Add stop"),
+        )
+        .into_any_element()
+}
+
+fn stroke_section(
+    editor: &EditorView,
+    kinds: &[&ElementKind],
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let strokes: Vec<_> = kinds.iter().filter_map(|kind| kind.stroke()).collect();
+    let optional = kinds
+        .iter()
+        .any(|kind| !matches!(kind, ElementKind::Line(_)));
+    let all = strokes.len() == kinds.len();
+    let toggle = h_flex()
+        .id("stroke-toggle")
+        .test_support()
+        .size(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme::field()))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.set_stroke(!all);
+            cx.notify();
+        }))
+        .child(
+            Icon::new(if all { IconName::Minus } else { IconName::Plus })
+                .size(px(12.))
+                .text_color(theme::text_muted()),
+        );
+    let mut section = section().child(
+        h_flex()
+            .justify_between()
+            .child(section_label("STROKE"))
+            .when_enabled(optional, |this| this.child(toggle)),
+    );
+    if !all {
+        return section;
+    }
+    let inspector = &editor.shape_inspector;
+    let dash = common(strokes.iter().map(|stroke| stroke.dash));
+    section = section
+        .child(color_row(
+            &inspector.stroke_color,
+            common(strokes.iter().map(|stroke| stroke.color)),
+            shape_input(editor, div(), ShapeField::StrokeOpacity),
+        ))
+        .child(
+            h_flex()
+                .gap(px(8.))
+                .child(div().w(px(84.)).flex_shrink_0().flex().child(shape_input(
+                    editor,
+                    field_letter("W"),
+                    ShapeField::StrokeWidth,
+                )))
+                .child(
+                    segmented()
+                        .flex_1()
+                        .children(Dash::ALL.into_iter().map(|option| {
+                            let id = match option {
+                                Dash::Solid => "dash-solid",
+                                Dash::Dashed => "dash-dashed",
+                                Dash::Dotted => "dash-dotted",
+                            };
+                            text_segment(id, option.label(), dash == Some(option)).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.set_dash(option);
+                                    cx.notify();
+                                }),
+                            )
+                        })),
+                ),
+        );
+    section
+}
+
+fn line_ends_section(kinds: &[&ElementKind], cx: &mut Context<EditorView>) -> impl IntoElement {
+    let heads = |start: bool| {
+        common(kinds.iter().filter_map(|kind| match kind {
+            ElementKind::Line(line) => Some(if start { line.start } else { line.end }),
+            _ => None,
+        }))
+    };
+    let row = |start: bool, cx: &mut Context<EditorView>| {
+        let head = heads(start);
+        let prefix = if start { "start" } else { "end" };
+        let kinds = HeadKind::ALL.into_iter().map(|kind| {
+            let icon = match kind {
+                HeadKind::None => IconName::Minus,
+                HeadKind::Triangle => IconName::Triangle,
+                HeadKind::Arrow if start => IconName::ChevronLeft,
+                HeadKind::Arrow => IconName::ChevronRight,
+                HeadKind::Diamond => IconName::Diamond,
+                HeadKind::Circle => IconName::Circle,
+            };
+            let id = (
+                if start { "start-head" } else { "end-head" },
+                HeadKind::ALL
+                    .iter()
+                    .position(|other| *other == kind)
+                    .unwrap_or(0),
+            );
+            segment(id, icon, head.map(|head| head.kind) == Some(kind), false).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.set_arrowhead(start, Some(kind), None);
+                    cx.notify();
+                }),
+            )
+        });
+        let sizes = HeadSize::ALL.into_iter().map(|size| {
+            let (label, index) = match size {
+                HeadSize::Small => ("S", 0usize),
+                HeadSize::Medium => ("M", 1),
+                HeadSize::Large => ("L", 2),
+            };
+            text_segment(
+                (if start { "start-size" } else { "end-size" }, index),
+                label,
+                head.map(|head| head.size) == Some(size),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_arrowhead(start, None, Some(size));
+                cx.notify();
+            }))
+        });
+        v_flex()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme::text_muted())
+                    .child(if start { "Start" } else { "End" }),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(segmented().flex_1().children(kinds))
+                    .child(segmented().w(px(72.)).children(sizes)),
+            )
+            .id(prefix)
+    };
+    section()
+        .child(
+            h_flex()
+                .justify_between()
+                .child(section_label("LINE ENDS"))
+                .child(
+                    div()
+                        .id("swap-ends")
+                        .test_support()
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme::field()))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.swap_arrowheads();
+                            cx.notify();
+                        }))
+                        .child(
+                            Icon::new(IconName::ArrowLeftRight)
+                                .size(px(12.))
+                                .text_color(theme::text_muted()),
+                        ),
+                ),
+        )
+        .child(row(true, cx))
+        .child(row(false, cx))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
