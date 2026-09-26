@@ -1,4 +1,5 @@
-//! Left panel: slide thumbnails and, later, the component library.
+//! Left panel: slide thumbnails, later the component library, and the
+//! hierarchy of the current slide.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -14,11 +15,13 @@ use gpui_kit::{
 use crate::editor::EditorView;
 use crate::theme;
 use crate::ui::canvas::{PaintText, paint_texts};
+use crate::ui::hierarchy_panel::hierarchy_panel;
 
 const THUMB_WIDTH: f32 = 184.;
 
 pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
     let _span = crate::perf::span("slides_panel");
+    let hierarchy = editor.library_tab == 2;
     let slides: Vec<_> = editor
         .presentation
         .slides
@@ -27,6 +30,7 @@ pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> im
         .collect();
     let thumbnails: Vec<_> = slides
         .into_iter()
+        .filter(|_| !hierarchy)
         .enumerate()
         .map(|(ix, id)| {
             let texts = editor.paint_texts(id, false, cx);
@@ -67,29 +71,39 @@ pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> im
                 }))
                 .child(Tab::new().label("Slides"))
                 .child(Tab::new().label("Components"))
-                .suffix(
-                    Button::new("add-slide")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Plus)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.add_slide();
-                            cx.notify();
-                        })),
-                ),
+                .child(Tab::new().label("Hierarchy"))
+                .when(!hierarchy, |this| {
+                    this.suffix(
+                        Button::new("add-slide")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.add_slide();
+                                cx.notify();
+                            })),
+                    )
+                }),
         )
-        .child(
-            v_flex()
-                .id("thumbnails")
-                .flex_1()
-                .gap(px(14.))
-                .pt(px(12.))
-                .pb(px(16.))
-                .pl(px(12.))
-                .pr(px(16.))
-                .overflow_y_scrollbar()
-                .children(thumbnails),
-        )
+        .map(|this| {
+            if hierarchy {
+                this.child(hierarchy_panel(editor, cx).into_any_element())
+            } else {
+                this.child(
+                    v_flex()
+                        .id("thumbnails")
+                        .flex_1()
+                        .gap(px(14.))
+                        .pt(px(12.))
+                        .pb(px(16.))
+                        .pl(px(12.))
+                        .pr(px(16.))
+                        .overflow_y_scrollbar()
+                        .children(thumbnails)
+                        .into_any_element(),
+                )
+            }
+        })
 }
 
 fn slide_number(number: usize, active: bool) -> impl IntoElement {

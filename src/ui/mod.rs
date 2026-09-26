@@ -3,6 +3,9 @@ mod agent_tests;
 pub mod canvas;
 #[cfg(test)]
 mod group_tests;
+pub mod hierarchy_panel;
+#[cfg(test)]
+mod hierarchy_tests;
 pub mod inspector;
 #[cfg(all(test, feature = "perf"))]
 mod perf_tests;

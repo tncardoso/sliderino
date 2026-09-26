@@ -275,7 +275,7 @@ impl LayoutCache {
 pub struct EditorView {
     /// Slide shown on the canvas.
     pub current_slide: SlideId,
-    /// Tab of the left panel: 0 = Slides, 1 = Components.
+    /// Tab of the left panel: 0 = Slides, 1 = Components, 2 = Hierarchy.
     pub library_tab: usize,
     /// Tab of the right panel: 0 = Design, 1 = Notes, 2 = History.
     pub inspector_tab: usize,
@@ -289,6 +289,14 @@ pub struct EditorView {
     pub drag: Option<Drag>,
     /// Layer under the pointer in the hierarchy, outlined on the canvas.
     pub hovered_layer: Option<ElementId>,
+    /// Groups whose children the hierarchy hides.
+    pub collapsed: HashSet<ElementId>,
+    /// Row a Shift+click in the hierarchy selects from.
+    pub tree_anchor: Option<ElementId>,
+    /// Where the layers dragged in the hierarchy would land.
+    pub layer_drop: Option<(ElementId, crate::ui::hierarchy_panel::DropZone)>,
+    /// Layer being renamed in the hierarchy.
+    pub renaming: Option<crate::ui::hierarchy_panel::Renaming>,
     /// Snap guides of the drag in progress.
     pub guides: Vec<Guide>,
     pub layouts: LayoutCache,
@@ -352,6 +360,10 @@ impl EditorView {
             text_edit: None,
             drag: None,
             hovered_layer: None,
+            collapsed: HashSet::new(),
+            tree_anchor: None,
+            layer_drop: None,
+            renaming: None,
             guides: Vec::new(),
             layouts: LayoutCache::default(),
             fonts: FontRegistry::default(),

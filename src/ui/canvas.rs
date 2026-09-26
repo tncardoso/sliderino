@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{Selectable as _, h_flex};
 use gpui_kit::{
     AnyElement, App, BorderStyle, BoxShadow, Context, CursorStyle, DispatchPhase, Edges,
@@ -25,6 +26,7 @@ use crate::shortcuts::WheelAction;
 use crate::snap::{Guide, Handle, ResizeMode, Targets, resize, snap_move, snap_resize};
 use crate::text_layout::{BoxRect, TextLayout};
 use crate::theme;
+use crate::ui::hierarchy_panel::layer_menu;
 
 /// Space kept around a fitted slide; the bottom clears the tool palette.
 const FIT_INSETS: Edges<gpui_kit::Pixels> = Edges {
@@ -501,6 +503,24 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if event.button == MouseButton::Right
+            && self.effective_tool() == Tool::Move
+            && let Some(at) = self.to_slide(event.position)
+        {
+            // Selects what the menu will act on.
+            self.end_text_edit();
+            match self.leaf_at(at) {
+                Some(leaf) => {
+                    let target = self.selectable_for(leaf, &self.selection);
+                    if !self.selection.contains(&target) {
+                        self.selection = vec![target];
+                    }
+                }
+                None => self.selection.clear(),
+            }
+            cx.notify();
+            return;
+        }
         if event.button != MouseButton::Left {
             return;
         }
@@ -834,6 +854,10 @@ pub fn canvas(
         .cursor(cursor)
         .on_any_mouse_down(cx.listener(EditorView::on_canvas_mouse_down))
         .on_scroll_wheel(cx.listener(EditorView::on_canvas_scroll))
+        .context_menu({
+            let editor = cx.entity().downgrade();
+            move |menu, _, cx| layer_menu(menu, &editor, cx)
+        })
         .child(viewport_tracker(cx))
         .children(editor.camera.map(|camera| slide(editor, camera)))
         .children(editor.camera.map(|camera| {
