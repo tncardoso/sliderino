@@ -13,12 +13,13 @@ use gpui_kit::{
 };
 
 use crate::document::{
-    Dash, Element, ElementKind, Fill, HAlign, HeadKind, HeadSize, TextCase, TextSizing, TextStyle,
-    TextStylePatch, VAlign,
+    Dash, Element, ElementKind, Fill, HAlign, HeadKind, HeadSize, ImageFit, TextCase, TextSizing,
+    TextStyle, TextStylePatch, VAlign,
 };
 use crate::editor::EditorView;
 use crate::text_layout::TextLayout;
 use crate::theme;
+use crate::ui::image_insert::ImageTarget;
 use crate::ui::inspector::{Field, number};
 use crate::ui::shape_inspector::{FillType, ShapeField, common};
 use crate::ui::widgets::{
@@ -723,11 +724,18 @@ fn shape_fill_section(
         ("fill-solid", "Solid", FillType::Solid),
         ("fill-linear", "Linear", FillType::Linear),
         ("fill-radial", "Radial", FillType::Radial),
+        ("fill-image", "Image", FillType::Image),
     ];
     let picker = segmented().children(types.into_iter().map(|(id, label, kind)| {
         text_segment(id, label, fill_type == Some(kind)).on_click(cx.listener(
-            move |this, _, _, cx| {
-                this.set_fill_type(kind);
+            move |this, _, window, cx| {
+                if kind == FillType::Image {
+                    if this.selected_fill_type() != Some(FillType::Image) {
+                        this.choose_image(ImageTarget::Fill, window, cx);
+                    }
+                } else {
+                    this.set_fill_type(kind);
+                }
                 cx.notify();
             },
         ))
@@ -769,6 +777,51 @@ fn shape_fill_section(
                     shape_input(editor, field_letter("H"), ShapeField::RadiusY),
                 ))
                 .child(stops(editor, &fills, cx));
+        }
+        Some(FillType::Image) => {
+            let fit = common(fills.iter().filter_map(|fill| match fill {
+                Fill::Image(image) => Some(image.fit),
+                _ => None,
+            }));
+            let fits = ImageFit::ALL.into_iter().map(|option| {
+                let id = match option {
+                    ImageFit::Cover => "fit-cover",
+                    ImageFit::Contain => "fit-contain",
+                    ImageFit::Stretch => "fit-stretch",
+                };
+                text_segment(id, option.label(), fit == Some(option)).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.set_image_fit(option);
+                        cx.notify();
+                    },
+                ))
+            });
+            section = section.child(segmented().children(fits)).child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(
+                        h_flex()
+                            .id("replace-image")
+                            .test_support()
+                            .flex_1()
+                            .h(px(28.))
+                            .px(px(8.))
+                            .gap(px(6.))
+                            .rounded(px(6.))
+                            .bg(theme::field())
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_image(ImageTarget::Fill, window, cx);
+                            }))
+                            .child(field_icon(IconName::Image))
+                            .child(div().text_color(theme::text()).child("Replace…")),
+                    )
+                    .child(div().w(px(72.)).flex_shrink_0().flex().child(shape_input(
+                        editor,
+                        div(),
+                        ShapeField::FillOpacity,
+                    ))),
+            );
         }
         _ => {}
     }

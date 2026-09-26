@@ -441,6 +441,16 @@ impl EditorView {
         self.shape_inspector.shown = ids;
     }
 
+    /// The fill type the selected shapes share.
+    pub fn selected_fill_type(&self) -> Option<FillType> {
+        let ids = self.selected_shapes()?;
+        common(
+            self.shape_kinds(&ids)
+                .iter()
+                .filter_map(|kind| Some(FillType::of(kind.fill()?))),
+        )
+    }
+
     /// Changes the shapes as one undo step. `patch` gives the change of
     /// each shape; shapes it gives none for stay as they are.
     pub fn edit_shapes(

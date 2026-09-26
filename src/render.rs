@@ -125,8 +125,8 @@ fn turned(transform: Transform, frame: &Frame) -> Transform {
 }
 
 /// The images of the presentation, decoded when first drawn.
-fn presentation_images(_presentation: &Presentation) -> impl Fn(ImageId) -> Option<Arc<Pixmap>> {
-    no_images
+fn presentation_images(presentation: &Presentation) -> impl Fn(ImageId) -> Option<Arc<Pixmap>> {
+    |id| crate::images::pixels(presentation.images.get(id)?)
 }
 
 /// Paints a rectangle, an ellipse or a line; other kinds are left alone.
@@ -910,5 +910,35 @@ mod tests {
                 "rectangle": {}}"#,
         );
         assert!(!inked(&hidden, 150, 150));
+    }
+
+    fn image_scene(fit: &str) -> Pixmap {
+        use base64::Engine as _;
+        let data =
+            base64::engine::general_purpose::STANDARD.encode(crate::images::tests::png(200, 100));
+        let ops = format!(
+            r#"[{{"op": "add_image", "id": "$i", "data": "{data}"}},
+                {{"op": "add_element", "slide": 1, "element": {{
+                  "frame": {{"x": 100, "y": 100, "width": 200, "height": 200}},
+                  "rectangle": {{"fill": {{"image": {{"id": "$i", "fit": "{fit}"}}}}}}}}}}]"#
+        );
+        render_slide(&scene(&ops), SlideId(1), 1., false).unwrap()
+    }
+
+    #[test]
+    fn cover_fills_the_box_and_contain_leaves_bars() {
+        let cover = image_scene("cover");
+        assert_eq!(rgb(&cover, 110, 110), (255, 0, 0));
+        assert_eq!(rgb(&cover, 290, 290), (0, 0, 255));
+        let contain = image_scene("contain");
+        assert_eq!(
+            rgb(&contain, 200, 110),
+            (255, 255, 255),
+            "a bar above the image"
+        );
+        assert_eq!(rgb(&contain, 110, 200), (255, 0, 0));
+        let stretch = image_scene("stretch");
+        assert_eq!(rgb(&stretch, 110, 110), (255, 0, 0));
+        assert_eq!(rgb(&stretch, 290, 110), (0, 0, 255));
     }
 }

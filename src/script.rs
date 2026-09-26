@@ -31,9 +31,15 @@ impl std::fmt::Display for ScriptError {
 
 impl std::error::Error for ScriptError {}
 
+/// Reads a scene file. The `path` of an `add_image` op is taken from the
+/// folder of the scene.
 pub fn load(path: &Path) -> Result<Vec<ScriptOp>, ScriptError> {
     let text = std::fs::read_to_string(path).map_err(ScriptError::Read)?;
-    parse(&text)
+    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(ScriptError::Parse)?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    ops::inline_image_paths(&mut value, base)
+        .map_err(|message| ScriptError::Read(std::io::Error::other(message)))?;
+    serde_json::from_value(value).map_err(ScriptError::Parse)
 }
 
 pub fn parse(text: &str) -> Result<Vec<ScriptOp>, ScriptError> {

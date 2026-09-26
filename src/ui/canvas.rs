@@ -11,17 +11,18 @@ use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{Selectable as _, h_flex};
 use gpui_kit::{
     AnyElement, App, BorderStyle, BoxShadow, Context, CursorStyle, DispatchPhase, Edges,
-    ElementInputHandler, Entity, FillOptions, FocusHandle, FontId, FontWeight, GlyphId, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, PathBuilder, PathStyle, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, Styled, TestSupportExt as _, Window, canvas as paint_canvas, div, fill, hsla,
-    outline, point, px, size,
+    ElementInputHandler, Entity, ExternalPaths, FillOptions, FocusHandle, FontId, FontWeight,
+    GlyphId, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, PathStyle, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, Styled, TestSupportExt as _, Window, canvas as paint_canvas,
+    div, fill, hsla, outline, point, px, size,
 };
 
 use crate::camera::Camera;
 use crate::document::{
-    Element, ElementId, ElementKind, EllipseElement, FontData, Frame, LineElement, Operation,
-    RectangleElement, SlideId, SlideSize, TextElement, TextSizing, TextStyle, normalize_degrees,
+    Element, ElementId, ElementKind, EllipseElement, Fill, FontData, Frame, ImageId, LineElement,
+    Operation, RectangleElement, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
+    normalize_degrees,
 };
 use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
@@ -29,6 +30,7 @@ use crate::snap::{Guide, Handle, ResizeMode, Targets, resize_rotated, snap_move,
 use crate::text_layout::{BoxRect, TextLayout};
 use crate::theme;
 use crate::ui::hierarchy_panel::layer_menu;
+use crate::ui::image_insert::ImageTarget;
 use crate::ui::shape_paint::{PaintShape, paint_shape, render_image, translated};
 
 /// Space kept around a fitted slide; the bottom clears the tool palette.
@@ -130,17 +132,33 @@ impl EditorView {
             return Vec::new();
         };
         let mut items = Vec::new();
+        let mut missing: Vec<ImageId> = Vec::new();
         for node in slide.visible_leaves() {
             let element = node.element;
             let Some(text) = element.as_text() else {
                 if element.kind.is_shape() {
                     let (frame, _) = dragged.apply(element);
+                    let image = match element.kind.fill() {
+                        Some(Fill::Image(fill)) => {
+                            let pixels = self
+                                .presentation
+                                .images
+                                .get(fill.id)
+                                .and_then(crate::images::cached_pixels);
+                            if pixels.is_none() {
+                                missing.push(fill.id);
+                            }
+                            pixels
+                        }
+                        _ => None,
+                    };
                     items.push(PaintItem::Shape(PaintShape {
                         element: Element {
                             frame,
                             ..element.clone()
                         },
                         opacity: node.opacity,
+                        image,
                     }));
                 }
                 continue;
@@ -169,6 +187,7 @@ impl EditorView {
                 strikethrough: style.strikethrough,
             }));
         }
+        self.want_images(missing);
         items
     }
 
@@ -287,6 +306,7 @@ impl EditorView {
                 scene.ghost = Some(PaintShape {
                     element: Element::new(ElementId(u64::MAX), frame, kind),
                     opacity: 1.,
+                    image: None,
                 });
                 scene.badge = Some((
                     frame.bounds(),
@@ -1264,6 +1284,13 @@ pub fn canvas(
         .cursor(cursor)
         .on_any_mouse_down(cx.listener(EditorView::on_canvas_mouse_down))
         .on_scroll_wheel(cx.listener(EditorView::on_canvas_scroll))
+        .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+            // Images land where they are dropped.
+            let at = this
+                .to_slide(window.mouse_position())
+                .map(|at| (at.x, at.y));
+            this.load_image_files(paths.paths().to_vec(), ImageTarget::Insert(at), window, cx);
+        }))
         .context_menu({
             let editor = cx.entity().downgrade();
             move |menu, _, cx| layer_menu(menu, &editor, cx)
@@ -2175,8 +2202,13 @@ fn tool_button(tool: Tool, active: bool, cx: &mut Context<EditorView>) -> impl I
         .tooltip(tool.label())
         .size(px(36.))
         .rounded(px(8.))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.active_tool = tool;
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if tool == Tool::Image {
+                // Not a mode: the image goes in the middle of the slide.
+                this.choose_image(ImageTarget::Insert(None), window, cx);
+            } else {
+                this.active_tool = tool;
+            }
             cx.notify();
         }));
     if active {

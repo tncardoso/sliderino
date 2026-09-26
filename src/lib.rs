@@ -11,6 +11,7 @@ pub mod document;
 pub mod editor;
 pub mod fonts;
 pub mod history;
+pub mod images;
 pub mod mock;
 pub mod operation;
 pub mod perf;

@@ -102,7 +102,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_basic_info",
-            description: "Overview of the open presentation: revision, slide size, slides with their element counts, embedded fonts, the slide shown in the editor and the undo state. Call it first.",
+            description: "Overview of the open presentation: revision, slide size, slides with their element counts, embedded fonts and images, the slide shown in the editor and the undo state. Call it first.",
             schema: empty_schema(),
             target: Target::Instance,
             read_only: true,
@@ -394,12 +394,27 @@ fn basic_info(host: &dyn Host) -> Value {
         .map(|slide| json!({"id": slide.id, "elements": slide.walk().len()}))
         .collect();
     let fonts: Vec<_> = presentation.fonts.faces().collect();
+    let images: Vec<Value> = presentation
+        .images
+        .iter()
+        .map(|(id, data)| {
+            json!({
+                "id": id,
+                "format": data.format,
+                "width": data.width,
+                "height": data.height,
+                "bytes": data.bytes.len(),
+                "used": presentation.image_in_use(id),
+            })
+        })
+        .collect();
     json!({
         "api_version": API_VERSION,
         "revision": presentation.revision(),
         "slide_size": {"width": presentation.size.width, "height": presentation.size.height},
         "slides": slides,
         "fonts": fonts,
+        "images": images,
         "current_slide": host.view().current_slide,
         "undo": history.done().last(),
         "redo": history.undone().next(),

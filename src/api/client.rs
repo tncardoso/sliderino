@@ -199,7 +199,8 @@ impl Session {
 
     /// Calls any tool. `instance` in `args` picks the instance; for
     /// `get_screenshot`, `path` writes the image to a file here instead of
-    /// returning it.
+    /// returning it. The `add_image` ops of `apply_operations` read their
+    /// `path` here.
     pub fn call(&mut self, tool: &str, mut args: Value) -> Result<ToolOutput, ApiError> {
         let Some(spec) = tools::spec(tool) else {
             return Err(ApiError::new("unknown_tool", format!("no tool {tool:?}")));
@@ -224,6 +225,14 @@ impl Session {
             (_, None) => None,
             (_, Some(_)) => return Err(ApiError::invalid_args("path must be a file path")),
         };
+        if tool == "apply_operations"
+            && let Some(ops) = object.get_mut("ops")
+        {
+            // The editor reads no files: images go by value.
+            let base = std::env::current_dir().unwrap_or_default();
+            crate::api::ops::inline_image_paths(ops, &base)
+                .map_err(|message| ApiError::new("io", message))?;
+        }
         if spec.target == Target::Local {
             return self.call_local(tool, args);
         }

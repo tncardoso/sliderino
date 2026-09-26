@@ -23,13 +23,18 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::path::Path;
+use std::sync::Arc;
 
+use base64::Engine as _;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::document::{
     ApplyError, Arrowhead, Dash, Element, ElementId, ElementKind, EllipseElement, Fill, FontFace,
-    Frame, GroupElement, LayerPatch, LineElement, Operation, Presentation, RectangleElement, Rgb,
-    ShapeStylePatch, Slide, SlideId, Stroke, TextElement, TextSizing, TextStylePatch, Vec2,
+    Frame, GroupElement, ImageData, ImageFill, ImageFit, ImageId, LayerPatch, LineElement,
+    Operation, Presentation, RectangleElement, Rgb, ShapeStylePatch, Slide, SlideId, Stroke,
+    TextElement, TextSizing, TextStylePatch, Vec2,
 };
 use crate::fonts;
 
@@ -101,9 +106,51 @@ fn one() -> f32 {
 pub enum NewKind {
     Text(TextElement),
     Group(NewGroup),
-    Rectangle(RectangleElement),
-    Ellipse(EllipseElement),
+    Rectangle(NewRectangle),
+    Ellipse(NewEllipse),
     Line(NewLine),
+}
+
+/// A new [`RectangleElement`] whose fill can name its image by reference.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewRectangle {
+    #[serde(default)]
+    pub fill: Option<NewFill>,
+    #[serde(default)]
+    pub stroke: Option<Stroke>,
+    #[serde(default)]
+    pub corner_radius: f32,
+}
+
+/// A new [`EllipseElement`] whose fill can name its image by reference.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewEllipse {
+    #[serde(default)]
+    pub fill: Option<NewFill>,
+    #[serde(default)]
+    pub stroke: Option<Stroke>,
+}
+
+/// A [`Fill`] whose image is an id or a `"$name"` reference to an image
+/// that an earlier op added.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewFill {
+    Image(NewImageFill),
+    #[serde(untagged)]
+    Other(Fill),
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewImageFill {
+    pub id: IdRef,
+    #[serde(default)]
+    pub fit: ImageFit,
+    #[serde(default = "one")]
+    pub opacity: f32,
 }
 
 /// A new line: a [`LineElement`] that can also be placed by its ends
@@ -150,7 +197,7 @@ impl StrokePatch {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShapePatch {
-    pub fill: Option<Fill>,
+    pub fill: Option<NewFill>,
     #[serde(deserialize_with = "present")]
     pub stroke: Option<Option<StrokePatch>>,
     pub corner_radius: Option<f32>,
@@ -167,10 +214,10 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 
 impl ShapePatch {
     /// The core patch, with a partial stroke merged into the current one of
-    /// the shape, or into the default stroke.
-    fn resolve(self, current: Option<&Stroke>) -> ShapeStylePatch {
+    /// the shape, or into the default stroke, and the fill resolved.
+    fn resolve(self, current: Option<&Stroke>, fill: Option<Fill>) -> ShapeStylePatch {
         ShapeStylePatch {
-            fill: self.fill,
+            fill,
             stroke: self.stroke.map(|stroke| {
                 stroke.map(|patch| patch.merge(current.copied().unwrap_or_default()))
             }),
@@ -182,7 +229,7 @@ impl ShapePatch {
 
     fn label(&self) -> &'static str {
         ShapeStylePatch {
-            fill: self.fill.clone(),
+            fill: self.fill.as_ref().map(|_| Fill::None),
             stroke: self.stroke.map(|stroke| stroke.map(|_| Stroke::default())),
             corner_radius: self.corner_radius,
             start: self.start,
@@ -285,6 +332,21 @@ pub enum Op {
     RemoveFont {
         face: FontFace,
     },
+    /// Embeds a PNG or JPEG image given as base64 `data`. Clients read
+    /// `path` into `data` before they send the op. An image with the same
+    /// bytes as one already embedded is not added again: its reference
+    /// names the embedded one.
+    AddImage {
+        #[serde(default)]
+        id: Option<IdRef>,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    RemoveImage {
+        id: IdRef,
+    },
     Batch {
         ops: Vec<Op>,
     },
@@ -317,6 +379,8 @@ impl Op {
             Op::ReplaceText { .. } => "Edit text",
             Op::AddFont { .. } => "Add font",
             Op::RemoveFont { .. } => "Remove font",
+            Op::AddImage { .. } => "Add image",
+            Op::RemoveImage { .. } => "Remove image",
             Op::Batch { .. } => "Batch",
         }
     }
@@ -324,6 +388,39 @@ impl Op {
 
 pub fn parse(text: &str) -> Result<Vec<Op>, serde_json::Error> {
     serde_json::from_str(text)
+}
+
+/// Reads the file of each `add_image` op that gives a `path`, inside
+/// batches too, into its `data` as base64. A relative path is taken from
+/// `base`. Clients run this before they send the ops: the editor reads no
+/// files.
+pub fn inline_image_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
+    let Some(ops) = ops.as_array_mut() else {
+        return Ok(());
+    };
+    for op in ops {
+        let Some(object) = op.as_object_mut() else {
+            continue;
+        };
+        if let Some(inner) = object.get_mut("ops") {
+            inline_image_paths(inner, base)?;
+        }
+        if object.get("op").and_then(Value::as_str) != Some("add_image") {
+            continue;
+        }
+        let Some(path) = object.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = base.join(path);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        object.remove("path");
+        object.insert(
+            "data".into(),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -348,6 +445,7 @@ pub enum OpErrorKind {
     WrongRefKind(String),
     /// The op is malformed; the text says how.
     Invalid(&'static str),
+    Image(crate::images::ImageError),
     Apply(ApplyError),
 }
 
@@ -375,6 +473,7 @@ impl std::fmt::Display for OpError {
                 write!(f, "reference {name} names another kind of object")
             }
             OpErrorKind::Invalid(reason) => write!(f, "{reason}"),
+            OpErrorKind::Image(error) => write!(f, "{error}"),
             OpErrorKind::Apply(error) => write!(f, "{error}"),
         }
     }
@@ -453,6 +552,7 @@ pub fn apply(
 enum Made {
     Slide(SlideId),
     Element(ElementId),
+    Image(ImageId),
 }
 
 impl Made {
@@ -460,6 +560,7 @@ impl Made {
         match self {
             Made::Slide(id) => id.0,
             Made::Element(id) => id.0,
+            Made::Image(id) => id.0,
         }
     }
 }
@@ -612,9 +713,10 @@ impl Compiler {
                 let current = presentation
                     .element(id)
                     .and_then(|element| element.kind.stroke());
+                let fill = patch.fill.clone().map(|fill| self.fill(fill)).transpose()?;
                 Operation::SetShapeStyle {
                     id,
-                    patch: patch.resolve(current),
+                    patch: patch.resolve(current, fill),
                 }
             }
             Op::SetLinePoints { id, from, to } => {
@@ -642,6 +744,21 @@ impl Compiler {
                 self.font(face)?
             }
             Op::RemoveFont { face } => Operation::RemoveFont { face },
+            Op::AddImage { id, data, path } => {
+                if path.is_some() {
+                    return Err(OpErrorKind::Invalid(
+                        "add_image.path is read by the client; send data (base64) instead",
+                    ));
+                }
+                let data = data.ok_or(OpErrorKind::Invalid("add_image needs data or path"))?;
+                match self.add_image(presentation, id, &data, out)? {
+                    Some(operation) => operation,
+                    None => return Ok(()),
+                }
+            }
+            Op::RemoveImage { id } => Operation::RemoveImage {
+                id: self.image(&id)?,
+            },
             Op::Batch { ops } => {
                 let mut inner = Vec::with_capacity(ops.len());
                 for op in ops {
@@ -690,8 +807,23 @@ impl Compiler {
                 }
                 ElementKind::Group(GroupElement { children })
             }
-            NewKind::Rectangle(shape) => ElementKind::Rectangle(shape),
-            NewKind::Ellipse(shape) => ElementKind::Ellipse(shape),
+            NewKind::Rectangle(shape) => ElementKind::Rectangle(RectangleElement {
+                fill: shape
+                    .fill
+                    .map(|fill| self.fill(fill))
+                    .transpose()?
+                    .unwrap_or_default(),
+                stroke: shape.stroke,
+                corner_radius: shape.corner_radius,
+            }),
+            NewKind::Ellipse(shape) => ElementKind::Ellipse(EllipseElement {
+                fill: shape
+                    .fill
+                    .map(|fill| self.fill(fill))
+                    .transpose()?
+                    .unwrap_or_default(),
+                stroke: shape.stroke,
+            }),
             NewKind::Line(line) => {
                 match (line.from, line.to, frame) {
                     (None, None, _) => {}
@@ -760,7 +892,7 @@ impl Compiler {
             IdRef::Id(id) => Ok(SlideId(*id)),
             IdRef::Ref(name) => match self.lookup(name)? {
                 Made::Slide(id) => Ok(id),
-                Made::Element(_) => Err(OpErrorKind::WrongRefKind(name.clone())),
+                _ => Err(OpErrorKind::WrongRefKind(name.clone())),
             },
         }
     }
@@ -770,9 +902,69 @@ impl Compiler {
             IdRef::Id(id) => Ok(ElementId(*id)),
             IdRef::Ref(name) => match self.lookup(name)? {
                 Made::Element(id) => Ok(id),
-                Made::Slide(_) => Err(OpErrorKind::WrongRefKind(name.clone())),
+                _ => Err(OpErrorKind::WrongRefKind(name.clone())),
             },
         }
+    }
+
+    fn image(&self, id: &IdRef) -> Result<ImageId, OpErrorKind> {
+        match id {
+            IdRef::Id(id) => Ok(ImageId(*id)),
+            IdRef::Ref(name) => match self.lookup(name)? {
+                Made::Image(id) => Ok(id),
+                _ => Err(OpErrorKind::WrongRefKind(name.clone())),
+            },
+        }
+    }
+
+    fn fill(&self, fill: NewFill) -> Result<Fill, OpErrorKind> {
+        Ok(match fill {
+            NewFill::Image(image) => Fill::Image(ImageFill {
+                id: self.image(&image.id)?,
+                fit: image.fit,
+                opacity: image.opacity,
+            }),
+            NewFill::Other(fill) => fill,
+        })
+    }
+
+    /// An `AddImage` of base64 bytes; nothing when the same bytes are
+    /// already embedded, or added by an earlier operation of the op.
+    fn add_image(
+        &mut self,
+        presentation: &mut Presentation,
+        id: Option<IdRef>,
+        data: &str,
+        out: &[Operation],
+    ) -> Result<Option<Operation>, OpErrorKind> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .map_err(|_| OpErrorKind::Invalid("add_image.data is not base64"))?;
+        let embedded = presentation.images.find(&bytes).or_else(|| {
+            out.iter().find_map(|operation| match operation {
+                Operation::AddImage { id, data } if data.bytes[..] == bytes => Some(*id),
+                _ => None,
+            })
+        });
+        if let Some(existing) = embedded
+            && !matches!(id, Some(IdRef::Id(_)))
+        {
+            if let Some(IdRef::Ref(name)) = id {
+                self.name(name, Made::Image(existing))?;
+            }
+            return Ok(None);
+        }
+        let data = ImageData::read(Arc::from(bytes)).map_err(OpErrorKind::Image)?;
+        let id = match id {
+            Some(IdRef::Id(id)) => ImageId(id),
+            Some(IdRef::Ref(name)) => {
+                let id = presentation.new_image_id();
+                self.name(name, Made::Image(id))?;
+                id
+            }
+            None => presentation.new_image_id(),
+        };
+        Ok(Some(Operation::AddImage { id, data }))
     }
 
     /// Resolves an element the op changes and records it as the last one.
@@ -989,5 +1181,81 @@ mod tests {
             parse(r#"[{"op": "set_shape_style", "id": 1, "patch": {"fill": "none"}}]"#).unwrap();
         let error = apply(&mut presentation, ops, AGENT).unwrap_err();
         assert!(error.to_string().contains("no element 1"), "{error}");
+    }
+
+    fn png_base64() -> String {
+        base64::engine::general_purpose::STANDARD.encode(crate::images::tests::png(40, 20))
+    }
+
+    #[test]
+    fn agents_add_an_image_once_and_fill_shapes_with_it() {
+        let mut presentation = Presentation::new();
+        let data = png_base64();
+        let text = format!(
+            r#"[
+              {{"op": "add_image", "id": "$logo", "data": "{data}"}},
+              {{"op": "add_image", "id": "$again", "data": "{data}"}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$box",
+                "frame": {{"x": 0, "y": 0, "width": 100, "height": 100}},
+                "rectangle": {{"fill": {{"image": {{"id": "$logo", "fit": "contain"}}}}}}}}}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$round",
+                "ellipse": {{"fill": "none"}}}}}},
+              {{"op": "set_shape_style", "id": "$round",
+                "patch": {{"fill": {{"image": {{"id": "$again"}}}}}}}}
+            ]"#
+        );
+        let applied = apply(&mut presentation, parse(&text).unwrap(), AGENT).unwrap();
+        assert_eq!(applied.refs["$logo"], applied.refs["$again"]);
+        assert_eq!(presentation.images.iter().count(), 1);
+        let image = ImageId(applied.refs["$logo"]);
+        let rectangle = presentation
+            .element(ElementId(applied.refs["$box"]))
+            .unwrap();
+        assert_eq!(
+            rectangle.kind.fill(),
+            Some(&Fill::Image(ImageFill {
+                id: image,
+                fit: ImageFit::Contain,
+                opacity: 1.,
+            }))
+        );
+        let ellipse = presentation
+            .element(ElementId(applied.refs["$round"]))
+            .unwrap();
+        assert!(matches!(ellipse.kind.fill(), Some(Fill::Image(fill)) if fill.id == image));
+        assert_eq!(applied.steps[0].label, "Add image");
+    }
+
+    #[test]
+    fn images_need_png_or_jpeg_data_and_no_path() {
+        let mut presentation = Presentation::new();
+        let ops = parse(r#"[{"op": "add_image", "path": "/tmp/logo.png"}]"#).unwrap();
+        let error = apply(&mut presentation, ops, AGENT).unwrap_err();
+        assert!(matches!(error.kind, OpErrorKind::Invalid(_)), "{error}");
+        let gif = base64::engine::general_purpose::STANDARD.encode(b"GIF89a\x01\x00");
+        let ops = parse(&format!(r#"[{{"op": "add_image", "data": "{gif}"}}]"#)).unwrap();
+        let error = apply(&mut presentation, ops, AGENT).unwrap_err();
+        assert!(matches!(error.kind, OpErrorKind::Image(_)), "{error}");
+    }
+
+    #[test]
+    fn clients_read_image_paths_into_data() {
+        let dir = std::env::temp_dir().join(format!("sliderino-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("logo.png"), crate::images::tests::png(4, 4)).unwrap();
+        let mut ops = serde_json::json!([
+            {"op": "batch", "ops": [{"op": "add_image", "id": "$a", "path": "logo.png"}]}
+        ]);
+        inline_image_paths(&mut ops, &dir).unwrap();
+        let inner = &ops[0]["ops"][0];
+        assert!(inner.get("path").is_none());
+        assert_eq!(inner["data"], png_base64_of(4, 4));
+        let mut missing = serde_json::json!([{"op": "add_image", "path": "nope.png"}]);
+        assert!(inline_image_paths(&mut missing, &dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn png_base64_of(width: u32, height: u32) -> String {
+        base64::engine::general_purpose::STANDARD.encode(crate::images::tests::png(width, height))
     }
 }

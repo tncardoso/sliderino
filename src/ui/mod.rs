@@ -6,6 +6,7 @@ mod group_tests;
 pub mod hierarchy_panel;
 #[cfg(test)]
 mod hierarchy_tests;
+pub mod image_insert;
 pub mod inspector;
 #[cfg(all(test, feature = "perf"))]
 mod perf_tests;

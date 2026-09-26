@@ -20,11 +20,13 @@ use crate::render::{self, Pixmap};
 use crate::shape::{self, Head, Seg};
 
 /// A shape ready to paint: a copy of the element with the frame the canvas
-/// shows, and its opacity with its groups'.
+/// shows, its opacity with its groups', and the decoded pixels of its image
+/// fill when they are ready.
 #[derive(Clone, Debug)]
 pub struct PaintShape {
     pub element: Element,
     pub opacity: f32,
+    pub image: Option<Arc<Pixmap>>,
 }
 
 fn hsla(color: Rgb, alpha: f32) -> Hsla {
@@ -63,6 +65,8 @@ struct RasterKey {
     /// Device pixels per slide unit, rounded up to a power of √2.
     scale: f32,
     opacity: f32,
+    /// Address of the decoded image; 0 for the placeholder.
+    image: usize,
 }
 
 enum Entry {
@@ -271,12 +275,9 @@ const MAX_RASTER: f32 = 4096.;
 
 /// Renders the fill of a shape at a scale bucket, in slide units from the
 /// center of its frame.
-fn rasterize_fill(
-    element: &Element,
-    opacity: f32,
-    scale: f32,
-) -> Option<(Arc<RenderImage>, Frame)> {
+fn rasterize_fill(shape: &PaintShape, scale: f32) -> Option<(Arc<RenderImage>, Frame)> {
     let _span = crate::perf::span("rasterize_shape");
+    let element = &shape.element;
     let mut fill_only = element.clone();
     match &mut fill_only.kind {
         ElementKind::Rectangle(shape) => shape.stroke = None,
@@ -286,7 +287,8 @@ fn rasterize_fill(
     let bounds = fill_only.frame.bounds();
     let largest = bounds.width.max(bounds.height).max(1.);
     let scale = scale.min(MAX_RASTER / largest);
-    let (pixmap, area) = render::render_shape_box(&fill_only, opacity, scale, &render::no_images)?;
+    let images = |_| shape.image.clone();
+    let (pixmap, area) = render::render_shape_box(&fill_only, shape.opacity, scale, &images)?;
     let image = render_image(&pixmap)?;
     let (cx, cy) = element.frame.center();
     Some((
@@ -323,6 +325,10 @@ pub fn paint_shape(shape: &PaintShape, origin: Point<Pixels>, zoom: f32, window:
         rotation: frame.rotation,
         scale: scale_bucket(zoom * window.scale_factor()),
         opacity: shape.opacity,
+        image: shape
+            .image
+            .as_ref()
+            .map_or(0, |image| Arc::as_ptr(image) as usize),
     });
 
     let mut evicted = Vec::new();
@@ -364,7 +370,7 @@ pub fn paint_shape(shape: &PaintShape, origin: Point<Pixels>, zoom: f32, window:
                 });
             found.or_else(|| {
                 evicted.extend(cache.make_room());
-                let (image, area) = rasterize_fill(element, shape.opacity, raster_key.scale)?;
+                let (image, area) = rasterize_fill(shape, raster_key.scale)?;
                 cache
                     .entries
                     .push((Entry::Raster(raster_key, image.clone(), area), clock));

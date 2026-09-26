@@ -937,10 +937,13 @@ pub struct Presentation {
     /// Slides in presentation order.
     pub slides: Vec<Slide>,
     pub fonts: FontLibrary,
+    pub images: ImageLibrary,
     /// Id given to the next created slide; only ever grows.
     next_slide_id: u64,
     /// Id given to the next created element; only ever grows.
     next_element_id: u64,
+    /// Id given to the next embedded image; only ever grows.
+    next_image_id: u64,
     /// Counts the changes applied, undo and redo included. External agents
     /// compare it to detect edits made since they last read the document.
     revision: u64,
@@ -953,8 +956,10 @@ impl PartialEq for Presentation {
         self.size == other.size
             && self.slides == other.slides
             && self.fonts == other.fonts
+            && self.images == other.images
             && self.next_slide_id == other.next_slide_id
             && self.next_element_id == other.next_element_id
+            && self.next_image_id == other.next_image_id
     }
 }
 
@@ -971,8 +976,10 @@ impl Presentation {
             size: SlideSize::default(),
             slides: Vec::new(),
             fonts: FontLibrary::default(),
+            images: ImageLibrary::default(),
             next_slide_id: 1,
             next_element_id: 1,
+            next_image_id: 1,
             revision: 0,
         };
         let id = presentation.new_slide_id();
@@ -992,6 +999,22 @@ impl Presentation {
         let id = ElementId(self.next_element_id);
         self.next_element_id += 1;
         id
+    }
+
+    /// Reserves an image id for an [`Operation::AddImage`].
+    pub fn new_image_id(&mut self) -> ImageId {
+        let id = ImageId(self.next_image_id);
+        self.next_image_id += 1;
+        id
+    }
+
+    /// Whether a fill of an element of any slide uses the image.
+    pub fn image_in_use(&self, id: ImageId) -> bool {
+        self.slides.iter().any(|slide| {
+            slide.walk().iter().any(|node| {
+                matches!(node.element.kind.fill(), Some(Fill::Image(image)) if image.id == id)
+            })
+        })
     }
 
     pub fn index_of(&self, id: SlideId) -> Option<usize> {
@@ -1515,6 +1538,25 @@ impl Presentation {
                     .ok_or_else(|| ApplyError::MissingFont(face.clone()))?;
                 Ok(Operation::AddFont { face, data })
             }
+            Operation::AddImage { id, data } => {
+                if self.images.contains(id) {
+                    return Err(ApplyError::DuplicateImage(id));
+                }
+                self.next_image_id = self.next_image_id.max(id.0 + 1);
+                self.images.images.insert(id, data);
+                Ok(Operation::RemoveImage { id })
+            }
+            Operation::RemoveImage { id } => {
+                if self.image_in_use(id) {
+                    return Err(ApplyError::ImageInUse(id));
+                }
+                let data = self
+                    .images
+                    .images
+                    .remove(&id)
+                    .ok_or(ApplyError::MissingImage(id))?;
+                Ok(Operation::AddImage { id, data })
+            }
             Operation::Batch(operations) => {
                 let mut inverses = Vec::with_capacity(operations.len());
                 for operation in operations {
@@ -1587,7 +1629,9 @@ impl Presentation {
     /// Checks that the image of an image fill is embedded.
     fn check_fill(&self, fill: &Fill) -> Result<(), ApplyError> {
         match fill {
-            Fill::Image(image) => Err(ApplyError::MissingImage(image.id)),
+            Fill::Image(image) if !self.images.contains(image.id) => {
+                Err(ApplyError::MissingImage(image.id))
+            }
             _ => Ok(()),
         }
     }
@@ -1640,6 +1684,7 @@ fn check_frame(frame: &Frame) -> Result<(), ApplyError> {
     }
 }
 
+pub use crate::images::{ImageData, ImageLibrary};
 pub use crate::operation::{ApplyError, LayerPatch, Operation, ShapeStylePatch, TextStylePatch};
 pub use crate::style::{
     Arrowhead, Dash, Fill, GradientStop, HeadKind, HeadSize, ImageFill, ImageFit, ImageId,
@@ -2930,5 +2975,61 @@ pub(crate) mod tests {
             }),
             Err(ApplyError::InvalidOpacity)
         );
+    }
+
+    #[test]
+    fn images_embed_undo_and_stay_while_a_fill_uses_them() {
+        let mut presentation = Presentation::new();
+        let data = ImageData::read(crate::images::tests::png(8, 4)).unwrap();
+        let image = presentation.new_image_id();
+        let fill = Fill::Image(ImageFill {
+            id: image,
+            fit: ImageFit::Cover,
+            opacity: 1.,
+        });
+        let rectangle = || {
+            ElementKind::Rectangle(RectangleElement {
+                fill: fill.clone(),
+                ..RectangleElement::default()
+            })
+        };
+        let slide = presentation.slides[0].id;
+        let id = presentation.new_element_id();
+        assert_eq!(
+            presentation.apply(Operation::AddElement {
+                slide,
+                parent: None,
+                index: 0,
+                element: Element::new(id, Frame::default(), rectangle()),
+            }),
+            Err(ApplyError::MissingImage(image))
+        );
+        let before = presentation.clone();
+        let inverse = presentation
+            .apply(Operation::AddImage {
+                id: image,
+                data: data.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            presentation.apply(Operation::AddImage { id: image, data }),
+            Err(ApplyError::DuplicateImage(image))
+        );
+        add_shape(&mut presentation, Frame::default(), rectangle());
+        assert!(presentation.image_in_use(image));
+        assert_eq!(
+            presentation.apply(Operation::RemoveImage { id: image }),
+            Err(ApplyError::ImageInUse(image))
+        );
+        let mut unused = before.clone();
+        let added = unused
+            .apply(Operation::AddImage {
+                id: image,
+                data: presentation.images.get(image).unwrap().clone(),
+            })
+            .unwrap();
+        assert_eq!(added, inverse);
+        unused.apply(inverse).unwrap();
+        assert_eq!(unused, before);
     }
 }

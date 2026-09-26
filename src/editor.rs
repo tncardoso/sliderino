@@ -21,8 +21,8 @@ use gpui_kit::{
 use crate::api::server::Agents;
 use crate::camera::Camera;
 use crate::document::{
-    ApplyError, Element, ElementId, ElementKind, EllipseElement, Frame, LineElement, Operation,
-    Presentation, RectangleElement, Slide, SlideId, TextElement, TextSizing, TextStyle,
+    ApplyError, Element, ElementId, ElementKind, EllipseElement, Frame, ImageId, LineElement,
+    Operation, Presentation, RectangleElement, Slide, SlideId, TextElement, TextSizing, TextStyle,
 };
 use crate::fonts::FontRegistry;
 use crate::history::History;
@@ -373,6 +373,13 @@ pub struct EditorView {
     pub focus: FocusHandle,
     /// Agents connected through the API, and whether the view follows them.
     pub agents: Agents,
+    /// Images the canvas or the thumbnails would draw but that are not
+    /// decoded yet; see [`EditorView::load_images`].
+    images_wanted: HashSet<ImageId>,
+    /// Images being decoded in the background.
+    images_pending: HashSet<ImageId>,
+    /// Images that cannot be decoded; they show as a placeholder.
+    images_failed: HashSet<ImageId>,
     _activation: Subscription,
 }
 
@@ -435,6 +442,9 @@ impl EditorView {
             hand_key_held: false,
             focus: cx.focus_handle(),
             agents: Agents::default(),
+            images_wanted: HashSet::new(),
+            images_pending: HashSet::new(),
+            images_failed: HashSet::new(),
             _activation: activation,
         }
     }
@@ -876,6 +886,46 @@ impl EditorView {
         }
     }
 
+    /// Asks for images whose pixels are not decoded: they are decoded in
+    /// the background after this render, and the editor renders again when
+    /// they are ready.
+    pub fn want_images(&mut self, ids: Vec<ImageId>) {
+        for id in ids {
+            if !self.images_failed.contains(&id) {
+                self.images_wanted.insert(id);
+            }
+        }
+    }
+
+    /// Decodes the images asked for since the last render, off the UI
+    /// thread.
+    fn load_images(&mut self, cx: &mut Context<Self>) {
+        for id in std::mem::take(&mut self.images_wanted) {
+            if !self.images_pending.insert(id) {
+                continue;
+            }
+            let Some(data) = self.presentation.images.get(id).cloned() else {
+                self.images_pending.remove(&id);
+                continue;
+            };
+            cx.spawn(async move |this, cx| {
+                let decoded = gpui_kit::AppContext::background_spawn(cx, async move {
+                    crate::images::pixels(&data).is_some()
+                })
+                .await;
+                this.update(cx, |this, cx| {
+                    this.images_pending.remove(&id);
+                    if !decoded {
+                        this.images_failed.insert(id);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
     /// Adds a rectangle, an ellipse or a line in the default style on top of
     /// the current slide, selects it and goes back to the Move tool.
     pub fn create_shape(&mut self, tool: Tool, frame: Frame) {
@@ -1192,6 +1242,16 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if focused
+            && keystroke.key == "v"
+            && keystroke.modifiers.secondary()
+            && !keystroke.modifiers.shift
+            && self.paste_image(window, cx)
+        {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
 
         if !self.viewport.contains(&window.mouse_position()) {
             return;
@@ -1432,7 +1492,7 @@ impl Render for EditorView {
         self.sync_shape_inspector(window, cx);
         let scene = self.canvas_scene(cx);
         let problems = crate::ui::properties_panel::diagnostics(self);
-        v_flex()
+        let root = v_flex()
             .id("editor")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1451,7 +1511,10 @@ impl Render for EditorView {
                     .child(slides_panel(self, cx))
                     .child(canvas(self, scene, cx))
                     .child(properties_panel(self, problems, cx)),
-            )
+            );
+        // The canvas and the thumbnails asked for images; decode them now.
+        self.load_images(cx);
+        root
     }
 }
 

@@ -10,8 +10,8 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    Arrowhead, Element, ElementId, ElementKind, Fill, FontData, FontFace, Frame, HAlign, ImageId,
-    LineHeight, Rgb, Slide, SlideId, Stroke, TextCase, TextSizing, TextStyle, VAlign,
+    Arrowhead, Element, ElementId, ElementKind, Fill, FontData, FontFace, Frame, HAlign, ImageData,
+    ImageId, LineHeight, Rgb, Slide, SlideId, Stroke, TextCase, TextSizing, TextStyle, VAlign,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +102,15 @@ pub enum Operation {
     /// Removes an embedded face no text uses.
     RemoveFont {
         face: FontFace,
+    },
+    /// Embeds an image in the presentation.
+    AddImage {
+        id: ImageId,
+        data: ImageData,
+    },
+    /// Removes an embedded image no fill uses.
+    RemoveImage {
+        id: ImageId,
     },
     /// Applies the operations in order, all or nothing. Its inverse is a
     /// batch of the inverses in reverse order.
@@ -414,6 +423,9 @@ pub enum ApplyError {
     InvalidOpacity,
     /// No embedded image has this id.
     MissingImage(ImageId),
+    DuplicateImage(ImageId),
+    /// A fill uses the image.
+    ImageInUse(ImageId),
 }
 
 impl std::fmt::Display for ApplyError {
@@ -450,6 +462,8 @@ impl std::fmt::Display for ApplyError {
             }
             ApplyError::InvalidOpacity => write!(f, "opacity must be between 0 and 1"),
             ApplyError::MissingImage(id) => write!(f, "image {} is not embedded", id.0),
+            ApplyError::DuplicateImage(id) => write!(f, "image {} is already embedded", id.0),
+            ApplyError::ImageInUse(id) => write!(f, "image {} is in use", id.0),
         }
     }
 }

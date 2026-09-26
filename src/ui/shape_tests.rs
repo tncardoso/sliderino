@@ -534,3 +534,83 @@ fn the_opacity_field_sets_the_opacity_of_each_element(cx: &mut TestAppContext) {
     assert_eq!((opacity(cx, a), opacity(cx, b)), (0.4, 0.4));
     assert_eq!(history(cx, handle), vec!["Opacity"]);
 }
+
+#[gpui_kit::test]
+fn an_inserted_image_is_one_undo_step_fitted_to_the_slide(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Presentation::new());
+    let id = crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor
+            .insert_image_bytes(crate::images::tests::png(4000, 1000).to_vec(), None)
+            .unwrap()
+    });
+    let element = only_element(cx, handle);
+    assert_eq!(element.id, id);
+    // 80% of the 1600-unit slide, with the proportions of the image.
+    assert!(near(element.frame.width, 1280.) && near(element.frame.height, 320.));
+    assert!(near(element.frame.center().0, 800.) && near(element.frame.center().1, 450.));
+    assert_eq!(history(cx, handle), vec!["Insert image"]);
+    // The same bytes again reuse the embedded image.
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor
+            .insert_image_bytes(
+                crate::images::tests::png(4000, 1000).to_vec(),
+                Some((100., 100.)),
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        read(cx, handle, |editor| editor
+            .presentation
+            .images
+            .iter()
+            .count()),
+        1
+    );
+    with_window(cx, handle, |window, cx| key(window, "ctrl-z", true, cx));
+    with_window(cx, handle, |window, cx| key(window, "ctrl-z", true, cx));
+    assert!(read(cx, handle, |editor| editor
+        .presentation
+        .images
+        .iter()
+        .count()
+        == 0));
+}
+
+#[gpui_kit::test]
+fn a_pasted_image_is_inserted(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Presentation::new());
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+            &gpui_kit::Image::from_bytes(
+                gpui_kit::ImageFormat::Png,
+                crate::images::tests::png(10, 10).to_vec(),
+            ),
+        ))
+    });
+    with_window(cx, handle, |window, cx| key(window, "ctrl-v", true, cx));
+    let element = only_element(cx, handle);
+    assert!(matches!(element.kind.fill(), Some(Fill::Image(_))));
+}
+
+#[gpui_kit::test]
+fn shapes_take_an_image_fill_and_its_fit(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor
+            .fill_with_image_bytes(crate::images::tests::png(8, 8).to_vec())
+            .unwrap();
+        editor.set_image_fit(crate::document::ImageFit::Stretch);
+    });
+    let Some(Fill::Image(fill)) = kind(cx, handle, id).fill().cloned() else {
+        panic!("an image fill");
+    };
+    assert_eq!(fill.fit, crate::document::ImageFit::Stretch);
+    assert_eq!(history(cx, handle), vec!["Image fill", "Image fit"]);
+    let error = crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.fill_with_image_bytes(b"not an image".to_vec())
+    });
+    assert!(error.is_err());
+}
