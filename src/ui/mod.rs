@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod agent_tests;
 pub mod canvas;
 pub mod inspector;
 #[cfg(all(test, feature = "perf"))]

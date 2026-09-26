@@ -17,6 +17,14 @@
 - `sliderino-debug scene` opens a scene file in the editor and can capture
   the slide to a PNG image.
 - Press Esc while you move or resize a text box to cancel the change.
+- Agents can read and change the open presentation. Add the MCP server with
+  `claude mcp add sliderino -- sliderino mcp`, or use the `sliderino` CLI
+  (`info`, `screenshot`, `apply`, `undo`, `call`). Agent changes appear
+  immediately and go into the same undo history as your changes. See
+  `docs/agent-api.md`.
+- The agent status at the top of the window shows the connected agents.
+  Click it and set **Follow agent** to see the slide and the element of each
+  agent change.
 
 ### Fixed
 

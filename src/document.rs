@@ -332,9 +332,14 @@ impl FontLibrary {
     pub fn contains(&self, face: &FontFace) -> bool {
         self.faces.contains_key(face)
     }
+
+    /// The embedded faces, sorted.
+    pub fn faces(&self) -> impl Iterator<Item = &FontFace> {
+        self.faces.keys()
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Presentation {
     pub size: SlideSize,
     /// Slides in presentation order.
@@ -344,6 +349,21 @@ pub struct Presentation {
     next_slide_id: u64,
     /// Id given to the next created element; only ever grows.
     next_element_id: u64,
+    /// Counts the changes applied, undo and redo included. External agents
+    /// compare it to detect edits made since they last read the document.
+    revision: u64,
+}
+
+/// Compares the content only: two presentations reached by different edits
+/// are equal, whatever their [`Presentation::revision`].
+impl PartialEq for Presentation {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size
+            && self.slides == other.slides
+            && self.fonts == other.fonts
+            && self.next_slide_id == other.next_slide_id
+            && self.next_element_id == other.next_element_id
+    }
 }
 
 impl Default for Presentation {
@@ -361,6 +381,7 @@ impl Presentation {
             fonts: FontLibrary::default(),
             next_slide_id: 1,
             next_element_id: 1,
+            revision: 0,
         };
         let id = presentation.new_slide_id();
         presentation.slides.push(Slide::new(id));
@@ -451,11 +472,23 @@ impl Presentation {
         Ok(())
     }
 
+    /// Number of changes applied so far; see the field.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Applies one edit and returns the operation that undoes it.
     ///
     /// On error the presentation is left unchanged, including for a
-    /// [`Operation::Batch`] that fails halfway.
+    /// [`Operation::Batch`] that fails halfway. A successful edit increments
+    /// the [revision](Self::revision).
     pub fn apply(&mut self, operation: Operation) -> Result<Operation, ApplyError> {
+        let inverse = self.apply_one(operation)?;
+        self.revision += 1;
+        Ok(inverse)
+    }
+
+    fn apply_one(&mut self, operation: Operation) -> Result<Operation, ApplyError> {
         match operation {
             Operation::AddSlide { index, slide } => {
                 if self.index_of(slide.id).is_some() {
@@ -618,11 +651,11 @@ impl Presentation {
             Operation::Batch(operations) => {
                 let mut inverses = Vec::with_capacity(operations.len());
                 for operation in operations {
-                    match self.apply(operation) {
+                    match self.apply_one(operation) {
                         Ok(inverse) => inverses.push(inverse),
                         Err(error) => {
                             for inverse in inverses.into_iter().rev() {
-                                self.apply(inverse)
+                                self.apply_one(inverse)
                                     .expect("the inverse of an applied operation applies");
                             }
                             return Err(error);

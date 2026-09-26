@@ -18,10 +18,11 @@ use gpui_kit::{
     Subscription, Window, point, px,
 };
 
+use crate::api::server::Agents;
 use crate::camera::Camera;
 use crate::document::{
-    Element, ElementId, ElementKind, Frame, Operation, Presentation, Slide, SlideId, TextElement,
-    TextSizing, TextStyle,
+    ApplyError, Element, ElementId, ElementKind, Frame, Operation, Presentation, Slide, SlideId,
+    TextElement, TextSizing, TextStyle,
 };
 use crate::fonts::FontRegistry;
 use crate::history::History;
@@ -219,6 +220,8 @@ pub struct EditorView {
     pub hand_key_held: bool,
     /// Keyboard focus of the editor; key events reach the canvas through it.
     pub focus: FocusHandle,
+    /// Agents connected through the API, and whether the view follows them.
+    pub agents: Agents,
     _activation: Subscription,
 }
 
@@ -273,6 +276,7 @@ impl EditorView {
             pan_drag: None,
             hand_key_held: false,
             focus: cx.focus_handle(),
+            agents: Agents::default(),
             _activation: activation,
         }
     }
@@ -385,40 +389,51 @@ impl EditorView {
         }
     }
 
-    pub fn undo(&mut self) {
+    /// Reverts the latest step. `None` when there is nothing to undo.
+    pub fn undo(&mut self) -> Option<Result<(), ApplyError>> {
         let index = self.presentation.index_of(self.current_slide);
-        if let Some(result) = self.history.undo(&mut self.presentation) {
-            self.after_history(result, index);
-        }
+        let result = self.history.undo(&mut self.presentation)?;
+        Some(self.after_history(result, index))
     }
 
-    pub fn redo(&mut self) {
+    /// Repeats the latest undone step. `None` when there is nothing to redo.
+    pub fn redo(&mut self) -> Option<Result<(), ApplyError>> {
         let index = self.presentation.index_of(self.current_slide);
-        if let Some(result) = self.history.redo(&mut self.presentation) {
-            self.after_history(result, index);
-        }
+        let result = self.history.redo(&mut self.presentation)?;
+        Some(self.after_history(result, index))
     }
 
     /// Restores the selection after undo or redo and shows the slide it is on.
     fn after_history(
         &mut self,
-        result: Result<Option<ElementId>, crate::document::ApplyError>,
+        result: Result<Option<ElementId>, ApplyError>,
         slide_index: Option<usize>,
-    ) {
-        let selection = match result {
-            Ok(selection) => selection,
-            Err(error) => {
-                eprintln!("sliderino: undo failed: {error}");
-                return;
-            }
-        };
+    ) -> Result<(), ApplyError> {
+        let selection = result.inspect_err(|error| eprintln!("sliderino: undo failed: {error}"))?;
         self.selection = selection.filter(|id| self.presentation.element(*id).is_some());
         if let Some((slide, _)) = self.selection.and_then(|id| self.presentation.locate(id)) {
             self.current_slide = slide;
         }
+        self.repair_view(slide_index);
+        Ok(())
+    }
+
+    /// Makes the view state valid again after a change the view did not
+    /// make: shows a neighbor when the current slide is gone (`slide_index`
+    /// is its index before the change), drops a selection or text edit whose
+    /// element is gone and keeps the caret inside the edited text.
+    pub fn repair_view(&mut self, slide_index: Option<usize>) {
         if self.presentation.slide(self.current_slide).is_none() {
             let last = self.presentation.slides.len() - 1;
             self.current_slide = self.presentation.slides[slide_index.unwrap_or(0).min(last)].id;
+        }
+        let on_slide = |this: &Self, id: ElementId| {
+            this.presentation
+                .locate(id)
+                .is_some_and(|(slide, _)| slide == this.current_slide)
+        };
+        if self.selection.is_some_and(|id| !on_slide(self, id)) {
+            self.selection = None;
         }
         if let Some(edit) = &mut self.text_edit {
             let content = self
@@ -932,7 +947,7 @@ impl Render for EditorView {
             .text_color(theme::text())
             .text_size(px(12.))
             .line_height(px(16.))
-            .child(top_bar(self))
+            .child(top_bar(self, cx))
             .child(
                 h_flex()
                     .flex_1()

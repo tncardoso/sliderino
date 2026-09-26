@@ -3,6 +3,7 @@
 //! binaries are the editor (`sliderino`) and the debug tooling
 //! (`sliderino-debug`).
 
+pub mod api;
 pub mod app;
 pub mod assets;
 pub mod camera;

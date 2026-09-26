@@ -1,25 +1,31 @@
 //! Window title bar: document breadcrumb, agent status and the main actions.
 
+use std::time::Instant;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Sizable as _, TitleBar, h_flex};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Sizable as _, TitleBar, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    FontWeight, InteractiveElement as _, IntoElement, ParentElement, Styled, TestSupportExt as _,
-    div, px,
+    Anchor, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Styled,
+    TestSupportExt as _, div, px,
 };
 
+use crate::api::protocol::ClientKind;
 use crate::editor::EditorView;
 use crate::mock::DOCUMENT;
 use crate::theme;
 
-pub fn top_bar(editor: &EditorView) -> impl IntoElement {
+pub fn top_bar(editor: &EditorView, cx: &Context<EditorView>) -> impl IntoElement {
     TitleBar::new()
         .h(px(44.))
         .pl(px(16.))
         .bg(theme::background())
         .border_color(theme::border())
         .child(breadcrumb())
-        .child(actions(editor))
+        .child(actions(editor, cx))
 }
 
 fn logo() -> impl IntoElement {
@@ -62,23 +68,85 @@ fn breadcrumb() -> impl IntoElement {
     )
 }
 
-fn agent_status() -> impl IntoElement {
-    h_flex()
+/// The agents connected through the API. Clicking opens the list of
+/// clients and the "Follow agent" switch.
+fn agent_status(editor: &EditorView, cx: &Context<EditorView>) -> impl IntoElement {
+    let status = editor.agents.status(Instant::now());
+    let connected = status.is_some();
+    let (dot, text) = if connected {
+        (theme::accent(), theme::accent())
+    } else {
+        (theme::text_faint(), theme::text_muted())
+    };
+    let trigger = Button::new("agent-status")
+        .ghost()
+        .xsmall()
         .h(px(28.))
         .px(px(10.))
-        .gap(px(6.))
         .rounded(px(14.))
-        .bg(theme::accent_soft())
-        .child(div().size(px(6.)).rounded_full().bg(theme::accent()))
+        .when(connected, |button| button.bg(theme::accent_soft()))
         .child(
-            div()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::accent())
-                .child(DOCUMENT.agent_status),
-        )
+            h_flex()
+                .gap(px(6.))
+                .child(div().size(px(6.)).rounded_full().bg(dot))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(text)
+                        .child(status.unwrap_or_else(|| "No agent".into())),
+                ),
+        );
+    let editor = cx.entity();
+    Popover::new("agent-status-popover")
+        .anchor(Anchor::TopRight)
+        .trigger(trigger)
+        .content(move |_, _, cx| {
+            let agents = &editor.read(cx).agents;
+            let clients = agents.clients.iter().map(|client| {
+                let kind = match client.kind {
+                    ClientKind::Mcp => "MCP",
+                    ClientKind::Cli => "CLI",
+                };
+                div()
+                    .text_color(theme::text())
+                    .child(format!("{} · {kind}", client.name))
+            });
+            let editor = editor.clone();
+            v_flex()
+                .w(px(220.))
+                .gap(px(8.))
+                .text_size(px(12.))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child("Agents"),
+                )
+                .when(agents.clients.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .text_color(theme::text_muted())
+                            .child("No agent is connected. Agents connect with sliderino mcp."),
+                    )
+                })
+                .children(clients)
+                .child(
+                    Switch::new("follow-agent")
+                        .small()
+                        .checked(agents.follow)
+                        .label("Follow agent")
+                        .tooltip("Show the slide and the element of each agent edit")
+                        .on_change(move |follow, _, cx| {
+                            editor.update(cx, |editor, cx| {
+                                editor.agents.follow = *follow;
+                                cx.notify();
+                            });
+                        }),
+                )
+        })
 }
 
-fn actions(editor: &EditorView) -> impl IntoElement {
+fn actions(editor: &EditorView, cx: &Context<EditorView>) -> impl IntoElement {
     let zoom = editor
         .camera
         .map(|camera| camera.label())
@@ -86,7 +154,7 @@ fn actions(editor: &EditorView) -> impl IntoElement {
     h_flex()
         .gap(px(8.))
         .pr(px(12.))
-        .child(agent_status())
+        .child(agent_status(editor, cx))
         .child(
             div()
                 .id("zoom-level")

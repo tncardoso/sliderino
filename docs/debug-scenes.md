@@ -43,7 +43,8 @@ does not have.
 ## Scene files
 
 A scene file is a JSON list of operations. The `op` field gives the type of
-operation. The operations are the same as the editor uses.
+operation. The operations are the same as the editor uses. The agent API uses
+the same format (see `agent-api.md`).
 
 ```json
 [
@@ -58,7 +59,7 @@ operation. The operations are the same as the editor uses.
 
 | `op` | Fields |
 | --- | --- |
-| `add_slide` | `slide` (`{"id": 2}`), `index` (optional) |
+| `add_slide` | `slide` (`{"id": 2}`, optional), `index` (optional) |
 | `remove_slide` | `id` |
 | `move_slide` | `id`, `index` |
 | `add_element` | `slide`, `element`, `index` (optional; the element goes on top) |
@@ -73,12 +74,15 @@ operation. The operations are the same as the editor uses.
 
 Rules:
 
-- The first slide of a new presentation has the id `1`. You give the ids of
-  new slides and elements.
+- The first slide of a new presentation has the id `1`. The ids of new
+  slides and elements are optional. If you do not give an id, the tool gives
+  the next free id. A reference such as `"$title"` gives a new id a name,
+  and later operations can use that name as the id.
 - A text can only use a font face that the scene adds with `add_font`.
   `add_font` gives only the name of the face. The tool gets the font data
   from the fonts of Sliderino (Inter) or from the fonts of the system. If the
   license of the font does not permit embedding, the tool shows a warning.
+  Scenes do not add fonts automatically, but the agent API does.
 - `sizing` is `auto_width`, `auto_height` or `fixed`.
 - In `style` and `patch`, all fields are optional: `font`, `size`,
   `line_height` (`"auto"` or `{"percent": 120}`), `letter_spacing` (percent of

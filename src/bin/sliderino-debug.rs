@@ -112,7 +112,7 @@ fn main() -> ExitCode {
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// A new presentation with the scene applied, and the applied steps.
-fn load_scene(ops: &Path) -> Result<(Presentation, Vec<script::Applied>)> {
+fn load_scene(ops: &Path) -> Result<(Presentation, Vec<sliderino::api::ops::Step>)> {
     let mut presentation = Presentation::new();
     let applied = script::apply(&mut presentation, script::load(ops)?)?;
     Ok((presentation, applied))

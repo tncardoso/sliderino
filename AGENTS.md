@@ -7,6 +7,7 @@
 
 ## Instructions
 
+- Keep tools consistant across interface, MCP, and CLI.
 - Run lint, format and tests at every code change
     - `cargo clippy`, `cargo fmt`, `cargo test`
 - Only run one cargo tool at a time (clippy, fmt, build, test)
