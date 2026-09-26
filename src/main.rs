@@ -1,6 +1,9 @@
 mod assets;
+mod camera;
+mod document;
 mod editor;
 mod mock;
+mod shortcuts;
 mod theme;
 mod ui;
 
@@ -30,7 +33,8 @@ fn main() {
 
             cx.spawn(async move |cx| {
                 cx.open_window(options, |window, cx| {
-                    let view = cx.new(|_| EditorView::new());
+                    let view = cx.new(|cx| EditorView::new(window, cx));
+                    window.focus(&view.read(cx).focus.clone(), cx);
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("failed to open the editor window");

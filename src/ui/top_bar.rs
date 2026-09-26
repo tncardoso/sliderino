@@ -3,19 +3,23 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Sizable as _, TitleBar, h_flex};
-use gpui_kit::{FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui_kit::{
+    FontWeight, InteractiveElement as _, IntoElement, ParentElement, Styled, TestSupportExt as _,
+    div, px,
+};
 
+use crate::editor::EditorView;
 use crate::mock::DOCUMENT;
 use crate::theme;
 
-pub fn top_bar() -> impl IntoElement {
+pub fn top_bar(editor: &EditorView) -> impl IntoElement {
     TitleBar::new()
         .h(px(44.))
         .pl(px(16.))
         .bg(theme::background())
         .border_color(theme::border())
         .child(breadcrumb())
-        .child(actions())
+        .child(actions(editor))
 }
 
 fn logo() -> impl IntoElement {
@@ -74,16 +78,19 @@ fn agent_status() -> impl IntoElement {
         )
 }
 
-fn actions() -> impl IntoElement {
+fn actions(editor: &EditorView) -> impl IntoElement {
+    let zoom = editor.camera.map(|camera| camera.label()).unwrap_or_default();
     h_flex()
         .gap(px(8.))
         .pr(px(12.))
         .child(agent_status())
         .child(
             div()
+                .id("zoom-level")
+                .test_support()
                 .px(px(8.))
                 .text_color(theme::text_muted())
-                .child(DOCUMENT.zoom),
+                .child(zoom),
         )
         .child(
             Button::new("export")
