@@ -2,8 +2,13 @@ mod assets;
 mod camera;
 mod document;
 mod editor;
+mod fonts;
+mod history;
 mod mock;
+mod operation;
 mod shortcuts;
+mod snap;
+mod text_layout;
 mod theme;
 mod ui;
 
@@ -22,6 +27,7 @@ fn main() {
                 .add_fonts(assets::fonts())
                 .expect("embedded Inter fonts load");
             theme::apply(cx);
+            fonts::preload();
 
             let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
             let options = WindowOptions {

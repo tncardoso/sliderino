@@ -39,10 +39,6 @@ pub fn canvas() -> Hsla {
     rgb(0xEEEEEC).into()
 }
 
-pub fn surface() -> Hsla {
-    rgb(0xF4F4F2).into()
-}
-
 pub fn ink() -> Hsla {
     rgb(0x111111).into()
 }
@@ -71,8 +67,9 @@ pub fn warn_soft() -> Hsla {
     rgb(0xFFF3E0).into()
 }
 
-pub fn placeholder_line() -> Hsla {
-    rgb(0xD0D0D0).into()
+/// Snap guides on the canvas.
+pub fn guide() -> Hsla {
+    rgb(0xF2376B).into()
 }
 
 /// Applies the Sliderino light theme to the kit. Call after `gpui_kit::init`.

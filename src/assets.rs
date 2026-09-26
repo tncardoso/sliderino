@@ -29,6 +29,23 @@ icon_assets!(
         Radius,
         CircleCheck,
         CircleAlert,
+        TriangleAlert,
+        ArrowLeftRight,
+        ArrowUpDown,
+        TextAlignStart,
+        TextAlignCenter,
+        TextAlignEnd,
+        TextAlignJustify,
+        AlignVerticalJustifyStart,
+        AlignVerticalJustifyCenter,
+        AlignVerticalJustifyEnd,
+        Underline,
+        Strikethrough,
+        CaseSensitive,
+        CaseUpper,
+        UnfoldVertical,
+        ChevronsLeftRight,
+        Pilcrow,
     ]
 );
 
@@ -57,5 +74,9 @@ pub fn fonts() -> Vec<Cow<'static, [u8]>> {
         Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/Inter-ExtraBold.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Italic.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-MediumItalic.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBoldItalic.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-ExtraBoldItalic.ttf").as_slice()),
     ]
 }

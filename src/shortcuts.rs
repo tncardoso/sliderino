@@ -56,6 +56,13 @@ impl KeyChord {
         }
     }
 
+    pub fn ctrl_shift(key: &str) -> Self {
+        Self {
+            shift: true,
+            ..Self::ctrl(key)
+        }
+    }
+
     pub fn matches(&self, keystroke: &Keystroke) -> bool {
         let modifiers = &keystroke.modifiers;
         keystroke.key.eq_ignore_ascii_case(&self.key)
@@ -91,6 +98,28 @@ pub struct Shortcuts {
     pub wheel_zoom_step: f32,
     pub zoom_to_fit: KeyChord,
     pub zoom_to_100: KeyChord,
+    pub undo: KeyChord,
+    /// Both chords redo.
+    pub redo: [KeyChord; 2],
+    /// Holding this key while dragging turns snapping off.
+    pub snap_off: SnapOffModifier,
+}
+
+/// The modifier that turns snapping off during a drag.
+#[allow(dead_code, reason = "alternatives for the future settings screen")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapOffModifier {
+    Ctrl,
+    Alt,
+}
+
+impl SnapOffModifier {
+    pub fn held(self, modifiers: &gpui_kit::Modifiers) -> bool {
+        match self {
+            SnapOffModifier::Ctrl => modifiers.control,
+            SnapOffModifier::Alt => modifiers.alt,
+        }
+    }
 }
 
 impl Default for Shortcuts {
@@ -102,6 +131,9 @@ impl Default for Shortcuts {
             wheel_zoom_step: 1.1,
             zoom_to_fit: KeyChord::ctrl("1"),
             zoom_to_100: KeyChord::ctrl("0"),
+            undo: KeyChord::ctrl("z"),
+            redo: [KeyChord::ctrl_shift("z"), KeyChord::ctrl("y")],
+            snap_off: SnapOffModifier::Ctrl,
         }
     }
 }
@@ -123,6 +155,10 @@ mod tests {
         assert!(!shortcuts.zoom_to_fit.matches(&keystroke("1")));
         assert!(!shortcuts.zoom_to_fit.matches(&keystroke("ctrl-shift-1")));
         assert!(shortcuts.zoom_to_100.matches(&keystroke("ctrl-0")));
+        assert!(shortcuts.undo.matches(&keystroke("ctrl-z")));
+        assert!(!shortcuts.undo.matches(&keystroke("ctrl-shift-z")));
+        assert!(shortcuts.redo[0].matches(&keystroke("ctrl-shift-z")));
+        assert!(shortcuts.redo[1].matches(&keystroke("ctrl-y")));
     }
 
     #[test]

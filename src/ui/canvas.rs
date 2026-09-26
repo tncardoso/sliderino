@@ -1,21 +1,28 @@
-//! Center area: the slide on the canvas ground, with zoom and pan, and the
-//! tool palette.
-//!
-//! The slide is still empty; its content arrives with the renderer.
+//! Center area: the slide on the canvas ground, with zoom and pan, its
+//! elements, direct manipulation (create, select, move, resize, edit text)
+//! and the tool palette.
+
+use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{Selectable as _, h_flex};
 use gpui_kit::{
-    AnyElement, App, BoxShadow, Context, CursorStyle, DispatchPhase, Edges, InteractiveElement as _,
-    IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, ScrollDelta,
-    ScrollWheelEvent, Styled, TestSupportExt as _, Window, canvas as paint_canvas, div, hsla, point,
-    px,
+    AnyElement, App, BorderStyle, BoxShadow, Context, CursorStyle, DispatchPhase, Edges,
+    ElementInputHandler, Entity, FocusHandle, FontId, FontWeight, GlyphId, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, ScrollDelta, ScrollWheelEvent, Styled,
+    TestSupportExt as _, Window, canvas as paint_canvas, div, fill, hsla, outline, point, px, size,
 };
 
 use crate::camera::Camera;
-use crate::editor::{EditorView, Tool};
+use crate::document::{
+    ElementId, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
+};
+use crate::editor::{Drag, EditorView, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
+use crate::snap::{Guide, Handle, ResizeMode, Targets, resize, snap_move, snap_resize};
+use crate::text_layout::{BoxRect, TextLayout};
 use crate::theme;
 
 /// Space kept around a fitted slide; the bottom clears the tool palette.
@@ -29,10 +36,526 @@ const FIT_INSETS: Edges<gpui_kit::Pixels> = Edges {
 /// Pixel scroll deltas (trackpads) count as one wheel line per this distance.
 const PIXELS_PER_LINE: f32 = 50.;
 
-pub fn canvas(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
-    let cursor = match (editor.pan_drag.is_some(), editor.effective_tool()) {
-        (true, _) => CursorStyle::ClosedHand,
-        (false, Tool::Hand) => CursorStyle::OpenHand,
+/// Distance on screen within which a drag snaps.
+const SNAP_DISTANCE: f32 = 6.;
+
+/// Distance on screen the pointer travels before a press becomes a drag.
+const DRAG_START: f32 = 3.;
+
+/// Half the side of the square around a handle that picks it.
+const HANDLE_REACH: f32 = 6.;
+
+/// Side of a drawn resize handle.
+const HANDLE_SIZE: f32 = 7.;
+
+/// A text element ready to paint: its layout and the GPUI font of its face.
+#[derive(Clone)]
+pub struct PaintText {
+    pub frame: Frame,
+    pub layout: Arc<TextLayout>,
+    /// None when GPUI cannot load the embedded face; the text is skipped.
+    pub font_id: Option<FontId>,
+    pub color: Hsla,
+    pub underline: bool,
+    pub strikethrough: bool,
+}
+
+/// Everything the canvas paints over the slide, in slide units.
+pub struct CanvasScene {
+    texts: Vec<PaintText>,
+    /// Outline of the selected element, whether it shows resize handles and
+    /// whether its text overflows.
+    selection: Option<(Frame, bool, bool)>,
+    highlight: Vec<BoxRect>,
+    caret: Option<BoxRect>,
+    /// Stretch of text an input method is composing, underlined.
+    marked: Vec<BoxRect>,
+    preview: Option<Frame>,
+    guides: Vec<Guide>,
+    /// Size label, "216 × 148", and the area it sits under.
+    badge: Option<(Frame, String)>,
+    editing: bool,
+}
+
+impl EditorView {
+    /// Text elements of a slide, laid out and ready to paint.
+    pub fn paint_texts(&mut self, slide: SlideId, cx: &App) -> Vec<PaintText> {
+        let Some(slide) = self.presentation.slide(slide) else {
+            return Vec::new();
+        };
+        let mut texts = Vec::new();
+        for element in &slide.elements {
+            let Some(text) = element.as_text() else {
+                continue;
+            };
+            let Some(layout) = self.layouts.get(&self.presentation, element.id) else {
+                continue;
+            };
+            let style = &text.style;
+            let font_id = self
+                .presentation
+                .fonts
+                .get(&style.font)
+                .and_then(|data| self.fonts.font_id(&style.font, data, cx));
+            let color: Hsla = gpui_kit::rgb(style.color.0).into();
+            texts.push(PaintText {
+                frame: element.frame,
+                layout,
+                font_id,
+                color: color.opacity(style.opacity),
+                underline: style.underline,
+                strikethrough: style.strikethrough,
+            });
+        }
+        texts
+    }
+
+    pub fn canvas_scene(&mut self, cx: &App) -> CanvasScene {
+        let texts = self.paint_texts(self.current_slide, cx);
+        let mut scene = CanvasScene {
+            texts,
+            selection: None,
+            highlight: Vec::new(),
+            caret: None,
+            marked: Vec::new(),
+            preview: None,
+            guides: self.guides.clone(),
+            badge: None,
+            editing: self.text_edit.is_some(),
+        };
+        if let Some(id) = self.selection
+            && let Some(frame) = self.frame_of(id)
+        {
+            let overflow = self
+                .layout_of(id)
+                .is_some_and(|layout| layout.overflow() > 0.);
+            scene.selection = Some((frame, self.text_edit.is_none(), overflow));
+            if self.text_edit.is_none() {
+                // Below the text that overflows the box, so it stays readable.
+                let bottom = self.layout_of(id).map_or(0., |layout| {
+                    layout
+                        .lines
+                        .last()
+                        .map_or(0., |line| line.top + line.height)
+                });
+                let under = Frame {
+                    height: frame.height.max(bottom),
+                    ..frame
+                };
+                scene.badge = Some((
+                    under,
+                    format!("{} × {}", frame.width.round(), frame.height.round()),
+                ));
+            }
+        }
+        if let Some(edit) = self.text_edit.clone()
+            && let Some(layout) = self.layout_of(edit.id)
+            && let Some(frame) = self.frame_of(edit.id)
+        {
+            let offset = |rect: BoxRect| BoxRect {
+                left: rect.left + frame.x,
+                top: rect.top + frame.y,
+                right: rect.right + frame.x,
+                bottom: rect.bottom + frame.y,
+            };
+            scene.highlight = layout
+                .selection_rects(edit.selection())
+                .into_iter()
+                .map(offset)
+                .collect();
+            if let Some(marked) = &edit.marked {
+                scene.marked = layout
+                    .selection_rects(marked.clone())
+                    .into_iter()
+                    .map(offset)
+                    .collect();
+            }
+            scene.caret = Some(offset(layout.caret(edit.caret)));
+        }
+        if let Some(Drag::Create { start, current }) = &self.drag {
+            scene.preview = Some(normalized(*start, *current));
+        }
+        scene
+    }
+
+    pub fn frame_of(&self, id: ElementId) -> Option<Frame> {
+        self.presentation.element(id).map(|element| element.frame)
+    }
+
+    /// Topmost element of the current slide under a slide point.
+    fn element_at(&self, at: SlidePoint) -> Option<ElementId> {
+        let reach = self.camera.map_or(0., |camera| DRAG_START / camera.zoom);
+        self.current_slide()
+            .elements
+            .iter()
+            .rev()
+            .find(|element| inflate(&element.frame, reach).contains(at.x, at.y))
+            .map(|element| element.id)
+    }
+
+    /// The resize handle of the selection under a window position.
+    fn handle_at(&self, position: Point<Pixels>) -> Option<Handle> {
+        if self.text_edit.is_some() {
+            return None;
+        }
+        let frame = self.frame_of(self.selection?)?;
+        Handle::ALL.into_iter().find(|handle| {
+            let (x, y) = handle.position(&frame);
+            self.to_window(x, y).is_some_and(|at| {
+                (f32::from(at.x - position.x)).abs() <= HANDLE_REACH
+                    && (f32::from(at.y - position.y)).abs() <= HANDLE_REACH
+            })
+        })
+    }
+
+    /// Lines and baselines the element at `id` snaps to.
+    fn snap_targets(&mut self, id: ElementId) -> Targets {
+        let size = self.presentation.size;
+        let mut targets = Targets::new(size.width as f32, size.height as f32);
+        let others: Vec<(ElementId, Frame)> = self
+            .current_slide()
+            .elements
+            .iter()
+            .filter(|element| element.id != id)
+            .map(|element| (element.id, element.frame))
+            .collect();
+        for (other, frame) in others {
+            targets.add_frame(&frame);
+            if let Some(layout) = self.layout_of(other) {
+                targets.baselines.push(frame.y + layout.first_baseline());
+            }
+        }
+        targets
+    }
+
+    /// Height of one empty line of text in the default style.
+    fn default_line_height(&self) -> f32 {
+        let style = TextStyle::default();
+        let text = TextElement {
+            content: String::new(),
+            style: style.clone(),
+            sizing: TextSizing::AutoWidth,
+        };
+        self.presentation
+            .fonts
+            .get(&style.font)
+            .cloned()
+            .or_else(|| crate::fonts::data(&style.font))
+            .and_then(|data| crate::text_layout::measure(&text, 0., &data).ok())
+            .map_or(style.size * 1.2, |(_, height)| height)
+    }
+
+    /// Enters editing of a text box at a pointer press, placing the caret or,
+    /// on a double click, selecting the word.
+    fn press_text(&mut self, id: ElementId, at: SlidePoint, event: &MouseDownEvent) {
+        let (Some(layout), Some(frame)) = (self.layout_of(id), self.frame_of(id)) else {
+            return;
+        };
+        let index = layout.index_at(at.x - frame.x, at.y - frame.y);
+        let editing = self.text_edit.as_ref().is_some_and(|edit| edit.id == id);
+        if !editing {
+            self.begin_text_edit(id, index, index);
+        }
+        if event.click_count >= 2 {
+            self.select_word(index);
+        } else {
+            self.move_caret(index, editing && event.modifiers.shift);
+        }
+        self.drag = Some(Drag::SelectText { id });
+    }
+
+    fn press_with_move_tool(&mut self, at: SlidePoint, event: &MouseDownEvent) {
+        if let Some(edit) = &self.text_edit {
+            let id = edit.id;
+            if self.element_at(at) == Some(id) {
+                self.press_text(id, at, event);
+                return;
+            }
+            self.end_text_edit();
+        }
+        if let Some(handle) = self.handle_at(event.position)
+            && let Some(id) = self.selection
+            && let Some(element) = self.presentation.element(id)
+            && let Some(text) = element.as_text()
+        {
+            self.drag = Some(Drag::Resize {
+                id,
+                handle,
+                grab: at,
+                origin: element.frame,
+                sizing: text.sizing,
+            });
+            return;
+        }
+        match self.element_at(at) {
+            Some(id) if event.click_count >= 2 => {
+                self.selection = Some(id);
+                self.press_text(id, at, event);
+            }
+            Some(id) => {
+                self.selection = Some(id);
+                self.drag = Some(Drag::Move {
+                    id,
+                    grab: at,
+                    origin: self.frame_of(id).expect("the hit element exists"),
+                    moved: false,
+                });
+            }
+            None => self.selection = None,
+        }
+    }
+
+    fn on_canvas_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        if self.pan_drag.is_some() {
+            return;
+        }
+        let pans = self.shortcuts.pan_button.matches(event.button)
+            || (event.button == MouseButton::Left && self.effective_tool() == Tool::Hand);
+        if pans {
+            self.pan_drag = Some((event.button, event.position));
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let Some(at) = self.to_slide(event.position) else {
+            return;
+        };
+        match self.effective_tool() {
+            Tool::Text => {
+                if let Some(id) = self.element_at(at) {
+                    self.active_tool = Tool::Move;
+                    self.press_text(id, at, event);
+                } else {
+                    self.end_text_edit();
+                    self.selection = None;
+                    self.drag = Some(Drag::Create {
+                        start: at,
+                        current: at,
+                    });
+                }
+            }
+            Tool::Move => self.press_with_move_tool(at, event),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_pointer_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if let Some((button, last)) = self.pan_drag {
+            if let Some(camera) = &mut self.camera {
+                camera.pan_by(event.position - last);
+            }
+            self.pan_drag = Some((button, event.position));
+            cx.notify();
+            return;
+        }
+        let (Some(drag), Some(at), Some(camera)) = (
+            self.drag.clone(),
+            self.to_slide(event.position),
+            self.camera,
+        ) else {
+            return;
+        };
+        let threshold = SNAP_DISTANCE / camera.zoom;
+        let snap = !self.shortcuts.snap_off.held(&event.modifiers);
+        match drag {
+            Drag::Create { start, .. } => {
+                self.drag = Some(Drag::Create { start, current: at });
+            }
+            Drag::Move {
+                id,
+                grab,
+                origin,
+                moved,
+            } => {
+                let distance = (at.x - grab.x).hypot(at.y - grab.y) * camera.zoom;
+                if !moved && distance < DRAG_START {
+                    return;
+                }
+                let mut frame = Frame {
+                    x: origin.x + at.x - grab.x,
+                    y: origin.y + at.y - grab.y,
+                    ..origin
+                };
+                self.guides.clear();
+                if snap {
+                    let targets = self.snap_targets(id);
+                    let baseline = self.layout_of(id).map(|layout| layout.first_baseline());
+                    (frame, self.guides) = snap_move(&frame, baseline, &targets, threshold);
+                }
+                // Live preview; the step is recorded when the drag ends.
+                let _ = self.presentation.apply(Operation::SetFrame { id, frame });
+                self.drag = Some(Drag::Move {
+                    id,
+                    grab,
+                    origin,
+                    moved: true,
+                });
+            }
+            Drag::Resize {
+                id,
+                handle,
+                grab,
+                origin,
+                sizing,
+            } => {
+                let mode = ResizeMode {
+                    keep_ratio: event.modifiers.shift,
+                    from_center: event.modifiers.alt,
+                };
+                let mut frame = resize(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
+                self.guides.clear();
+                if snap && mode == ResizeMode::default() {
+                    let targets = self.snap_targets(id);
+                    (frame, self.guides) = snap_resize(&frame, handle, &targets, threshold);
+                }
+                let _ = self.presentation.apply(Operation::Batch(vec![
+                    Operation::SetTextSizing {
+                        id,
+                        sizing: resized_sizing(sizing, handle),
+                    },
+                    Operation::SetFrame { id, frame },
+                ]));
+            }
+            Drag::SelectText { id } => {
+                if let (Some(layout), Some(frame)) = (self.layout_of(id), self.frame_of(id)) {
+                    let index = layout.index_at(at.x - frame.x, at.y - frame.y);
+                    self.move_caret(index, true);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_pointer_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if self
+            .pan_drag
+            .is_some_and(|(button, _)| button == event.button)
+        {
+            self.pan_drag = None;
+            cx.notify();
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        self.guides.clear();
+        let selection = self.selection;
+        match drag {
+            Drag::Create { start, current } => {
+                let zoom = self.camera.map_or(1., |camera| camera.zoom);
+                let line_height = self.default_line_height();
+                let dragged = (current.x - start.x).hypot(current.y - start.y) * zoom >= DRAG_START;
+                if dragged {
+                    let mut frame = normalized(start, current);
+                    frame.height = frame.height.max(line_height);
+                    self.create_text(frame, TextSizing::Fixed);
+                } else {
+                    // The caret's middle lands where the author clicked.
+                    let frame = Frame {
+                        x: start.x,
+                        y: start.y - line_height / 2.,
+                        ..Frame::default()
+                    };
+                    self.create_text(frame, TextSizing::AutoWidth);
+                }
+                self.active_tool = Tool::Move;
+            }
+            Drag::Move {
+                id,
+                origin,
+                moved: true,
+                ..
+            } => {
+                self.history.record(
+                    "Move",
+                    Operation::SetFrame { id, frame: origin },
+                    selection,
+                    selection,
+                );
+            }
+            Drag::Resize {
+                id, origin, sizing, ..
+            } => {
+                let current = self
+                    .presentation
+                    .element(id)
+                    .and_then(|element| Some((element.frame, element.as_text()?.sizing)));
+                if let Some((frame, now)) = current
+                    && (frame != origin || now != sizing)
+                {
+                    let mut undo = vec![Operation::SetFrame { id, frame: origin }];
+                    if now != sizing {
+                        undo.push(Operation::SetTextSizing { id, sizing });
+                    }
+                    self.history
+                        .record("Resize", Operation::Batch(undo), selection, selection);
+                }
+            }
+            Drag::Move { .. } | Drag::SelectText { .. } => {}
+        }
+        cx.notify();
+    }
+}
+
+/// The sizing a text box takes when resized from `handle`: dragging a side
+/// of an auto-width box makes it wrap; dragging a top, bottom or corner
+/// handle fixes its height.
+pub fn resized_sizing(sizing: TextSizing, handle: Handle) -> TextSizing {
+    match (handle.is_side(), sizing) {
+        (true, TextSizing::AutoWidth) => TextSizing::AutoHeight,
+        (true, sizing) => sizing,
+        (false, _) => TextSizing::Fixed,
+    }
+}
+
+fn normalized(a: SlidePoint, b: SlidePoint) -> Frame {
+    Frame {
+        x: a.x.min(b.x),
+        y: a.y.min(b.y),
+        width: (a.x - b.x).abs(),
+        height: (a.y - b.y).abs(),
+        rotation: 0.,
+    }
+}
+
+fn inflate(frame: &Frame, by: f32) -> Frame {
+    Frame {
+        x: frame.x - by,
+        y: frame.y - by,
+        width: frame.width + 2. * by,
+        height: frame.height + 2. * by,
+        rotation: frame.rotation,
+    }
+}
+
+pub fn canvas(
+    editor: &EditorView,
+    scene: CanvasScene,
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let cursor = match (
+        editor.pan_drag.is_some(),
+        editor.effective_tool(),
+        &editor.drag,
+    ) {
+        (true, _, _) => CursorStyle::ClosedHand,
+        (false, Tool::Hand, _) => CursorStyle::OpenHand,
+        (false, _, Some(Drag::Resize { handle, .. })) => resize_cursor(*handle),
+        (false, Tool::Text, _) | (false, _, Some(Drag::SelectText { .. })) => CursorStyle::IBeam,
         _ => CursorStyle::Arrow,
     };
 
@@ -50,6 +573,21 @@ pub fn canvas(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoEle
         .on_scroll_wheel(cx.listener(EditorView::on_canvas_scroll))
         .child(viewport_tracker(cx))
         .children(editor.camera.map(|camera| slide(editor, camera)))
+        .children(editor.camera.map(|camera| {
+            let badge = scene.badge.clone();
+            let layer = content_layer(
+                scene,
+                camera,
+                editor.presentation.size,
+                editor.focus.clone(),
+                cx.entity(),
+            );
+            div()
+                .absolute()
+                .size_full()
+                .child(layer)
+                .children(badge.map(|(frame, label)| size_badge(editor, camera, frame, label)))
+        }))
         .child(
             div()
                 .absolute()
@@ -62,9 +600,18 @@ pub fn canvas(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoEle
         )
 }
 
+fn resize_cursor(handle: Handle) -> CursorStyle {
+    match handle {
+        Handle::Left | Handle::Right => CursorStyle::ResizeLeftRight,
+        Handle::Top | Handle::Bottom => CursorStyle::ResizeUpDown,
+        Handle::TopLeft | Handle::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+        Handle::TopRight | Handle::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+    }
+}
+
 /// Invisible layer covering the canvas. It records the canvas bounds for the
-/// camera and listens to the pointer at window level, so a pan keeps going
-/// when the pointer leaves the canvas and ends on a release anywhere.
+/// camera and listens to the pointer at window level, so a pan or a drag keeps
+/// going when the pointer leaves the canvas and ends on a release anywhere.
 fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
     let prepaint_view = cx.entity().downgrade();
     let paint_view = prepaint_view.clone();
@@ -90,19 +637,255 @@ fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
             let view = paint_view.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                 if phase == DispatchPhase::Capture {
-                    view.update(cx, |this, cx| this.on_pan_move(event, cx)).ok();
+                    view.update(cx, |this, cx| this.on_pointer_move(event, cx))
+                        .ok();
                 }
             });
             let view = paint_view.clone();
             window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                 if phase == DispatchPhase::Capture {
-                    view.update(cx, |this, cx| this.on_pan_end(event, cx)).ok();
+                    view.update(cx, |this, cx| this.on_pointer_up(event, cx))
+                        .ok();
                 }
             });
         },
     )
     .absolute()
     .size_full()
+}
+
+/// Paints text elements with the slide's top-left corner at `origin`,
+/// scaled by `zoom`. Shared by the canvas and the slide thumbnails.
+pub fn paint_texts(texts: &[PaintText], origin: Point<Pixels>, zoom: f32, window: &mut Window) {
+    let at = |x: f32, y: f32| origin + point(px(x * zoom), px(y * zoom));
+    for text in texts {
+        let Some(font_id) = text.font_id else {
+            continue;
+        };
+        let layout = &text.layout;
+        let font_size = px(layout.font_size * zoom);
+        let decorations = layout.decorations;
+        for line in &layout.lines {
+            let baseline = text.frame.y + line.baseline;
+            for glyph in &line.glyphs {
+                let position = at(text.frame.x + glyph.x, baseline + glyph.y);
+                // A glyph the atlas cannot take is dropped, not fatal.
+                let _ = window.paint_glyph(
+                    position,
+                    font_id,
+                    GlyphId(glyph.id as u32),
+                    font_size,
+                    text.color,
+                );
+            }
+            if line.right <= line.left {
+                continue;
+            }
+            let mut stroke = |offset: f32, thickness: f32| {
+                let top_left = at(text.frame.x + line.left, baseline + offset);
+                let width = (line.right - line.left) * zoom;
+                let height = (thickness * zoom).max(1.);
+                window.paint_quad(fill(
+                    gpui_kit::Bounds::new(top_left, size(px(width), px(height))),
+                    text.color,
+                ));
+            };
+            if text.underline {
+                stroke(
+                    decorations.underline_offset,
+                    decorations.underline_thickness,
+                );
+            }
+            if text.strikethrough {
+                stroke(
+                    decorations.strikeout_offset,
+                    decorations.strikeout_thickness,
+                );
+            }
+        }
+    }
+}
+
+/// Paints the slide's elements and, above them, the editing overlay:
+/// selection, handles, caret, snap guides. Registers the text input handler
+/// while a text box is being edited.
+fn content_layer(
+    scene: CanvasScene,
+    camera: Camera,
+    slide_size: SlideSize,
+    focus: FocusHandle,
+    view: Entity<EditorView>,
+) -> impl IntoElement {
+    paint_canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let slide = camera.slide_rect(slide_size, bounds);
+            let zoom = camera.zoom;
+            let at = |x: f32, y: f32| slide.origin + point(px(x * zoom), px(y * zoom));
+            let rect = |left: f32, top: f32, right: f32, bottom: f32| {
+                gpui_kit::Bounds::from_corners(at(left, top), at(right, bottom))
+            };
+
+            for highlight in &scene.highlight {
+                window.paint_quad(fill(
+                    rect(
+                        highlight.left,
+                        highlight.top,
+                        highlight.right,
+                        highlight.bottom,
+                    ),
+                    theme::accent().opacity(0.22),
+                ));
+            }
+            paint_texts(&scene.texts, slide.origin, zoom, window);
+
+            // Content past the slide edge stays visible, faded: the export
+            // cuts it off.
+            let fade = theme::canvas().opacity(0.7);
+            for band in [
+                gpui_kit::Bounds::from_corners(bounds.origin, point(bounds.right(), slide.top())),
+                gpui_kit::Bounds::from_corners(
+                    point(bounds.left(), slide.bottom()),
+                    bounds.bottom_right(),
+                ),
+                gpui_kit::Bounds::from_corners(
+                    point(bounds.left(), slide.top()),
+                    point(slide.left(), slide.bottom()),
+                ),
+                gpui_kit::Bounds::from_corners(
+                    point(slide.right(), slide.top()),
+                    point(bounds.right(), slide.bottom()),
+                ),
+            ] {
+                window.paint_quad(fill(band, fade));
+            }
+
+            for marked in &scene.marked {
+                let left = at(marked.left, marked.bottom);
+                window.paint_quad(fill(
+                    gpui_kit::Bounds::new(
+                        left,
+                        size(px((marked.right - marked.left) * zoom), px(1.)),
+                    ),
+                    theme::ink(),
+                ));
+            }
+            if let Some(caret) = &scene.caret {
+                let top = at(caret.left, caret.top);
+                window.paint_quad(fill(
+                    gpui_kit::Bounds::new(
+                        top - point(px(0.75), px(0.)),
+                        size(px(1.5), px((caret.bottom - caret.top) * zoom)),
+                    ),
+                    theme::accent(),
+                ));
+            }
+            if let Some((frame, handles, overflow)) = scene.selection {
+                let color = if overflow {
+                    theme::warn()
+                } else {
+                    theme::accent()
+                };
+                let bounds = rect(
+                    frame.x,
+                    frame.y,
+                    frame.x + frame.width,
+                    frame.y + frame.height,
+                );
+                window.paint_quad(outline(bounds, color, BorderStyle::Solid));
+                if handles {
+                    for handle in Handle::ALL {
+                        let (x, y) = handle.position(&frame);
+                        let center = at(x, y);
+                        let half = px(HANDLE_SIZE / 2.);
+                        window.paint_quad(gpui_kit::quad(
+                            gpui_kit::Bounds::from_corners(
+                                center - point(half, half),
+                                center + point(half, half),
+                            ),
+                            px(1.),
+                            theme::background(),
+                            px(1.),
+                            color,
+                            BorderStyle::Solid,
+                        ));
+                    }
+                }
+            }
+            if let Some(frame) = scene.preview {
+                let bounds = rect(
+                    frame.x,
+                    frame.y,
+                    frame.x + frame.width,
+                    frame.y + frame.height,
+                );
+                window.paint_quad(outline(bounds, theme::accent(), BorderStyle::Solid));
+            }
+            for guide in &scene.guides {
+                let line = match *guide {
+                    Guide::Vertical(x) => gpui_kit::Bounds::new(
+                        point(at(x, 0.).x, bounds.top()),
+                        size(px(1.), bounds.size.height),
+                    ),
+                    Guide::Horizontal(y) => gpui_kit::Bounds::new(
+                        point(bounds.left(), at(0., y).y),
+                        size(bounds.size.width, px(1.)),
+                    ),
+                };
+                window.paint_quad(fill(line, theme::guide()));
+            }
+            if scene.editing {
+                window.handle_input(&focus, ElementInputHandler::new(bounds, view.clone()), cx);
+            }
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+/// The "W × H" label centered under the selection.
+fn size_badge(
+    editor: &EditorView,
+    camera: Camera,
+    frame: Frame,
+    label: String,
+) -> impl IntoElement {
+    const WIDTH: f32 = 160.;
+    let slide = camera.slide_size(editor.presentation.size);
+    // Positions relative to the canvas center, like the slide itself.
+    let x = camera.pan.x - slide.width / 2. + px((frame.x + frame.width / 2.) * camera.zoom);
+    let y = camera.pan.y - slide.height / 2. + px((frame.y + frame.height) * camera.zoom);
+    div()
+        .absolute()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div().relative().size_0().child(
+                div()
+                    .absolute()
+                    .left(x - px(WIDTH / 2.))
+                    .top(y + px(8.))
+                    .w(px(WIDTH))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("size-badge")
+                            .test_support()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(2.))
+                            .bg(theme::accent())
+                            .text_color(theme::background())
+                            .text_size(px(11.))
+                            .line_height(px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label),
+                    ),
+            ),
+        )
 }
 
 /// The slide, positioned from a zero-size anchor at the canvas center so the
@@ -139,44 +922,6 @@ impl EditorView {
             self.presentation.size,
             FIT_INSETS,
         ));
-    }
-
-    fn on_canvas_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus, cx);
-        if self.pan_drag.is_some() {
-            return;
-        }
-        let pans = self.shortcuts.pan_button.matches(event.button)
-            || (event.button == gpui_kit::MouseButton::Left
-                && self.effective_tool() == Tool::Hand);
-        if pans {
-            self.pan_drag = Some((event.button, event.position));
-            cx.stop_propagation();
-            cx.notify();
-        }
-    }
-
-    fn on_pan_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some((button, last)) = self.pan_drag else {
-            return;
-        };
-        if let Some(camera) = &mut self.camera {
-            camera.pan_by(event.position - last);
-        }
-        self.pan_drag = Some((button, event.position));
-        cx.notify();
-    }
-
-    fn on_pan_end(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
-        if self.pan_drag.is_some_and(|(button, _)| button == event.button) {
-            self.pan_drag = None;
-            cx.notify();
-        }
     }
 
     fn on_canvas_scroll(
@@ -330,118 +1075,12 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{
-        AppContext as _, Bounds, InputEvent as _, KeyDownEvent, KeyUpEvent, Keystroke,
-        MouseButton, Pixels, Point, ScrollDelta, TestAppContext, WindowHandle, point, px, size,
+    use gpui_kit::{InputEvent as _, MouseButton, Pixels, ScrollDelta, TestAppContext, point, px};
+
+    use crate::editor::Tool;
+    use crate::ui::test_support::{
+        assert_moved, canvas_center, close, drag, key, open, slide, with_window,
     };
-
-    use crate::editor::{EditorView, Tool};
-
-    fn open(cx: &mut TestAppContext) -> WindowHandle<EditorView> {
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::theme::apply(cx);
-        });
-        let handle = cx.open_window(size(px(1440.), px(900.)), EditorView::new);
-        cx.update_window(handle.into(), |editor, window, cx| {
-            // The app focuses the editor when it opens the window.
-            let focus = editor.downcast::<EditorView>().unwrap().read(cx).focus.clone();
-            window.focus(&focus, cx);
-            window.render_frame(cx);
-            window.render_frame(cx);
-        })
-        .unwrap();
-        handle
-    }
-
-    fn with_window<R>(
-        cx: &mut TestAppContext,
-        handle: WindowHandle<EditorView>,
-        f: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App) -> R,
-    ) -> R {
-        cx.update_window(handle.into(), |_, window, cx| f(window, cx))
-            .unwrap()
-    }
-
-    fn slide(window: &gpui_kit::Window) -> Bounds<Pixels> {
-        window.find("slide").bounds()
-    }
-
-    fn canvas_center(window: &gpui_kit::Window) -> Point<Pixels> {
-        window.find("canvas").bounds().center()
-    }
-
-    fn close(a: Pixels, b: Pixels) -> bool {
-        (f32::from(a) - f32::from(b)).abs() < 0.5
-    }
-
-    fn assert_moved(before: Bounds<Pixels>, after: Bounds<Pixels>, delta: Point<Pixels>) {
-        assert!(
-            close(after.origin.x - before.origin.x, delta.x)
-                && close(after.origin.y - before.origin.y, delta.y)
-                && after.size == before.size,
-            "expected {before:?} moved by {delta:?}, got {after:?}"
-        );
-    }
-
-    fn drag(
-        window: &mut gpui_kit::Window,
-        button: MouseButton,
-        from: Point<Pixels>,
-        to: Point<Pixels>,
-        cx: &mut gpui_kit::App,
-    ) {
-        use gpui_kit::{MouseDownEvent, MouseMoveEvent, MouseUpEvent};
-        let events = [
-            MouseMoveEvent {
-                position: from,
-                pressed_button: None,
-                modifiers: Default::default(),
-            }
-            .to_platform_input(),
-            MouseDownEvent {
-                button,
-                position: from,
-                modifiers: Default::default(),
-                click_count: 1,
-                first_mouse: false,
-            }
-            .to_platform_input(),
-            MouseMoveEvent {
-                position: to,
-                pressed_button: Some(button),
-                modifiers: Default::default(),
-            }
-            .to_platform_input(),
-            MouseUpEvent {
-                button,
-                position: to,
-                modifiers: Default::default(),
-                click_count: 1,
-            }
-            .to_platform_input(),
-        ];
-        for event in events {
-            window.dispatch_event(event, cx);
-            window.render_frame(cx);
-        }
-    }
-
-    fn key(window: &mut gpui_kit::Window, source: &str, down: bool, cx: &mut gpui_kit::App) {
-        let keystroke = Keystroke::parse(source).unwrap();
-        let event = if down {
-            KeyDownEvent {
-                keystroke,
-                is_held: false,
-                prefer_character_input: false,
-            }
-            .to_platform_input()
-        } else {
-            KeyUpEvent { keystroke }.to_platform_input()
-        };
-        window.dispatch_event(event, cx);
-        window.render_frame(cx);
-    }
 
     #[gpui_kit::test]
     fn opens_with_the_slide_fitted_and_centered(cx: &mut TestAppContext) {
@@ -538,7 +1177,9 @@ mod tests {
             drag(window, MouseButton::Left, from, from + delta, cx);
             assert_moved(before, slide(window), delta);
         });
-        let tool = handle.read_with(cx, |editor, _| editor.active_tool).unwrap();
+        let tool = handle
+            .read_with(cx, |editor, _| editor.active_tool)
+            .unwrap();
         assert_eq!(tool, Tool::Hand);
     }
 
@@ -559,7 +1200,9 @@ mod tests {
             drag(window, MouseButton::Left, from, from + delta, cx);
             assert_moved(before, slide(window), point(px(0.), px(0.)));
         });
-        let tool = handle.read_with(cx, |editor, _| editor.active_tool).unwrap();
+        let tool = handle
+            .read_with(cx, |editor, _| editor.active_tool)
+            .unwrap();
         assert_eq!(tool, Tool::Move);
     }
 
@@ -579,7 +1222,9 @@ mod tests {
             );
             key(window, "space", true, cx);
         });
-        let held = handle.read_with(cx, |editor, _| editor.hand_key_held).unwrap();
+        let held = handle
+            .read_with(cx, |editor, _| editor.hand_key_held)
+            .unwrap();
         assert!(!held);
     }
 

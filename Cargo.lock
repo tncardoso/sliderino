@@ -6414,8 +6414,12 @@ name = "sliderino"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "fontdb",
  "gpui-kit",
+ "rustybuzz",
  "serde_json",
+ "ttf-parser",
+ "unicode-linebreak",
 ]
 
 [[package]]
