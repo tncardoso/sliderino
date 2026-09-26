@@ -1,15 +1,34 @@
 //! Renders a slide to an image on the CPU, without GPUI: the lines and glyph
 //! positions come from `text_layout`, the same as in the editor, and each
-//! glyph is filled from its outline in the embedded font.
+//! glyph is filled from its outline in the embedded font. Shapes take their
+//! outlines, heads and gradients from `shape`.
 //!
 //! Content past the slide edge is cut off, as in an export. The debug overlay
 //! draws text frames, line boxes, baselines and overflow.
 
-use tiny_skia::{Color, FillRule, PathBuilder, Rect, Stroke, Transform};
+use std::sync::Arc;
+
+use tiny_skia::{
+    Color, FillRule, FilterQuality, LineCap, LineJoin, Path, PathBuilder, Rect, SpreadMode, Stroke,
+    StrokeDash, Transform,
+};
 pub use tiny_skia::{Paint, Pixmap};
 
-use crate::document::{Element, ElementId, FontData, Frame, Presentation, Rgb, SlideId};
+use crate::document::{
+    Element, ElementId, ElementKind, Fill, FontData, Frame, GradientStop, ImageId, Presentation,
+    Rgb, SlideId,
+};
+use crate::shape::{self, Head, Seg};
 use crate::text_layout::TextLayout;
+
+/// Gives the decoded pixels of an embedded image, upright, or `None` while
+/// they are not available.
+pub type Images<'a> = &'a dyn Fn(ImageId) -> Option<Arc<Pixmap>>;
+
+/// For renders that draw no image: image fills show as a placeholder.
+pub fn no_images(_: ImageId) -> Option<Arc<Pixmap>> {
+    None
+}
 
 /// Colors of the overlay, from the editor palette (`theme.rs`).
 const ACCENT: Rgb = Rgb(0x1F4BFF);
@@ -53,34 +72,42 @@ pub fn render_slide(
     pixmap.fill(Color::WHITE);
     let transform = Transform::from_scale(scale, scale);
 
-    let texts: Vec<(&Element, f32, TextLayout)> = slide
+    let leaves: Vec<(&Element, f32, Option<TextLayout>)> = slide
         .visible_leaves()
-        .filter(|node| node.element.as_text().is_some())
-        .filter_map(|node| {
-            let layout = presentation.text_layout(node.element.id)?;
-            Some((node.element, node.opacity, layout))
+        .map(|node| {
+            let layout = presentation.text_layout(node.element.id);
+            (node.element, node.opacity, layout)
         })
         .collect();
+    let texts = || {
+        leaves
+            .iter()
+            .filter_map(|(element, _, layout)| Some((*element, layout.as_ref()?)))
+    };
 
     if overlay {
-        for (element, _, layout) in &texts {
+        for (element, layout) in texts() {
             let transform = turned(transform, &element.frame);
             paint_overlay_under(&mut pixmap, &element.frame, layout, transform);
         }
     }
-    for (element, opacity, layout) in &texts {
+    let images = presentation_images(presentation);
+    for (element, opacity, layout) in &leaves {
         let transform = turned(transform, &element.frame);
-        paint_text(
-            &mut pixmap,
-            presentation,
-            element,
-            *opacity,
-            layout,
-            transform,
-        );
+        match layout {
+            Some(layout) => paint_text(
+                &mut pixmap,
+                presentation,
+                element,
+                *opacity,
+                layout,
+                transform,
+            ),
+            None => paint_shape(&mut pixmap, element, *opacity, transform, &images),
+        }
     }
     if overlay {
-        for (element, _, layout) in &texts {
+        for (element, layout) in texts() {
             let transform = turned(transform, &element.frame);
             paint_overlay_over(&mut pixmap, &element.frame, layout, scale, transform);
         }
@@ -95,6 +122,247 @@ fn turned(transform: Transform, frame: &Frame) -> Transform {
     }
     let (cx, cy) = frame.center();
     transform.pre_concat(Transform::from_rotate_at(frame.rotation, cx, cy))
+}
+
+/// The images of the presentation, decoded when first drawn.
+fn presentation_images(_presentation: &Presentation) -> impl Fn(ImageId) -> Option<Arc<Pixmap>> {
+    no_images
+}
+
+/// Paints a rectangle, an ellipse or a line; other kinds are left alone.
+/// `transform` maps slide units to pixels with the rotation of the frame
+/// applied; `opacity` multiplies the opacities of the fill and the stroke.
+pub fn paint_shape(
+    pixmap: &mut Pixmap,
+    element: &Element,
+    opacity: f32,
+    transform: Transform,
+    images: Images,
+) {
+    let frame = &element.frame;
+    if let ElementKind::Line(line) = &element.kind {
+        // The line runs along the x axis of its local units.
+        let local = transform.pre_translate(frame.x, frame.y + frame.height / 2.);
+        let geometry = shape::line_geometry(frame.width, line);
+        let stroke = &line.stroke;
+        let color = paint(stroke.color, stroke.opacity * opacity);
+        if let Some((from, to)) = geometry.segment {
+            let mut builder = PathBuilder::new();
+            builder.move_to(from.0, from.1);
+            builder.line_to(to.0, to.1);
+            if let Some(path) = builder.finish() {
+                let style =
+                    stroke_style(stroke.width, shape::dash_array(stroke.dash, stroke.width));
+                pixmap.stroke_path(&path, &color, &style, local, None);
+            }
+        }
+        for head in &geometry.heads {
+            match head {
+                Head::Filled(segs) => {
+                    if let Some(path) = build_path(segs) {
+                        pixmap.fill_path(&path, &color, FillRule::Winding, local, None);
+                    }
+                }
+                Head::Open(points) => {
+                    let mut builder = PathBuilder::new();
+                    builder.move_to(points[0].0, points[0].1);
+                    builder.line_to(points[1].0, points[1].1);
+                    builder.line_to(points[2].0, points[2].1);
+                    if let Some(path) = builder.finish() {
+                        let style = stroke_style(stroke.width, None);
+                        pixmap.stroke_path(&path, &color, &style, local, None);
+                    }
+                }
+            }
+        }
+        return;
+    }
+    let local = transform.pre_translate(frame.x, frame.y);
+    let Some(segs) = shape::outline(&element.kind, frame.width, frame.height) else {
+        return;
+    };
+    let Some(path) = build_path(&segs) else {
+        return;
+    };
+    if let Some(fill) = element.kind.fill() {
+        fill_shape(pixmap, &path, fill, frame, opacity, local, images);
+    }
+    if let Some(stroke) = element.kind.stroke() {
+        let color = paint(stroke.color, stroke.opacity * opacity);
+        let style = stroke_style(stroke.width, shape::dash_array(stroke.dash, stroke.width));
+        pixmap.stroke_path(&path, &color, &style, local, None);
+    }
+}
+
+fn build_path(segs: &[Seg]) -> Option<Path> {
+    let mut builder = PathBuilder::new();
+    for seg in segs {
+        match *seg {
+            Seg::Move((x, y)) => builder.move_to(x, y),
+            Seg::Line((x, y)) => builder.line_to(x, y),
+            Seg::Cubic((x1, y1), (x2, y2), (x, y)) => builder.cubic_to(x1, y1, x2, y2, x, y),
+            Seg::Close => builder.close(),
+        }
+    }
+    builder.finish()
+}
+
+fn stroke_style(width: f32, dash: Option<[f32; 2]>) -> Stroke {
+    Stroke {
+        width,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        dash: dash.and_then(|dash| StrokeDash::new(dash.to_vec(), 0.)),
+        ..Stroke::default()
+    }
+}
+
+fn color(color: Rgb, alpha: f32) -> Color {
+    let [_, r, g, b] = color.0.to_be_bytes();
+    Color::from_rgba8(r, g, b, (alpha.clamp(0., 1.) * 255.).round() as u8)
+}
+
+fn gradient_stops(stops: &[GradientStop], opacity: f32) -> Vec<tiny_skia::GradientStop> {
+    stops
+        .iter()
+        .map(|stop| {
+            tiny_skia::GradientStop::new(stop.position, color(stop.color, stop.opacity * opacity))
+        })
+        .collect()
+}
+
+/// A light checker for an image fill whose pixels are not available.
+const PLACEHOLDER: Rgb = Rgb(0xE4E4E4);
+
+fn fill_shape(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    fill: &Fill,
+    frame: &Frame,
+    opacity: f32,
+    local: Transform,
+    images: Images,
+) {
+    let (width, height) = (frame.width, frame.height);
+    let shader = match fill {
+        Fill::None => return,
+        Fill::Solid(solid) => {
+            let color = paint(solid.color, solid.opacity * opacity);
+            pixmap.fill_path(path, &color, FillRule::Winding, local, None);
+            return;
+        }
+        Fill::LinearGradient(gradient) => {
+            let (start, end) = shape::linear_gradient_line(gradient.angle, width, height);
+            tiny_skia::LinearGradient::new(
+                start.into(),
+                end.into(),
+                gradient_stops(&gradient.stops, opacity),
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+        }
+        Fill::RadialGradient(gradient) => {
+            let (center, radius) =
+                shape::radial_gradient_ellipse(gradient.center, gradient.radius, width, height);
+            // A unit circle at the origin, stretched to the ellipse.
+            tiny_skia::RadialGradient::new(
+                (0., 0.).into(),
+                (0., 0.).into(),
+                1.,
+                gradient_stops(&gradient.stops, opacity),
+                SpreadMode::Pad,
+                Transform::from_row(radius.0, 0., 0., radius.1, center.0, center.1),
+            )
+        }
+        Fill::Image(image) => {
+            let Some(pixels) = images(image.id) else {
+                let color = paint(PLACEHOLDER, image.opacity * opacity);
+                pixmap.fill_path(path, &color, FillRule::Winding, local, None);
+                return;
+            };
+            let size = (pixels.width(), pixels.height());
+            let (x, y, w, h) = shape::fit_rect(image.fit, width, height, size);
+            let placed = Transform::from_row(w / size.0 as f32, 0., 0., h / size.1 as f32, x, y);
+            let shader = tiny_skia::Pattern::new(
+                pixels.as_ref().as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Bicubic,
+                image.opacity * opacity,
+                placed,
+            );
+            // With contain, the pattern stops at the image edges.
+            let clip = Rect::from_xywh(x.max(0.), y.max(0.), w.min(width), h.min(height));
+            let paint = Paint {
+                shader,
+                anti_alias: true,
+                ..Paint::default()
+            };
+            match clip.and_then(|clip| {
+                let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height())?;
+                mask.fill_path(
+                    &PathBuilder::from_rect(clip),
+                    FillRule::Winding,
+                    true,
+                    local,
+                );
+                Some(mask)
+            }) {
+                Some(mask) => pixmap.fill_path(path, &paint, FillRule::Winding, local, Some(&mask)),
+                None => pixmap.fill_path(path, &paint, FillRule::Winding, local, None),
+            }
+            return;
+        }
+    };
+    let Some(shader) = shader else {
+        return;
+    };
+    let paint = Paint {
+        shader,
+        anti_alias: true,
+        ..Paint::default()
+    };
+    pixmap.fill_path(path, &paint, FillRule::Winding, local, None);
+}
+
+/// Renders one shape alone, turned by its rotation, at `scale` pixels per
+/// slide unit. Returns the image and the area of the slide it covers: the
+/// bounds of the frame grown by the stroke and the heads, and a pixel of
+/// margin. The pixels are premultiplied.
+pub fn render_shape_box(
+    element: &Element,
+    opacity: f32,
+    scale: f32,
+    images: Images,
+) -> Option<(Pixmap, Frame)> {
+    if !scale.is_finite() || scale <= 0. {
+        return None;
+    }
+    let bounds = shape::visual_frame(element).bounds();
+    let margin = 1. / scale;
+    let area = Frame {
+        x: bounds.x - margin,
+        y: bounds.y - margin,
+        width: bounds.width + 2. * margin,
+        height: bounds.height + 2. * margin,
+        rotation: 0.,
+    };
+    let width = (area.width * scale).ceil() as u32;
+    let height = (area.height * scale).ceil() as u32;
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))?;
+    let transform = Transform::from_scale(scale, scale).pre_translate(-area.x, -area.y);
+    paint_shape(
+        &mut pixmap,
+        element,
+        opacity,
+        turned(transform, &element.frame),
+        images,
+    );
+    let area = Frame {
+        width: width as f32 / scale,
+        height: height as f32 / scale,
+        ..area
+    };
+    Some((pixmap, area))
 }
 
 /// A solid paint of `color` at `alpha`, anti-aliased.
@@ -532,5 +800,115 @@ mod tests {
             line.ends_with("1 line, overflow 0.0 px, missing glyphs 0"),
             "{line}"
         );
+    }
+
+    fn rgb(pixmap: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        let pixel = pixmap.pixel(x, y).unwrap();
+        (pixel.red(), pixel.green(), pixel.blue())
+    }
+
+    fn shapes(elements: &str) -> Pixmap {
+        let ops = format!(r#"[{{"op": "add_element", "slide": 1, "element": {elements}}}]"#);
+        render_slide(&scene(&ops), SlideId(1), 1., false).unwrap()
+    }
+
+    #[test]
+    fn rectangles_fill_their_frame_but_not_rounded_corners() {
+        let pixmap = shapes(
+            r#"{"frame": {"x": 100, "y": 100, "width": 200, "height": 100},
+                "rectangle": {"corner_radius": 40, "fill": {"solid": {"color": "000000"}}}}"#,
+        );
+        assert_eq!(rgb(&pixmap, 200, 150), (0, 0, 0));
+        assert!(!inked(&pixmap, 102, 102), "the corner is round");
+        assert!(!inked(&pixmap, 305, 150), "nothing past the frame");
+    }
+
+    #[test]
+    fn ellipses_leave_the_corners_of_their_frame_empty() {
+        let pixmap = shapes(
+            r#"{"frame": {"x": 100, "y": 100, "width": 200, "height": 200},
+                "ellipse": {"fill": {"solid": {"color": "000000"}}}}"#,
+        );
+        assert!(inked(&pixmap, 200, 200));
+        assert!(!inked(&pixmap, 110, 110));
+    }
+
+    #[test]
+    fn dashed_strokes_have_gaps() {
+        let pixmap = shapes(
+            r#"{"line": {"from": {"x": 100, "y": 100}, "to": {"x": 500, "y": 100},
+                "stroke": {"width": 4, "dash": "dashed"}}}"#,
+        );
+        let inked_run: Vec<bool> = (100..500).map(|x| inked(&pixmap, x, 100)).collect();
+        assert!(inked_run.iter().any(|inked| *inked));
+        assert!(inked_run.iter().any(|inked| !*inked), "dashes leave gaps");
+    }
+
+    #[test]
+    fn linear_gradients_follow_their_angle() {
+        let pixmap = shapes(
+            r#"{"frame": {"x": 100, "y": 100, "width": 200, "height": 200},
+                "rectangle": {"fill": {"linear_gradient": {"angle": 90, "stops": [
+                  {"position": 0, "color": "000000"}, {"position": 1, "color": "FFFFFF"}]}}}}"#,
+        );
+        let top = rgb(&pixmap, 200, 105).0;
+        let bottom = rgb(&pixmap, 200, 295).0;
+        assert!(top < 30 && bottom > 225, "{top} {bottom}");
+        let left = rgb(&pixmap, 105, 200).0;
+        let right = rgb(&pixmap, 295, 200).0;
+        assert!(left.abs_diff(right) < 3, "{left} {right}");
+    }
+
+    #[test]
+    fn radial_gradients_start_at_their_center() {
+        let pixmap = shapes(
+            r#"{"frame": {"x": 100, "y": 100, "width": 200, "height": 100},
+                "rectangle": {"fill": {"radial_gradient": {"stops": [
+                  {"position": 0, "color": "FFFFFF"}, {"position": 1, "color": "000000"}]}}}}"#,
+        );
+        let center = rgb(&pixmap, 200, 150).0;
+        let edge = rgb(&pixmap, 295, 150).0;
+        let side = rgb(&pixmap, 200, 102).0;
+        assert!(
+            center > 240 && edge < 20 && side < 20,
+            "{center} {edge} {side}"
+        );
+    }
+
+    #[test]
+    fn turned_lines_are_drawn_between_their_ends() {
+        let pixmap =
+            shapes(r#"{"line": {"from": {"x": 100, "y": 100}, "to": {"x": 300, "y": 300}}}"#);
+        assert!(inked(&pixmap, 200, 200));
+        assert!(!inked(&pixmap, 200, 120));
+    }
+
+    #[test]
+    fn large_heads_are_wider_than_small_ones() {
+        let head = |size: &str| {
+            let pixmap = shapes(&format!(
+                r#"{{"line": {{"from": {{"x": 100, "y": 100}}, "to": {{"x": 500, "y": 100}},
+                    "stroke": {{"width": 4}}, "end": {{"kind": "triangle", "size": "{size}"}}}}}}"#
+            ));
+            // 15 units behind the tip: past a small head, inside a large one.
+            (80..120).filter(|y| inked(&pixmap, 485, *y)).count()
+        };
+        let (small, large) = (head("small"), head("large"));
+        assert!(large > small && small > 0, "{small} {large}");
+    }
+
+    #[test]
+    fn element_opacity_fades_shapes_and_hidden_ones_are_not_drawn() {
+        let faded = shapes(
+            r#"{"opacity": 0.5, "frame": {"x": 100, "y": 100, "width": 100, "height": 100},
+                "rectangle": {"fill": {"solid": {"color": "000000"}}}}"#,
+        );
+        let gray = rgb(&faded, 150, 150).0;
+        assert!((120..136).contains(&gray), "{gray}");
+        let hidden = shapes(
+            r#"{"hidden": true, "frame": {"x": 100, "y": 100, "width": 100, "height": 100},
+                "rectangle": {}}"#,
+        );
+        assert!(!inked(&hidden, 150, 150));
     }
 }

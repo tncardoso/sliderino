@@ -1,0 +1,42 @@
+[
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 1, "frame": {"x": 80, "y": 80, "width": 420, "height": 240},
+    "rectangle": {"corner_radius": 24,
+      "fill": {"linear_gradient": {"angle": 90, "stops": [
+        {"position": 0, "color": "1F4BFF"}, {"position": 1, "color": "7FD4FF"}]}},
+      "stroke": {"color": "111111", "width": 4, "dash": "dashed"}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 2, "frame": {"x": 580, "y": 80, "width": 240, "height": 240},
+    "ellipse": {"fill": {"radial_gradient": {"center": {"x": 0.35, "y": 0.35}, "stops": [
+        {"position": 0, "color": "FFFFFF"}, {"position": 1, "color": "F2376B"}]}}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 3, "frame": {"x": 900, "y": 100, "width": 380, "height": 200, "rotation": 20},
+    "ellipse": {"fill": "none", "stroke": {"color": "B26A00", "width": 8, "dash": "dotted"}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 4, "opacity": 0.5, "frame": {"x": 1320, "y": 80, "width": 200, "height": 240},
+    "rectangle": {"fill": {"solid": {"color": "111111"}}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 5, "line": {"from": {"x": 100, "y": 440}, "to": {"x": 600, "y": 440},
+      "stroke": {"width": 4}, "start": "circle", "end": "triangle"}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 6, "line": {"from": {"x": 100, "y": 520}, "to": {"x": 600, "y": 620},
+      "stroke": {"width": 6, "color": "1F4BFF"}, "start": {"kind": "diamond", "size": "small"},
+      "end": {"kind": "arrow", "size": "large"}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 7, "line": {"from": {"x": 100, "y": 720}, "to": {"x": 600, "y": 720},
+      "stroke": {"width": 3, "dash": "dashed"}, "end": "arrow"}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 10, "frame": {"x": 0, "y": 0}, "group": {"children": [
+      {"id": 11, "frame": {"x": 800, "y": 480, "width": 300, "height": 200},
+       "rectangle": {"corner_radius": 12, "fill": {"solid": {"color": "D9D9D9"}},
+                     "stroke": {"width": 2}}},
+      {"id": 12, "line": {"from": {"x": 800, "y": 480}, "to": {"x": 1100, "y": 680},
+                          "stroke": {"width": 2, "color": "F2376B"}}}
+    ]}}},
+  {"op": "set_frame", "id": 10, "frame": {"x": 800, "y": 480, "width": 600, "height": 300}}
+]

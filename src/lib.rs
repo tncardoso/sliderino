@@ -16,6 +16,7 @@ pub mod operation;
 pub mod perf;
 pub mod render;
 pub mod script;
+pub mod shape;
 pub mod shortcuts;
 pub mod snap;
 pub mod style;
