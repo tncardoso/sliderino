@@ -25,6 +25,30 @@
 - The agent status at the top of the window shows the connected agents.
   Click it and set **Follow agent** to see the slide and the element of each
   agent change.
+- Groups. Press Ctrl+G to put the selected elements into a group and
+  Ctrl+Shift+G to ungroup. Click a group to select it, double-click to select
+  an element in it, or Ctrl+click to select the element directly. Press
+  Enter to select the elements of a group and Esc to select the group again.
+- Move a group to move all its elements. Resize a group to scale the
+  positions and boxes of its elements; the font sizes do not change.
+- Select more than one element: Shift+click to add or remove an element, or
+  drag on an empty area to select the elements that the rectangle touches.
+  Move, resize, align and delete act on all selected elements.
+- Hierarchy tab in the left panel: the elements of the slide as a tree, with
+  the top element first. Click a row to select, Shift+click to select a
+  range and Ctrl+click to add a row. Drag rows to change the order or to
+  move elements into and out of groups.
+- Hide and lock elements with the eye and the lock in the Hierarchy tab.
+  Hidden elements do not show in the slide or in exports. Locked elements
+  cannot change until you unlock them.
+- Right-click an element in the Hierarchy tab or on the slide to rename,
+  group, ungroup, hide, lock or delete it.
+- Agents can add groups and use the `group`, `ungroup`, `move_element` and
+  `set_layer` operations.
+
+### Changed
+
+- The agent tool `get_selection` gives the selected elements as a list.
 
 ### Fixed
 

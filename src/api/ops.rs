@@ -27,8 +27,8 @@ use std::ops::Range;
 use serde::Deserialize;
 
 use crate::document::{
-    ApplyError, Element, ElementId, ElementKind, FontFace, Frame, Operation, Presentation, Slide,
-    SlideId, TextSizing, TextStylePatch,
+    ApplyError, Element, ElementId, ElementKind, FontFace, Frame, GroupElement, LayerPatch,
+    Operation, Presentation, Slide, SlideId, TextElement, TextSizing, TextStylePatch,
 };
 use crate::fonts;
 
@@ -77,9 +77,30 @@ pub struct NewElement {
     #[serde(default)]
     pub id: Option<IdRef>,
     #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
     pub frame: Frame,
     #[serde(flatten)]
-    pub kind: ElementKind,
+    pub kind: NewKind,
+}
+
+/// The kind of a new element: a text, or a group of new elements.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewKind {
+    Text(TextElement),
+    Group(NewGroup),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewGroup {
+    #[serde(default)]
+    pub children: Vec<NewElement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -101,6 +122,9 @@ pub enum Op {
     },
     AddElement {
         slide: IdRef,
+        /// Group of the slide to add to; the slide itself when omitted.
+        #[serde(default)]
+        parent: Option<IdRef>,
         /// Paint order position; on top when omitted.
         #[serde(default = "end")]
         index: usize,
@@ -108,6 +132,29 @@ pub enum Op {
     },
     RemoveElement {
         id: IdRef,
+    },
+    /// Moves an element into a group of the same slide, or to the slide
+    /// itself when `parent` is omitted, at `index` (on top when omitted).
+    MoveElement {
+        id: IdRef,
+        #[serde(default)]
+        parent: Option<IdRef>,
+        #[serde(default = "end")]
+        index: usize,
+    },
+    /// Puts elements of one slide in a new group, in place of the topmost.
+    Group {
+        #[serde(default)]
+        id: Option<IdRef>,
+        children: Vec<IdRef>,
+    },
+    /// Puts the children of a group in its place and removes it.
+    Ungroup {
+        id: IdRef,
+    },
+    SetLayer {
+        id: IdRef,
+        patch: LayerPatch,
     },
     SetFrame {
         id: IdRef,
@@ -144,8 +191,15 @@ impl Op {
             Op::AddSlide { .. } => "Add slide",
             Op::RemoveSlide { .. } => "Delete slide",
             Op::MoveSlide { .. } => "Move slide",
-            Op::AddElement { .. } => "Create text",
+            Op::AddElement { element, .. } => match element.kind {
+                NewKind::Text(_) => "Create text",
+                NewKind::Group(_) => "Create group",
+            },
             Op::RemoveElement { .. } => "Delete",
+            Op::MoveElement { .. } => "Move layer",
+            Op::Group { .. } => "Group",
+            Op::Ungroup { .. } => "Ungroup",
+            Op::SetLayer { patch, .. } => patch.label(),
             Op::SetFrame { .. } => "Move",
             Op::SetTextSizing { .. } => "Resizing",
             Op::SetTextStyle { patch, .. } => patch.label(),
@@ -365,21 +419,56 @@ impl Compiler {
             }
             Op::AddElement {
                 slide,
+                parent,
                 index,
                 element,
             } => {
                 let slide = self.slide(&slide)?;
+                let parent = parent.map(|parent| self.element(&parent)).transpose()?;
                 let element = self.new_element(presentation, element, out)?;
                 self.applied.last_slide = Some(slide);
+                self.applied.last_element = Some(element.id);
                 Operation::AddElement {
                     slide,
-                    parent: None,
+                    parent,
                     index,
                     element,
                 }
             }
             Op::RemoveElement { id } => Operation::RemoveElement {
                 id: self.touch(presentation, &id)?,
+            },
+            Op::MoveElement { id, parent, index } => Operation::MoveElement {
+                id: self.touch(presentation, &id)?,
+                parent: parent.map(|parent| self.element(&parent)).transpose()?,
+                index,
+            },
+            Op::Group { id, children } => {
+                let children = children
+                    .iter()
+                    .map(|child| self.element(child))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let group = self.new_element_id(presentation, id)?;
+                let operations = presentation
+                    .group_operations(group, &children)
+                    .map_err(OpErrorKind::Apply)?;
+                self.applied.last_element = Some(group);
+                if let Some(location) = children.first().and_then(|id| presentation.locate(*id)) {
+                    self.applied.last_slide = Some(location.slide);
+                }
+                Operation::Batch(operations)
+            }
+            Op::Ungroup { id } => {
+                let id = self.touch(presentation, &id)?;
+                Operation::Batch(
+                    presentation
+                        .ungroup_operations(id)
+                        .map_err(OpErrorKind::Apply)?,
+                )
+            }
+            Op::SetLayer { id, patch } => Operation::SetLayer {
+                id: self.touch(presentation, &id)?,
+                patch,
             },
             Op::SetFrame { id, frame } => Operation::SetFrame {
                 id: self.touch(presentation, &id)?,
@@ -444,10 +533,37 @@ impl Compiler {
         element: NewElement,
         out: &mut Vec<Operation>,
     ) -> Result<Element, OpErrorKind> {
-        if let ElementKind::Text(text) = &element.kind {
-            self.ensure_font(presentation, &text.style.font, out)?;
-        }
-        let id = match element.id {
+        let id = self.new_element_id(presentation, element.id)?;
+        let kind = match element.kind {
+            NewKind::Text(text) => {
+                self.ensure_font(presentation, &text.style.font, out)?;
+                ElementKind::Text(text)
+            }
+            NewKind::Group(group) => {
+                let mut children = Vec::with_capacity(group.children.len());
+                for child in group.children {
+                    children.push(self.new_element(presentation, child, out)?);
+                }
+                ElementKind::Group(GroupElement { children })
+            }
+        };
+        self.applied.last_element = Some(id);
+        Ok(Element {
+            name: element.name,
+            hidden: element.hidden,
+            locked: element.locked,
+            ..Element::new(id, element.frame, kind)
+        })
+    }
+
+    /// The id of a new element: the one given, a new one named by a
+    /// reference, or the next free one.
+    fn new_element_id(
+        &mut self,
+        presentation: &mut Presentation,
+        id: Option<IdRef>,
+    ) -> Result<ElementId, OpErrorKind> {
+        Ok(match id {
             Some(IdRef::Id(id)) => ElementId(id),
             Some(IdRef::Ref(name)) => {
                 let id = presentation.new_element_id();
@@ -455,9 +571,7 @@ impl Compiler {
                 id
             }
             None => presentation.new_element_id(),
-        };
-        self.applied.last_element = Some(id);
-        Ok(Element::new(id, element.frame, element.kind))
+        })
     }
 
     fn name(&mut self, name: String, made: Made) -> Result<(), OpErrorKind> {

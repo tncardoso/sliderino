@@ -59,7 +59,7 @@ The error data lists the instances.
 | `list_instances` | List the open editors. |
 | `open_editor` | Start an editor and wait until it accepts calls. |
 | `get_basic_info` | Get the revision, the slides, the fonts and the undo state. |
-| `get_selection` | Get the slide, the element and the text that the person selected. |
+| `get_selection` | Get the slide, the list of elements and the text that the person selected. |
 | `get_slide` | Get the elements of a slide in paint order. |
 | `get_elements` | Get elements by id, with the text layout and the overflow. |
 | `find_elements` | Find text elements that contain a string. |
@@ -103,6 +103,44 @@ Rules:
   from the fonts of Sliderino or from the fonts of the system. If the
   license of the face does not permit embedding, the editor embeds it and
   the result has a warning in `warnings`.
+
+## Groups and layers
+
+The elements of a slide are a tree. A group holds its children in paint
+order: the last child is on top. `get_slide` gives the tree, with the
+children of each group in `group.children`.
+
+- All frames are in slide units, also the frames of children.
+- The frame of a group is the union of the frames of its children. The
+  editor calculates it.
+- `set_frame` on a group with the same size moves the group and its
+  children.
+- `set_frame` on a group with a different size scales the positions and the
+  boxes of the children. The font sizes do not change. A text with
+  `auto_width` sizing keeps its size and only moves.
+- A group cannot rotate. A `set_frame` with a rotation fails.
+- `group` puts elements of one slide into a new group. The group goes to the
+  position of the topmost element.
+- `ungroup` puts the children of a group in its position and removes the
+  group.
+- `move_element` moves an element into a group or out of a group. The
+  element keeps its frame.
+- `group` and `ungroup` read the document after the earlier operations of
+  the call. In a `batch`, they cannot use elements that the same batch adds.
+
+Use `set_layer` to set the name, the visibility and the lock of an element:
+
+```json
+{"op": "set_layer", "id": 12, "patch": {"name": "Header", "locked": true}}
+```
+
+- A hidden element and the children of a hidden group do not show in the
+  editor, in screenshots or in diagnostics.
+- A locked element, and each element in a locked group, accepts only
+  `set_layer`. Other operations fail with `operation_failed`. To change the
+  element, set `"locked": false` first.
+- The person can move a group that holds a locked element. The locked
+  element moves with the group.
 
 ## Detect changes by other clients
 

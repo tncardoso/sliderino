@@ -62,8 +62,12 @@ the same format (see `agent-api.md`).
 | `add_slide` | `slide` (`{"id": 2}`, optional), `index` (optional) |
 | `remove_slide` | `id` |
 | `move_slide` | `id`, `index` |
-| `add_element` | `slide`, `element`, `index` (optional; the element goes on top) |
+| `add_element` | `slide`, `parent` (optional; a group of the slide), `element`, `index` (optional; the element goes on top) |
 | `remove_element` | `id` |
+| `move_element` | `id`, `parent` (optional; without it, the slide), `index` (optional; the element goes on top) |
+| `group` | `id` (optional), `children` (a list of element ids on one slide) |
+| `ungroup` | `id` |
+| `set_layer` | `id`, `patch` (`name`, `hidden`, `locked`; only the fields to change) |
 | `set_frame` | `id`, `frame` |
 | `set_text_sizing` | `id`, `sizing` |
 | `set_text_style` | `id`, `patch` (only the fields to change) |
@@ -84,6 +88,11 @@ Rules:
   license of the font does not permit embedding, the tool shows a warning.
   Scenes do not add fonts automatically, but the agent API does.
 - `sizing` is `auto_width`, `auto_height` or `fixed`.
+- An element has a `text` or a `group`. A group has `children`, a list of
+  elements. The last child is on top. Frames of children are in slide
+  units, as all frames.
+- An element can have a `name`, `hidden` and `locked`. Set them with
+  `set_layer`. `"name": null` removes the name.
 - In `style` and `patch`, all fields are optional: `font`, `size`,
   `line_height` (`"auto"` or `{"percent": 120}`), `letter_spacing` (percent of
   the size), `align` (`left`, `center`, `right`, `justify`),

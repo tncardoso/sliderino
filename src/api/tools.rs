@@ -55,10 +55,14 @@ impl ToolSpec {
 const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - add_slide {slide?: {id?, elements?}, index?}
 - remove_slide {id}; move_slide {id, index}
-- add_element {slide, element: {id?, frame: {x, y, width, height, rotation}, text: {content, sizing, style}}, index?}
+- add_element {slide, parent?, element: {id?, name?, hidden?, locked?, frame: {x, y, width, height, rotation}, text: {content, sizing, style} | group: {children: [element]}}, index?}
 - remove_element {id}; set_frame {id, frame}; set_text_sizing {id, sizing}
 - set_text_style {id, patch}; replace_text {id, range: {start, end} (bytes), text}
+- move_element {id, parent?, index?}: into a group of the same slide, or to the slide without parent
+- group {id?, children: [id]}; ungroup {id}
+- set_layer {id, patch: {name?, hidden?, locked?}}; \"name\": null clears the name
 - add_font {face}; remove_font {face}; batch {ops}
+Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too; the frame of a group is the union of its children. set_frame on a group moves it, or resizes it by scaling the positions and boxes of its children (not their fonts); a group cannot rotate. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
 Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. Slides are 1600x900 units. sizing: auto_width | auto_height | fixed. style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color (\"1A1A1A\"), opacity (0-1). Fonts are embedded automatically from the bundled and system fonts.";
 
 fn empty_schema() -> Value {
@@ -787,5 +791,97 @@ pub(crate) mod tests {
                 Target::Local => assert_eq!(code.as_deref(), Some("unknown_tool")),
             }
         }
+    }
+
+    #[test]
+    fn agents_group_move_lock_and_hide_elements() {
+        let mut host = TestHost::default();
+        let text = |id: &str, x: i32| {
+            json!({"op": "add_element", "slide": 1, "element": {
+                "id": id, "frame": {"x": x, "y": 100},
+                "text": {"content": id, "sizing": "auto_width"}}})
+        };
+        let result = call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [
+                text("$a", 100),
+                text("$b", 400),
+                {"op": "group", "id": "$g", "children": ["$a", "$b"]},
+                {"op": "set_layer", "id": "$g", "patch": {"name": "Header"}}
+            ]}),
+        )
+        .unwrap();
+        let group = result["refs"]["$g"].as_u64().unwrap();
+        let slide = call(&mut host, "get_slide", json!({})).unwrap();
+        let element = &slide["elements"][0];
+        assert_eq!(element["id"], group);
+        assert_eq!(element["name"], "Header");
+        assert_eq!(element["group"]["children"].as_array().unwrap().len(), 2);
+        let info = call(&mut host, "get_basic_info", json!({})).unwrap();
+        assert_eq!(info["slides"][0]["elements"], 3);
+
+        let found = call(&mut host, "find_elements", json!({"text": "$b"})).unwrap();
+        assert_eq!(found["elements"].as_array().unwrap().len(), 1);
+
+        call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "set_layer", "id": group, "patch": {"locked": true}}]}),
+        )
+        .unwrap();
+        let a = result["refs"]["$a"].as_u64().unwrap();
+        let error = call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "move_element", "id": a}]}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("locked"), "{error}");
+        call(&mut host, "undo", json!({})).unwrap();
+
+        call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "ungroup", "id": group}]}),
+        )
+        .unwrap();
+        assert_eq!(host.presentation.slides[0].elements.len(), 2);
+    }
+
+    #[test]
+    fn agents_create_groups_with_children_in_one_op() {
+        let mut host = TestHost::default();
+        let result = call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "add_element", "slide": 1, "element": {
+            "id": "$g", "hidden": true, "group": {"children": [
+                {"id": "$t", "frame": {"x": 10, "y": 20},
+                 "text": {"content": "Hi", "sizing": "auto_width"}}
+            ]}}}]}),
+        )
+        .unwrap();
+        let group = result["refs"]["$g"].as_u64().unwrap();
+        let text = result["refs"]["$t"].as_u64().unwrap();
+        let element = host.presentation.element(ElementId(group)).unwrap();
+        assert!(element.hidden);
+        assert_eq!(element.frame.x, 10.);
+        assert_eq!(element.children()[0].id, ElementId(text));
+        assert_eq!(host.history.done().last(), Some("Create group"));
+    }
+
+    #[test]
+    fn hidden_texts_are_not_reported() {
+        let mut host = TestHost::default();
+        add_title(&mut host);
+        call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "set_layer", "id": 1, "patch": {"hidden": true}}]}),
+        )
+        .unwrap();
+        let problems = call(&mut host, "get_diagnostics", json!({})).unwrap()["problems"].clone();
+        assert_eq!(problems, json!([]));
     }
 }
