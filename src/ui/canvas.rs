@@ -116,7 +116,11 @@ impl EditorView {
             return Vec::new();
         };
         let mut texts = Vec::new();
-        for (element, text) in slide.visible_texts() {
+        for node in slide.visible_leaves() {
+            let element = node.element;
+            let Some(text) = element.as_text() else {
+                continue;
+            };
             let (frame, sizing) = dragged.apply(element);
             let sizing = sizing.unwrap_or(text.sizing);
             let Some(layout) = self
@@ -135,7 +139,7 @@ impl EditorView {
                 layout,
                 font_id,
                 font,
-                color: color.opacity(style.opacity),
+                color: color.opacity(node.opacity),
                 underline: style.underline,
                 strikethrough: style.strikethrough,
             });

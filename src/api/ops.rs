@@ -27,8 +27,9 @@ use std::ops::Range;
 use serde::Deserialize;
 
 use crate::document::{
-    ApplyError, Element, ElementId, ElementKind, FontFace, Frame, GroupElement, LayerPatch,
-    Operation, Presentation, Slide, SlideId, TextElement, TextSizing, TextStylePatch,
+    ApplyError, Arrowhead, Dash, Element, ElementId, ElementKind, EllipseElement, Fill, FontFace,
+    Frame, GroupElement, LayerPatch, LineElement, Operation, Presentation, RectangleElement, Rgb,
+    ShapeStylePatch, Slide, SlideId, Stroke, TextElement, TextSizing, TextStylePatch, Vec2,
 };
 use crate::fonts;
 
@@ -82,18 +83,113 @@ pub struct NewElement {
     pub hidden: bool,
     #[serde(default)]
     pub locked: bool,
+    #[serde(default = "one")]
+    pub opacity: f32,
     #[serde(default)]
-    pub frame: Frame,
+    pub frame: Option<Frame>,
     #[serde(flatten)]
     pub kind: NewKind,
 }
 
-/// The kind of a new element: a text, or a group of new elements.
+fn one() -> f32 {
+    1.
+}
+
+/// The kind of a new element: a text, a shape, or a group of new elements.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewKind {
     Text(TextElement),
     Group(NewGroup),
+    Rectangle(RectangleElement),
+    Ellipse(EllipseElement),
+    Line(NewLine),
+}
+
+/// A new line: a [`LineElement`] that can also be placed by its ends
+/// instead of a frame.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewLine {
+    #[serde(default)]
+    pub stroke: Stroke,
+    #[serde(default)]
+    pub start: Arrowhead,
+    #[serde(default)]
+    pub end: Arrowhead,
+    /// Start of the line in slide units; needs `to`, replaces the frame.
+    #[serde(default)]
+    pub from: Option<Vec2>,
+    #[serde(default)]
+    pub to: Option<Vec2>,
+}
+
+/// Fields of a stroke to change; the others keep their value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StrokePatch {
+    pub color: Option<Rgb>,
+    pub opacity: Option<f32>,
+    pub width: Option<f32>,
+    pub dash: Option<Dash>,
+}
+
+impl StrokePatch {
+    fn merge(self, stroke: Stroke) -> Stroke {
+        Stroke {
+            color: self.color.unwrap_or(stroke.color),
+            opacity: self.opacity.unwrap_or(stroke.opacity),
+            width: self.width.unwrap_or(stroke.width),
+            dash: self.dash.unwrap_or(stroke.dash),
+        }
+    }
+}
+
+/// The JSON form of a [`ShapeStylePatch`]: `stroke` holds only the fields
+/// to change, or `null` to remove the stroke.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShapePatch {
+    pub fill: Option<Fill>,
+    #[serde(deserialize_with = "present")]
+    pub stroke: Option<Option<StrokePatch>>,
+    pub corner_radius: Option<f32>,
+    pub start: Option<Arrowhead>,
+    pub end: Option<Arrowhead>,
+}
+
+/// Reads a present field, `null` included, as `Some`.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+impl ShapePatch {
+    /// The core patch, with a partial stroke merged into the current one of
+    /// the shape, or into the default stroke.
+    fn resolve(self, current: Option<&Stroke>) -> ShapeStylePatch {
+        ShapeStylePatch {
+            fill: self.fill,
+            stroke: self.stroke.map(|stroke| {
+                stroke.map(|patch| patch.merge(current.copied().unwrap_or_default()))
+            }),
+            corner_radius: self.corner_radius,
+            start: self.start,
+            end: self.end,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        ShapeStylePatch {
+            fill: self.fill.clone(),
+            stroke: self.stroke.map(|stroke| stroke.map(|_| Stroke::default())),
+            corner_radius: self.corner_radius,
+            start: self.start,
+            end: self.end,
+        }
+        .label()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -168,6 +264,16 @@ pub enum Op {
         id: IdRef,
         patch: TextStylePatch,
     },
+    SetShapeStyle {
+        id: IdRef,
+        patch: ShapePatch,
+    },
+    /// Moves the ends of a line.
+    SetLinePoints {
+        id: IdRef,
+        from: Vec2,
+        to: Vec2,
+    },
     ReplaceText {
         id: IdRef,
         range: Range<usize>,
@@ -194,6 +300,9 @@ impl Op {
             Op::AddElement { element, .. } => match element.kind {
                 NewKind::Text(_) => "Create text",
                 NewKind::Group(_) => "Create group",
+                NewKind::Rectangle(_) => "Create rectangle",
+                NewKind::Ellipse(_) => "Create ellipse",
+                NewKind::Line(_) => "Create line",
             },
             Op::RemoveElement { .. } => "Delete",
             Op::MoveElement { .. } => "Move layer",
@@ -203,6 +312,8 @@ impl Op {
             Op::SetFrame { .. } => "Move",
             Op::SetTextSizing { .. } => "Resizing",
             Op::SetTextStyle { patch, .. } => patch.label(),
+            Op::SetShapeStyle { patch, .. } => patch.label(),
+            Op::SetLinePoints { .. } => "Move line",
             Op::ReplaceText { .. } => "Edit text",
             Op::AddFont { .. } => "Add font",
             Op::RemoveFont { .. } => "Remove font",
@@ -235,6 +346,8 @@ pub enum OpErrorKind {
     /// The reference names a slide where an element is expected, or the
     /// reverse.
     WrongRefKind(String),
+    /// The op is malformed; the text says how.
+    Invalid(&'static str),
     Apply(ApplyError),
 }
 
@@ -261,6 +374,7 @@ impl std::fmt::Display for OpError {
             OpErrorKind::WrongRefKind(name) => {
                 write!(f, "reference {name} names another kind of object")
             }
+            OpErrorKind::Invalid(reason) => write!(f, "{reason}"),
             OpErrorKind::Apply(error) => write!(f, "{error}"),
         }
     }
@@ -493,6 +607,29 @@ impl Compiler {
                     patch,
                 }
             }
+            Op::SetShapeStyle { id, patch } => {
+                let id = self.touch(presentation, &id)?;
+                let current = presentation
+                    .element(id)
+                    .and_then(|element| element.kind.stroke());
+                Operation::SetShapeStyle {
+                    id,
+                    patch: patch.resolve(current),
+                }
+            }
+            Op::SetLinePoints { id, from, to } => {
+                let id = self.touch(presentation, &id)?;
+                let element = presentation
+                    .element(id)
+                    .ok_or(OpErrorKind::Apply(ApplyError::UnknownElement(id)))?;
+                if !element.is_line() {
+                    return Err(OpErrorKind::Invalid("set_line_points needs a line"));
+                }
+                Operation::SetFrame {
+                    id,
+                    frame: Frame::from_line((from.x, from.y), (to.x, to.y), element.frame.rotation),
+                }
+            }
             Op::ReplaceText { id, range, text } => Operation::ReplaceText {
                 id: self.touch(presentation, &id)?,
                 range,
@@ -540,6 +677,7 @@ impl Compiler {
         out: &mut Vec<Operation>,
     ) -> Result<Element, OpErrorKind> {
         let id = self.new_element_id(presentation, element.id)?;
+        let mut frame = element.frame;
         let kind = match element.kind {
             NewKind::Text(text) => {
                 self.ensure_font(presentation, &text.style.font, out)?;
@@ -552,13 +690,35 @@ impl Compiler {
                 }
                 ElementKind::Group(GroupElement { children })
             }
+            NewKind::Rectangle(shape) => ElementKind::Rectangle(shape),
+            NewKind::Ellipse(shape) => ElementKind::Ellipse(shape),
+            NewKind::Line(line) => {
+                match (line.from, line.to, frame) {
+                    (None, None, _) => {}
+                    (Some(from), Some(to), None) => {
+                        frame = Some(Frame::from_line((from.x, from.y), (to.x, to.y), 0.));
+                    }
+                    (Some(_), Some(_), Some(_)) => {
+                        return Err(OpErrorKind::Invalid(
+                            "a line takes either a frame or from and to",
+                        ));
+                    }
+                    _ => return Err(OpErrorKind::Invalid("a line needs both from and to")),
+                }
+                ElementKind::Line(LineElement {
+                    stroke: line.stroke,
+                    start: line.start,
+                    end: line.end,
+                })
+            }
         };
         self.applied.last_element = Some(id);
         Ok(Element {
             name: element.name,
             hidden: element.hidden,
             locked: element.locked,
-            ..Element::new(id, element.frame, kind)
+            opacity: element.opacity,
+            ..Element::new(id, frame.unwrap_or_default(), kind)
         })
     }
 
@@ -770,5 +930,64 @@ mod tests {
     fn a_name_without_dollar_is_not_a_reference() {
         let error = parse(r#"[{"op": "remove_element", "id": "title"}]"#).unwrap_err();
         assert!(error.to_string().contains("\"$name\""), "{error}");
+    }
+
+    #[test]
+    fn agents_add_shapes_and_change_their_style() {
+        let mut presentation = Presentation::new();
+        let ops = parse(
+            r#"[
+              {"op": "add_element", "slide": 1, "element": {"id": "$line",
+                "line": {"from": {"x": 0, "y": 0}, "to": {"x": 0, "y": 100}, "end": "arrow"}}},
+              {"op": "add_element", "slide": 1, "element": {"id": "$box", "opacity": 0.5,
+                "frame": {"x": 10, "y": 10, "width": 100, "height": 50},
+                "rectangle": {"stroke": {"color": "FF0000"}}}},
+              {"op": "set_shape_style", "id": "$box", "patch": {"stroke": {"width": 9}}}
+            ]"#,
+        )
+        .unwrap();
+        let applied = apply(&mut presentation, ops, AGENT).unwrap();
+        let line = presentation
+            .element(ElementId(applied.refs["$line"]))
+            .unwrap();
+        assert_eq!(line.frame.rotation, 90.);
+        assert_eq!(line.frame.width, 100.);
+        let rectangle = presentation
+            .element(ElementId(applied.refs["$box"]))
+            .unwrap();
+        assert_eq!(rectangle.opacity, 0.5);
+        let stroke = rectangle.kind.stroke().unwrap();
+        assert_eq!((stroke.color, stroke.width), (Rgb(0xFF0000), 9.));
+        assert_eq!(applied.steps[2].label, "Stroke");
+
+        let ops = parse(
+            r#"[{"op": "set_line_points", "id": 1, "from": {"x": 0, "y": 0}, "to": {"x": 50, "y": 0}},
+                {"op": "set_shape_style", "id": 2, "patch": {"stroke": null}}]"#,
+        )
+        .unwrap();
+        apply(&mut presentation, ops, AGENT).unwrap();
+        let line = presentation.element(ElementId(1)).unwrap();
+        assert_eq!((line.frame.width, line.frame.rotation), (50., 0.));
+        assert_eq!(
+            presentation.element(ElementId(2)).unwrap().kind.stroke(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_line_takes_a_frame_or_two_ends() {
+        let mut presentation = Presentation::new();
+        let ops = parse(
+            r#"[{"op": "add_element", "slide": 1, "element": {
+                "frame": {"x": 0, "y": 0, "width": 10},
+                "line": {"from": {"x": 0, "y": 0}, "to": {"x": 5, "y": 5}}}}]"#,
+        )
+        .unwrap();
+        let error = apply(&mut presentation, ops, AGENT).unwrap_err();
+        assert!(matches!(error.kind, OpErrorKind::Invalid(_)), "{error}");
+        let ops =
+            parse(r#"[{"op": "set_shape_style", "id": 1, "patch": {"fill": "none"}}]"#).unwrap();
+        let error = apply(&mut presentation, ops, AGENT).unwrap_err();
+        assert!(error.to_string().contains("no element 1"), "{error}");
     }
 }

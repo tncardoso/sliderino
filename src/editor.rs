@@ -191,7 +191,12 @@ impl Preview {
             ),
             Preview::Resize { id, frame, sizing } if *id == element.id => (*frame, Some(*sizing)),
             Preview::Scale { ids, from, to } if ids.contains(&element.id) => (
-                crate::document::map_frame(&element.frame, from, to, sizing),
+                crate::document::map_frame(
+                    &element.frame,
+                    from,
+                    to,
+                    crate::document::MapMode::of(element),
+                ),
                 sizing,
             ),
             Preview::Turn {
@@ -592,8 +597,8 @@ impl EditorView {
         ids.iter()
             .filter_map(|id| {
                 let element = self.presentation.element(*id)?;
-                let sizing = element.as_text().map(|text| text.sizing);
-                let frame = crate::document::map_frame(&element.frame, &from, &to, sizing);
+                let mode = crate::document::MapMode::of(element);
+                let frame = crate::document::map_frame(&element.frame, &from, &to, mode);
                 (frame != element.frame).then_some(Operation::SetFrame { id: *id, frame })
             })
             .collect()

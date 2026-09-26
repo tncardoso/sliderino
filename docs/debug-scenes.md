@@ -67,10 +67,12 @@ the same format (see `agent-api.md`).
 | `move_element` | `id`, `parent` (optional; without it, the slide), `index` (optional; the element goes on top) |
 | `group` | `id` (optional), `children` (a list of element ids on one slide) |
 | `ungroup` | `id` |
-| `set_layer` | `id`, `patch` (`name`, `hidden`, `locked`; only the fields to change) |
+| `set_layer` | `id`, `patch` (`name`, `hidden`, `locked`, `opacity`; only the fields to change) |
 | `set_frame` | `id`, `frame` |
 | `set_text_sizing` | `id`, `sizing` |
 | `set_text_style` | `id`, `patch` (only the fields to change) |
+| `set_shape_style` | `id`, `patch` (`fill`, `stroke`, `corner_radius`, `start`, `end`; only the fields to change) |
+| `set_line_points` | `id`, `from` (`{"x": 0, "y": 0}`), `to` |
 | `replace_text` | `id`, `range` (`{"start": 0, "end": 5}`, in bytes), `text` |
 | `add_font` | `face` |
 | `remove_font` | `face` |
@@ -88,17 +90,19 @@ Rules:
   license of the font does not permit embedding, the tool shows a warning.
   Scenes do not add fonts automatically, but the agent API does.
 - `sizing` is `auto_width`, `auto_height` or `fixed`.
-- An element has a `text` or a `group`. A group has `children`, a list of
-  elements. The last child is on top. Frames of children are in slide
-  units, as all frames.
-- An element can have a `name`, `hidden` and `locked`. Set them with
-  `set_layer`. `"name": null` removes the name.
+- An element has a `text`, a `group`, a `rectangle`, an `ellipse` or a
+  `line`. A group has `children`, a list of elements. The last child is on
+  top. Frames of children are in slide units, as all frames.
+- Shapes have the same fields as in the agent API. See "Shapes" in
+  `agent-api.md`.
+- An element can have a `name`, `hidden`, `locked` and `opacity` (0 to 1).
+  Set them with `set_layer`. `"name": null` removes the name.
 - In `style` and `patch`, all fields are optional: `font`, `size`,
   `line_height` (`"auto"` or `{"percent": 120}`), `letter_spacing` (percent of
   the size), `align` (`left`, `center`, `right`, `justify`),
   `vertical_align` (`top`, `middle`, `bottom`), `paragraph_spacing`,
   `underline`, `strikethrough`, `case` (`original`, `upper`), `color`
-  (`"1A1A1A"`), `opacity` (0 to 1).
+  (`"1A1A1A"`). To make a text transparent, set the `opacity` of the element.
 - If an operation fails, the tool stops and shows the number of the
   operation (from 0).
 

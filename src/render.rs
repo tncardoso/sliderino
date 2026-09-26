@@ -53,23 +53,34 @@ pub fn render_slide(
     pixmap.fill(Color::WHITE);
     let transform = Transform::from_scale(scale, scale);
 
-    let texts: Vec<(&Element, TextLayout)> = slide
-        .visible_texts()
-        .filter_map(|(element, _)| Some((element, presentation.text_layout(element.id)?)))
+    let texts: Vec<(&Element, f32, TextLayout)> = slide
+        .visible_leaves()
+        .filter(|node| node.element.as_text().is_some())
+        .filter_map(|node| {
+            let layout = presentation.text_layout(node.element.id)?;
+            Some((node.element, node.opacity, layout))
+        })
         .collect();
 
     if overlay {
-        for (element, layout) in &texts {
+        for (element, _, layout) in &texts {
             let transform = turned(transform, &element.frame);
             paint_overlay_under(&mut pixmap, &element.frame, layout, transform);
         }
     }
-    for (element, layout) in &texts {
+    for (element, opacity, layout) in &texts {
         let transform = turned(transform, &element.frame);
-        paint_text(&mut pixmap, presentation, element, layout, transform);
+        paint_text(
+            &mut pixmap,
+            presentation,
+            element,
+            *opacity,
+            layout,
+            transform,
+        );
     }
     if overlay {
-        for (element, layout) in &texts {
+        for (element, _, layout) in &texts {
             let transform = turned(transform, &element.frame);
             paint_overlay_over(&mut pixmap, &element.frame, layout, scale, transform);
         }
@@ -149,6 +160,7 @@ fn paint_text(
     pixmap: &mut Pixmap,
     presentation: &Presentation,
     element: &Element,
+    opacity: f32,
     layout: &TextLayout,
     transform: Transform,
 ) {
@@ -162,7 +174,7 @@ fn paint_text(
     let ink = TextInk {
         font: data,
         layout,
-        color: paint(style.color, style.opacity),
+        color: paint(style.color, opacity),
         underline: style.underline,
         strikethrough: style.strikethrough,
     };

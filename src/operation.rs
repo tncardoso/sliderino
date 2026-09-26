@@ -10,8 +10,8 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    Element, ElementId, FontData, FontFace, Frame, HAlign, LineHeight, Rgb, Slide, SlideId,
-    TextCase, TextSizing, TextStyle, VAlign,
+    Arrowhead, Element, ElementId, ElementKind, Fill, FontData, FontFace, Frame, HAlign, ImageId,
+    LineHeight, Rgb, Slide, SlideId, Stroke, TextCase, TextSizing, TextStyle, VAlign,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,8 +68,8 @@ pub enum Operation {
         id: ElementId,
         frames: Vec<(ElementId, Frame)>,
     },
-    /// Changes the name, visibility or lock of an element. The only
-    /// operation a locked element accepts.
+    /// Changes the name, visibility, lock or opacity of an element. The
+    /// only operation a locked element accepts.
     SetLayer {
         id: ElementId,
         patch: LayerPatch,
@@ -82,6 +82,11 @@ pub enum Operation {
     SetTextStyle {
         id: ElementId,
         patch: TextStylePatch,
+    },
+    /// Changes only the style fields of a shape the patch sets.
+    SetShapeStyle {
+        id: ElementId,
+        patch: ShapeStylePatch,
     },
     /// Replaces a byte range of the text content.
     ReplaceText {
@@ -118,24 +123,28 @@ pub struct LayerPatch {
     pub hidden: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// 0.0 to 1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f32>,
 }
 
 /// Reads a present field, `null` included, as `Some`.
-fn some_option<'de, D: serde::Deserializer<'de>>(
+fn some_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
-) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(deserializer).map(Some)
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 impl LayerPatch {
     /// The undo step name of the change.
     pub fn label(&self) -> &'static str {
-        match (&self.name, self.hidden, self.locked) {
-            (Some(_), None, None) => "Rename",
-            (None, Some(true), None) => "Hide",
-            (None, Some(false), None) => "Show",
-            (None, None, Some(true)) => "Lock",
-            (None, None, Some(false)) => "Unlock",
+        match (&self.name, self.hidden, self.locked, self.opacity) {
+            (Some(_), None, None, None) => "Rename",
+            (None, Some(true), None, None) => "Hide",
+            (None, Some(false), None, None) => "Show",
+            (None, None, Some(true), None) => "Lock",
+            (None, None, Some(false), None) => "Unlock",
+            (None, None, None, Some(_)) => "Opacity",
             _ => "Layer",
         }
     }
@@ -153,6 +162,7 @@ impl LayerPatch {
             name: swap(name, &mut element.name),
             hidden: swap(self.hidden, &mut element.hidden),
             locked: swap(self.locked, &mut element.locked),
+            opacity: swap(self.opacity, &mut element.opacity),
         }
     }
 }
@@ -173,7 +183,6 @@ pub struct TextStylePatch {
     pub strikethrough: Option<bool>,
     pub case: Option<TextCase>,
     pub color: Option<Rgb>,
-    pub opacity: Option<f32>,
 }
 
 impl TextStylePatch {
@@ -192,7 +201,6 @@ impl TextStylePatch {
             (self.strikethrough.is_some(), "Strikethrough"),
             (self.case.is_some(), "Letter case"),
             (self.color.is_some(), "Text color"),
-            (self.opacity.is_some(), "Text opacity"),
         ];
         let mut set = fields.iter().filter(|(set, _)| *set);
         match (set.next(), set.next()) {
@@ -219,7 +227,6 @@ impl TextStylePatch {
             strikethrough: swap(self.strikethrough, &mut style.strikethrough),
             case: swap(self.case, &mut style.case),
             color: swap(self.color, &mut style.color),
-            opacity: swap(self.opacity, &mut style.opacity),
         }
     }
 
@@ -234,14 +241,140 @@ impl TextStylePatch {
             && line_height
             && finite(self.letter_spacing)
             && finite(self.paragraph_spacing)
-            && self.paragraph_spacing.is_none_or(|v| v >= 0.)
-            && self.opacity.is_none_or(|v| (0. ..=1.).contains(&v));
+            && self.paragraph_spacing.is_none_or(|v| v >= 0.);
         if valid {
             Ok(())
         } else {
             Err(ApplyError::InvalidStyle)
         }
     }
+}
+
+/// Style fields of a shape to change; `None` leaves the field alone. A
+/// field the shape does not have is an error: a line has no fill and only
+/// a rectangle has a corner radius. `stroke: Some(None)` removes the stroke
+/// of a rectangle or an ellipse. In JSON, omitted fields are `None` and
+/// `"stroke": null` removes the stroke.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShapeStylePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
+    #[serde(
+        deserialize_with = "some_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stroke: Option<Option<Stroke>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<Arrowhead>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<Arrowhead>,
+}
+
+impl ShapeStylePatch {
+    /// The undo step name of the change.
+    pub fn label(&self) -> &'static str {
+        let fields = [
+            (self.fill.is_some(), "Fill"),
+            (self.stroke.is_some(), "Stroke"),
+            (self.corner_radius.is_some(), "Corner radius"),
+            (self.start.is_some(), "Line start"),
+            (self.end.is_some(), "Line end"),
+        ];
+        let mut set = fields.iter().filter(|(set, _)| *set);
+        match (set.next(), set.next()) {
+            (Some((_, label)), None) => label,
+            _ => "Shape style",
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ApplyError> {
+        if let Some(fill) = &self.fill {
+            fill.validate()?;
+        }
+        if let Some(Some(stroke)) = &self.stroke {
+            stroke.validate()?;
+        }
+        if self
+            .corner_radius
+            .is_some_and(|radius| !(radius.is_finite() && radius >= 0.))
+        {
+            return Err(ApplyError::InvalidStyle);
+        }
+        Ok(())
+    }
+
+    /// Writes the set fields into the shape `id` and returns a patch holding
+    /// the values they replaced. Changes nothing when a field does not
+    /// apply to the shape.
+    pub fn apply_to(
+        self,
+        id: ElementId,
+        kind: &mut ElementKind,
+    ) -> Result<ShapeStylePatch, ApplyError> {
+        let not_applicable = |field| Err(ApplyError::NotApplicable { id, field });
+        let (fill, stroke, radius, ends) = match kind {
+            ElementKind::Rectangle(shape) => (
+                Some(&mut shape.fill),
+                StrokeSlot::Optional(&mut shape.stroke),
+                Some(&mut shape.corner_radius),
+                None,
+            ),
+            ElementKind::Ellipse(shape) => (
+                Some(&mut shape.fill),
+                StrokeSlot::Optional(&mut shape.stroke),
+                None,
+                None,
+            ),
+            ElementKind::Line(line) => (
+                None,
+                StrokeSlot::Required(&mut line.stroke),
+                None,
+                Some((&mut line.start, &mut line.end)),
+            ),
+            ElementKind::Text(_) | ElementKind::Group(_) => {
+                return Err(ApplyError::NotShape(id));
+            }
+        };
+        if self.fill.is_some() && fill.is_none() {
+            return not_applicable("fill");
+        }
+        if self.corner_radius.is_some() && radius.is_none() {
+            return not_applicable("corner radius");
+        }
+        if (self.start.is_some() || self.end.is_some()) && ends.is_none() {
+            return not_applicable("arrowheads");
+        }
+        if matches!(self.stroke, Some(None)) && matches!(stroke, StrokeSlot::Required(_)) {
+            return Err(ApplyError::StrokeRequired(id));
+        }
+        fn swap<T>(new: Option<T>, field: Option<&mut T>) -> Option<T> {
+            new.zip(field)
+                .map(|(value, field)| std::mem::replace(field, value))
+        }
+        let (start, end) = ends.map_or((None, None), |(start, end)| (Some(start), Some(end)));
+        Ok(ShapeStylePatch {
+            fill: swap(self.fill, fill),
+            stroke: self.stroke.map(|new| match stroke {
+                StrokeSlot::Optional(field) => std::mem::replace(field, new),
+                StrokeSlot::Required(field) => {
+                    Some(std::mem::replace(field, new.expect("checked above")))
+                }
+            }),
+            corner_radius: swap(self.corner_radius, radius),
+            start: swap(self.start, start),
+            end: swap(self.end, end),
+        })
+    }
+}
+
+/// The stroke field of a shape: optional on rectangles and ellipses,
+/// always present on lines.
+enum StrokeSlot<'a> {
+    Optional(&'a mut Option<Stroke>),
+    Required(&'a mut Stroke),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -268,6 +401,19 @@ pub enum ApplyError {
     InvalidParent(ElementId),
     GroupAcrossSlides,
     EmptyGroup,
+    /// The element is not a rectangle, an ellipse or a line.
+    NotShape(ElementId),
+    /// The shape has no such style field, such as the fill of a line.
+    NotApplicable {
+        id: ElementId,
+        field: &'static str,
+    },
+    /// A line cannot lose its stroke.
+    StrokeRequired(ElementId),
+    /// The opacity is not between 0 and 1.
+    InvalidOpacity,
+    /// No embedded image has this id.
+    MissingImage(ImageId),
 }
 
 impl std::fmt::Display for ApplyError {
@@ -281,7 +427,7 @@ impl std::fmt::Display for ApplyError {
             ApplyError::NotText(id) => write!(f, "element {} is not text", id.0),
             ApplyError::InvalidRange(range) => write!(f, "invalid text range {range:?}"),
             ApplyError::InvalidFrame => write!(f, "invalid frame"),
-            ApplyError::InvalidStyle => write!(f, "invalid text style"),
+            ApplyError::InvalidStyle => write!(f, "invalid style"),
             ApplyError::MissingFont(face) => write!(f, "font {face:?} is not embedded"),
             ApplyError::DuplicateFont(face) => write!(f, "font {face:?} is already embedded"),
             ApplyError::FontInUse(face) => write!(f, "font {face:?} is in use"),
@@ -295,6 +441,15 @@ impl std::fmt::Display for ApplyError {
                 write!(f, "grouped elements must be on the same slide")
             }
             ApplyError::EmptyGroup => write!(f, "a new group needs at least one element"),
+            ApplyError::NotShape(id) => write!(f, "element {} is not a shape", id.0),
+            ApplyError::NotApplicable { id, field } => {
+                write!(f, "element {} has no {field}", id.0)
+            }
+            ApplyError::StrokeRequired(id) => {
+                write!(f, "element {} is a line: it keeps its stroke", id.0)
+            }
+            ApplyError::InvalidOpacity => write!(f, "opacity must be between 0 and 1"),
+            ApplyError::MissingImage(id) => write!(f, "image {} is not embedded", id.0),
         }
     }
 }

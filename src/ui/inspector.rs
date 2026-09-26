@@ -14,7 +14,8 @@ use gpui_kit::{
 };
 
 use crate::document::{
-    ElementId, FontFace, Frame, LineHeight, Operation, Rgb, TextSizing, TextStyle, TextStylePatch,
+    ElementId, FontFace, Frame, LayerPatch, LineHeight, Operation, Rgb, TextSizing, TextStyle,
+    TextStylePatch,
 };
 use crate::editor::EditorView;
 use crate::fonts;
@@ -58,7 +59,7 @@ impl Field {
     }
 
     /// The field's text for a frame and style.
-    fn show(self, frame: &Frame, style: &TextStyle) -> String {
+    fn show(self, frame: &Frame, style: &TextStyle, opacity: f32) -> String {
         match self {
             Field::X => number(frame.x),
             Field::Y => number(frame.y),
@@ -72,7 +73,7 @@ impl Field {
             },
             Field::LetterSpacing => format!("{}%", number(style.letter_spacing)),
             Field::ParagraphSpacing => number(style.paragraph_spacing),
-            Field::Opacity => format!("{}%", number(style.opacity * 100.)),
+            Field::Opacity => format!("{}%", number(opacity * 100.)),
         }
     }
 }
@@ -277,6 +278,13 @@ impl EditorView {
         self.text_parts(self.single_selection()?)
     }
 
+    /// The opacity of the element itself, 1 for an unknown one.
+    fn opacity_of(&self, id: ElementId) -> f32 {
+        self.presentation
+            .element(id)
+            .map_or(1., |element| element.opacity)
+    }
+
     fn text_parts(&self, id: ElementId) -> Option<(ElementId, Frame, TextStyle, TextSizing)> {
         let element = self.presentation.element(id)?;
         let text = element.as_text()?;
@@ -312,7 +320,7 @@ impl EditorView {
                     }
                     let shown = match field {
                         Field::Rotation => rotation.clone(),
-                        _ => field.show(&frame, &style),
+                        _ => field.show(&frame, &style, 1.),
                     };
                     let state = input.read(cx);
                     if !state.focus_handle(cx).is_focused(window) && state.value() != shown.as_str()
@@ -327,8 +335,9 @@ impl EditorView {
         self.inspector.shown_group.clear();
         // While the element is dragged, the fields follow the preview.
         let frame = self.shown_frame(id).unwrap_or(frame);
+        let opacity = self.opacity_of(id);
         for (field, input) in &self.inspector.fields {
-            let shown = field.show(&frame, &style);
+            let shown = field.show(&frame, &style, opacity);
             let state = input.read(cx);
             if !state.focus_handle(cx).is_focused(window) && state.value() != shown.as_str() {
                 input.update(cx, |state, cx| state.set_value(shown, window, cx));
@@ -410,7 +419,7 @@ impl EditorView {
         };
         let input = self.inspector.input(field).clone();
         let typed = input.read(cx).value().to_string();
-        if typed == field.show(&frame, &style) {
+        if typed == field.show(&frame, &style, self.opacity_of(id)) {
             return;
         }
         if let Some((label, operation)) = field_edit(field, &typed, id, &frame, &style, sizing) {
@@ -419,8 +428,8 @@ impl EditorView {
             self.selection = selection;
         }
         // Show the value the document ended up with.
-        if let Some((_, frame, style, _)) = self.selected_text() {
-            let shown = field.show(&frame, &style);
+        if let Some((id, frame, style, _)) = self.selected_text() {
+            let shown = field.show(&frame, &style, self.opacity_of(id));
             input.update(cx, |state, cx| state.set_value(shown, window, cx));
         }
         cx.notify();
@@ -504,7 +513,7 @@ impl EditorView {
             }
         }
         if let Some(frame) = self.selection_box() {
-            let shown = field.show(&frame, &style);
+            let shown = field.show(&frame, &style, 1.);
             input.update(cx, |state, cx| state.set_value(shown, window, cx));
         }
         cx.notify();
@@ -715,11 +724,14 @@ fn field_edit(
             }),
         ),
         Field::Opacity if (0. ..=100.).contains(&value) => (
-            "Text opacity",
-            patch(TextStylePatch {
-                opacity: Some(value / 100.),
-                ..Default::default()
-            }),
+            "Opacity",
+            Operation::SetLayer {
+                id,
+                patch: LayerPatch {
+                    opacity: Some(value / 100.),
+                    ..Default::default()
+                },
+            },
         ),
         _ => return None,
     };

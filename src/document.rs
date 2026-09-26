@@ -76,6 +76,14 @@ impl Slide {
             .filter(|node| !node.hidden)
             .filter_map(|node| Some((node.element, node.element.as_text()?)))
     }
+
+    /// The elements drawn on the slide, groups left out, in paint order:
+    /// hidden ones and the children of hidden groups are left out.
+    pub fn visible_leaves(&self) -> impl Iterator<Item = Node<'_>> {
+        self.walk()
+            .into_iter()
+            .filter(|node| !node.hidden && node.element.as_group().is_none())
+    }
 }
 
 /// An element met by [`Slide::walk`].
@@ -89,6 +97,8 @@ pub struct Node<'a> {
     pub hidden: bool,
     /// The element or one of its ancestors is locked.
     pub locked: bool,
+    /// The opacity of the element times the opacities of its ancestors.
+    pub opacity: f32,
 }
 
 fn walk_into<'a>(elements: &'a [Element], parent: Option<&Node<'a>>, nodes: &mut Vec<Node<'a>>) {
@@ -99,6 +109,7 @@ fn walk_into<'a>(elements: &'a [Element], parent: Option<&Node<'a>>, nodes: &mut
             depth: parent.map_or(0, |parent| parent.depth + 1),
             hidden: element.hidden || parent.is_some_and(|parent| parent.hidden),
             locked: element.locked || parent.is_some_and(|parent| parent.locked),
+            opacity: element.opacity * parent.map_or(1., |parent| parent.opacity),
         };
         nodes.push(node);
         walk_into(element.children(), Some(&node), nodes);
@@ -182,10 +193,10 @@ fn refit_groups(elements: &mut [Element]) {
         };
         refit_groups(&mut group.children);
         let rotation = element.frame.rotation;
-        let children = match &element.kind {
-            ElementKind::Group(group) => &group.children,
-            ElementKind::Text(_) => continue,
+        let ElementKind::Group(group) = &element.kind else {
+            continue;
         };
+        let children = &group.children;
         if let Some(bounds) = union_in(children.iter().map(|child| &child.frame), rotation) {
             element.frame = bounds;
         }
@@ -286,6 +297,27 @@ pub fn normalize_degrees(degrees: f32) -> f32 {
     }
 }
 
+/// How a child follows its group in [`map_frame`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapMode {
+    /// The box scales with the group.
+    Box,
+    /// The box keeps its size: text that sizes its own width.
+    KeepSize,
+    /// The two ends of a line follow the group.
+    Line,
+}
+
+impl MapMode {
+    pub fn of(element: &Element) -> MapMode {
+        match &element.kind {
+            ElementKind::Text(text) if text.sizing == TextSizing::AutoWidth => MapMode::KeepSize,
+            ElementKind::Line(_) => MapMode::Line,
+            _ => MapMode::Box,
+        }
+    }
+}
+
 /// The frame a child takes when its group goes from `from` to `to`, both
 /// possibly rotated. The rotated top-left corner of the child follows the
 /// group: it keeps its place in the group's axes, scaled with the group. The
@@ -294,21 +326,29 @@ pub fn normalize_degrees(degrees: f32) -> f32 {
 ///
 /// A child turned by an angle that is not a multiple of 90° inside the group
 /// cannot stretch along one group axis without a skew: its box scales along
-/// the group axis nearest to each of its own, which is close enough.
-pub fn map_frame(child: &Frame, from: &Frame, to: &Frame, sizing: Option<TextSizing>) -> Frame {
+/// the group axis nearest to each of its own, which is close enough. A line
+/// has no such limit: both of its ends follow the group exactly.
+pub fn map_frame(child: &Frame, from: &Frame, to: &Frame, mode: MapMode) -> Frame {
     let ratio = |to: f32, from: f32| if from > 0. { to / from } else { 1. };
     let sx = ratio(to.width, from.width);
     let sy = ratio(to.height, from.height);
-    let (x, y) = child.to_slide(0., 0.);
-    let (u, v) = from.to_local(x, y);
-    let (x, y) = to.to_slide(u * sx, v * sy);
+    let map = |(x, y): (f32, f32)| {
+        let (u, v) = from.to_local(x, y);
+        to.to_slide(u * sx, v * sy)
+    };
+    if mode == MapMode::Line {
+        let (start, end) = child.line_ends();
+        let turned = normalize_degrees(child.rotation + to.rotation - from.rotation);
+        return Frame::from_line(map(start), map(end), turned);
+    }
+    let (x, y) = map(child.to_slide(0., 0.));
     let (sin, cos) = sin_cos(child.rotation - from.rotation);
     let (fx, fy) = if sin.abs() > cos.abs() {
         (sy, sx)
     } else {
         (sx, sy)
     };
-    let keeps_size = sizing == Some(TextSizing::AutoWidth);
+    let keeps_size = mode == MapMode::KeepSize;
     let frame = Frame {
         x: 0.,
         y: 0.,
@@ -343,6 +383,9 @@ pub struct Element {
     /// its descendants. An unlocked ancestor still moves it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
+    /// 0.0 to 1.0. A group multiplies the opacity of its children.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f32,
     #[serde(default)]
     pub frame: Frame,
     #[serde(flatten)]
@@ -353,6 +396,18 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+fn one() -> f32 {
+    1.
+}
+
+fn is_one(value: &f32) -> bool {
+    *value == 1.
+}
+
+fn is_zero(value: &f32) -> bool {
+    *value == 0.
+}
+
 impl Element {
     /// A visible, unlocked element without a name.
     pub fn new(id: ElementId, frame: Frame, kind: ElementKind) -> Self {
@@ -361,6 +416,7 @@ impl Element {
             name: None,
             hidden: false,
             locked: false,
+            opacity: 1.,
             frame,
             kind,
         }
@@ -369,29 +425,33 @@ impl Element {
     pub fn as_text(&self) -> Option<&TextElement> {
         match &self.kind {
             ElementKind::Text(text) => Some(text),
-            ElementKind::Group(_) => None,
+            _ => None,
         }
     }
 
     fn as_text_mut(&mut self) -> Option<&mut TextElement> {
         match &mut self.kind {
             ElementKind::Text(text) => Some(text),
-            ElementKind::Group(_) => None,
+            _ => None,
         }
     }
 
     pub fn as_group(&self) -> Option<&GroupElement> {
         match &self.kind {
             ElementKind::Group(group) => Some(group),
-            ElementKind::Text(_) => None,
+            _ => None,
         }
     }
 
     fn as_group_mut(&mut self) -> Option<&mut GroupElement> {
         match &mut self.kind {
             ElementKind::Group(group) => Some(group),
-            ElementKind::Text(_) => None,
+            _ => None,
         }
+    }
+
+    pub fn is_line(&self) -> bool {
+        matches!(self.kind, ElementKind::Line(_))
     }
 
     /// The element's children; empty for an element that is not a group.
@@ -475,6 +535,43 @@ impl Frame {
         x >= 0. && x <= self.width && y >= 0. && y <= self.height
     }
 
+    /// The start and end of a line: the ends of the horizontal center axis
+    /// of the frame, on the slide.
+    pub fn line_ends(&self) -> ((f32, f32), (f32, f32)) {
+        (
+            self.to_slide(0., self.height / 2.),
+            self.to_slide(self.width, self.height / 2.),
+        )
+    }
+
+    /// The frame of a line from `start` to `end`: its center is the middle of
+    /// the line, its width the length and its rotation the angle. A line of
+    /// no length keeps `rotation`.
+    pub fn from_line(start: (f32, f32), end: (f32, f32), rotation: f32) -> Frame {
+        let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+        let length = dx.hypot(dy);
+        let rotation = if length > 1e-4 {
+            let degrees = dy.atan2(dx).to_degrees();
+            // Keep exact multiples of 90° exact.
+            let rounded = degrees.round();
+            normalize_degrees(if nearly(degrees, rounded) {
+                rounded
+            } else {
+                degrees
+            })
+        } else {
+            normalize_degrees(rotation)
+        };
+        let (cx, cy) = ((start.0 + end.0) / 2., (start.1 + end.1) / 2.);
+        Frame {
+            x: cx - length / 2.,
+            y: cy,
+            width: length,
+            height: 0.,
+            rotation,
+        }
+    }
+
     /// The two frames overlap or touch, rotated ones included.
     pub fn intersects(&self, other: &Frame) -> bool {
         let (a, b) = (self.corners(), other.corners());
@@ -505,6 +602,95 @@ impl Frame {
 pub enum ElementKind {
     Text(TextElement),
     Group(GroupElement),
+    Rectangle(RectangleElement),
+    Ellipse(EllipseElement),
+    Line(LineElement),
+}
+
+impl ElementKind {
+    /// A rectangle, an ellipse or a line.
+    pub fn is_shape(&self) -> bool {
+        matches!(
+            self,
+            ElementKind::Rectangle(_) | ElementKind::Ellipse(_) | ElementKind::Line(_)
+        )
+    }
+
+    /// The fill of a rectangle or an ellipse.
+    pub fn fill(&self) -> Option<&Fill> {
+        match self {
+            ElementKind::Rectangle(shape) => Some(&shape.fill),
+            ElementKind::Ellipse(shape) => Some(&shape.fill),
+            _ => None,
+        }
+    }
+
+    /// The stroke of a shape; `None` for a shape without one.
+    pub fn stroke(&self) -> Option<&Stroke> {
+        match self {
+            ElementKind::Rectangle(shape) => shape.stroke.as_ref(),
+            ElementKind::Ellipse(shape) => shape.stroke.as_ref(),
+            ElementKind::Line(line) => Some(&line.stroke),
+            _ => None,
+        }
+    }
+
+    /// Checks the style values of a shape; other kinds pass.
+    pub fn validate(&self) -> Result<(), ApplyError> {
+        if let Some(fill) = self.fill() {
+            fill.validate()?;
+        }
+        if let Some(stroke) = self.stroke() {
+            stroke.validate()?;
+        }
+        if let ElementKind::Rectangle(shape) = self
+            && !(shape.corner_radius.is_finite() && shape.corner_radius >= 0.)
+        {
+            return Err(ApplyError::InvalidStyle);
+        }
+        Ok(())
+    }
+}
+
+/// A rectangle, with corners rounded when `corner_radius` is more than 0.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RectangleElement {
+    #[serde(default)]
+    pub fill: Fill,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<Stroke>,
+    /// In slide units, the same for every corner. A radius larger than half
+    /// the shorter side draws as half the shorter side.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corner_radius: f32,
+}
+
+/// An ellipse that touches the four sides of its frame; a circle when the
+/// frame is square.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EllipseElement {
+    #[serde(default)]
+    pub fill: Fill,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<Stroke>,
+}
+
+/// A straight line. Its frame has a height of 0: the line goes from the
+/// left end to the right end of the frame, and the rotation of the frame is
+/// its angle. See [`Frame::line_ends`] and [`Frame::from_line`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineElement {
+    #[serde(default)]
+    pub stroke: Stroke,
+    /// Drawn at the start of the line.
+    #[serde(default, skip_serializing_if = "Arrowhead::is_none")]
+    pub start: Arrowhead,
+    /// Drawn at the end of the line.
+    #[serde(default, skip_serializing_if = "Arrowhead::is_none")]
+    pub end: Arrowhead,
 }
 
 /// Elements moved, resized and turned together. The frame of a group is the
@@ -687,8 +873,6 @@ pub struct TextStyle {
     pub strikethrough: bool,
     pub case: TextCase,
     pub color: Rgb,
-    /// 0.0 to 1.0.
-    pub opacity: f32,
 }
 
 impl Default for TextStyle {
@@ -705,7 +889,6 @@ impl Default for TextStyle {
             strikethrough: false,
             case: TextCase::Original,
             color: Rgb(0x111111),
-            opacity: 1.,
         }
     }
 }
@@ -1116,7 +1299,7 @@ impl Presentation {
                 let slide_index = self
                     .index_of(slide)
                     .ok_or(ApplyError::UnknownSlide(slide))?;
-                normalize_rotations(&mut element);
+                normalize_frames(&mut element);
                 self.check_parent(slide, parent)?;
                 let mut tree = Vec::new();
                 each_in_tree(&element, &mut |element| tree.push(element));
@@ -1129,6 +1312,11 @@ impl Presentation {
                         self.check_font(&text.style.font)?;
                     }
                     check_frame(&node.frame)?;
+                    check_opacity(node.opacity)?;
+                    node.kind.validate()?;
+                    if let Some(fill) = node.kind.fill() {
+                        self.check_fill(fill)?;
+                    }
                 }
                 let ids: Vec<ElementId> = tree.iter().map(|node| node.id).collect();
                 let id = element.id;
@@ -1181,12 +1369,15 @@ impl Presentation {
             }
             Operation::SetFrame { id, frame } => {
                 check_frame(&frame)?;
-                let frame = Frame {
+                let mut frame = Frame {
                     rotation: normalize_degrees(frame.rotation),
                     ..frame
                 };
                 self.check_unlocked(id)?;
                 let element = self.element_mut(id)?;
+                if element.is_line() {
+                    frame = normalize_line(frame);
+                }
                 let old = element.frame;
                 if element.as_group().is_some() {
                     return self.set_group_frame(id, old, frame);
@@ -1213,12 +1404,20 @@ impl Presentation {
                 let mut old = Vec::with_capacity(frames.len());
                 for (child, frame) in frames {
                     let element = self.element_mut(child)?;
+                    let frame = if element.is_line() {
+                        normalize_line(frame)
+                    } else {
+                        frame
+                    };
                     old.push((child, std::mem::replace(&mut element.frame, frame)));
                     self.fit(child)?;
                 }
                 Ok(Operation::SetGroupFrames { id, frames: old })
             }
             Operation::SetLayer { id, patch } => {
+                if let Some(opacity) = patch.opacity {
+                    check_opacity(opacity)?;
+                }
                 let element = self.element_mut(id)?;
                 let old = patch.apply_to(element);
                 Ok(Operation::SetLayer { id, patch: old })
@@ -1257,6 +1456,16 @@ impl Presentation {
                 let old = patch.apply_to(&mut text.style);
                 self.fit(id)?;
                 Ok(Operation::SetTextStyle { id, patch: old })
+            }
+            Operation::SetShapeStyle { id, patch } => {
+                patch.validate()?;
+                if let Some(fill) = &patch.fill {
+                    self.check_fill(fill)?;
+                }
+                self.check_unlocked(id)?;
+                let element = self.element_mut(id)?;
+                let old = patch.apply_to(id, &mut element.kind)?;
+                Ok(Operation::SetShapeStyle { id, patch: old })
             }
             Operation::ReplaceText { id, range, text } => {
                 self.check_unlocked(id)?;
@@ -1350,20 +1559,20 @@ impl Presentation {
         let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
         each_in_tree(element, &mut |node| {
             if node.id != id {
-                let sizing = node.as_text().map(|text| text.sizing);
-                nodes.push((node.id, node.frame, sizing, node.as_group().is_some()));
+                let mode = MapMode::of(node);
+                nodes.push((node.id, node.frame, mode, node.as_group().is_some()));
             }
         });
         let turn = frame.rotation - old.rotation;
         let mut restore = Vec::with_capacity(nodes.len() + 1);
-        for (node, before, sizing, group) in nodes {
+        for (node, before, mode, group) in nodes {
             restore.push((node, before));
             let target = &mut self.element_mut(node)?.frame;
             if group {
                 // Its box follows its children when the groups are fitted.
                 target.rotation = normalize_degrees(before.rotation + turn);
             } else {
-                *target = map_frame(&before, &old, &frame, sizing);
+                *target = map_frame(&before, &old, &frame, mode);
                 self.fit(node)?;
             }
         }
@@ -1375,6 +1584,14 @@ impl Presentation {
         })
     }
 
+    /// Checks that the image of an image fill is embedded.
+    fn check_fill(&self, fill: &Fill) -> Result<(), ApplyError> {
+        match fill {
+            Fill::Image(image) => Err(ApplyError::MissingImage(image.id)),
+            _ => Ok(()),
+        }
+    }
+
     fn check_font(&self, face: &FontFace) -> Result<(), ApplyError> {
         if self.fonts.contains(face) {
             Ok(())
@@ -1384,11 +1601,33 @@ impl Presentation {
     }
 }
 
-/// Brings the rotations of the element and its descendants into (-180, 180].
-fn normalize_rotations(element: &mut Element) {
+/// Brings the rotations of the element and its descendants into (-180, 180]
+/// and the frames of lines to a height of 0.
+fn normalize_frames(element: &mut Element) {
     element.frame.rotation = normalize_degrees(element.frame.rotation);
+    if element.is_line() {
+        element.frame = normalize_line(element.frame);
+    }
     if let Some(group) = element.as_group_mut() {
-        group.children.iter_mut().for_each(normalize_rotations);
+        group.children.iter_mut().for_each(normalize_frames);
+    }
+}
+
+/// The frame of a line given as a box: the horizontal center axis of the
+/// box, with the same center.
+fn normalize_line(frame: Frame) -> Frame {
+    Frame {
+        y: frame.y + frame.height / 2.,
+        height: 0.,
+        ..frame
+    }
+}
+
+fn check_opacity(opacity: f32) -> Result<(), ApplyError> {
+    if (0. ..=1.).contains(&opacity) {
+        Ok(())
+    } else {
+        Err(ApplyError::InvalidOpacity)
     }
 }
 
@@ -1401,7 +1640,11 @@ fn check_frame(frame: &Frame) -> Result<(), ApplyError> {
     }
 }
 
-pub use crate::operation::{ApplyError, LayerPatch, Operation, TextStylePatch};
+pub use crate::operation::{ApplyError, LayerPatch, Operation, ShapeStylePatch, TextStylePatch};
+pub use crate::style::{
+    Arrowhead, Dash, Fill, GradientStop, HeadKind, HeadSize, ImageFill, ImageFit, ImageId,
+    LinearGradient, RadialGradient, SolidFill, Stroke, Vec2,
+};
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -2207,7 +2450,7 @@ pub(crate) mod tests {
             height: 20.,
             rotation: 90.,
         };
-        let mapped = map_frame(&child, &from, &to, None);
+        let mapped = map_frame(&child, &from, &to, MapMode::Box);
         // Its height lies along the group's width.
         assert!(close(mapped.width, 50.) && close(mapped.height, 40.));
     }
@@ -2356,5 +2599,329 @@ pub(crate) mod tests {
         assert_eq!(&back, element);
         let patch: LayerPatch = serde_json::from_str(r#"{"name": null}"#).unwrap();
         assert_eq!(patch.name, Some(None));
+    }
+
+    /// Adds a shape to the first slide and returns its id.
+    pub fn add_shape(
+        presentation: &mut Presentation,
+        frame: Frame,
+        kind: ElementKind,
+    ) -> ElementId {
+        let id = presentation.new_element_id();
+        let slide = presentation.slides[0].id;
+        presentation
+            .apply(Operation::AddElement {
+                slide,
+                parent: None,
+                index: usize::MAX,
+                element: Element::new(id, frame, kind),
+            })
+            .unwrap();
+        id
+    }
+
+    fn line() -> ElementKind {
+        ElementKind::Line(LineElement::default())
+    }
+
+    fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    #[test]
+    fn shapes_read_and_write_json() {
+        let json = r#"{"id": 3, "frame": {"x": 1, "y": 2, "width": 30, "height": 40},
+            "opacity": 0.5,
+            "rectangle": {"corner_radius": 8, "stroke": {"width": 2, "dash": "dotted"},
+              "fill": {"linear_gradient": {"angle": 90, "stops": [
+                {"position": 0, "color": "FFFFFF"}, {"position": 1, "color": "000000"}]}}}}"#;
+        let element: Element = serde_json::from_str(json).unwrap();
+        let ElementKind::Rectangle(shape) = &element.kind else {
+            panic!("a rectangle");
+        };
+        assert_eq!(shape.corner_radius, 8.);
+        assert_eq!(shape.stroke.unwrap().dash, Dash::Dotted);
+        assert_eq!(shape.stroke.unwrap().color, Stroke::default().color);
+        assert_eq!(element.opacity, 0.5);
+        let back: Element =
+            serde_json::from_value(serde_json::to_value(&element).unwrap()).unwrap();
+        assert_eq!(back, element);
+
+        let ellipse: Element = serde_json::from_str(r#"{"id": 4, "ellipse": {}}"#).unwrap();
+        assert_eq!(ellipse.kind.fill(), Some(&Fill::default()));
+        assert_eq!(ellipse.kind.stroke(), None);
+        let json = serde_json::to_value(&ellipse).unwrap();
+        assert!(json.get("opacity").is_none(), "an opacity of 1 is left out");
+        let line: Element =
+            serde_json::from_str(r#"{"id": 5, "line": {"end": "triangle"}}"#).unwrap();
+        let ElementKind::Line(line) = line.kind else {
+            panic!("a line");
+        };
+        assert_eq!(line.end.kind, HeadKind::Triangle);
+        assert!(line.start.is_none());
+    }
+
+    #[test]
+    fn line_frames_keep_their_center_with_no_height() {
+        let mut presentation = Presentation::new();
+        let id = add_shape(
+            &mut presentation,
+            Frame {
+                x: 100.,
+                y: 100.,
+                width: 200.,
+                height: 50.,
+                rotation: 0.,
+            },
+            line(),
+        );
+        let frame = frame(&presentation, id);
+        assert_eq!((frame.y, frame.height), (125., 0.));
+        presentation
+            .apply(Operation::SetFrame {
+                id,
+                frame: Frame {
+                    height: 20.,
+                    ..frame
+                },
+            })
+            .unwrap();
+        let moved = presentation.element(id).unwrap().frame;
+        assert_eq!((moved.y, moved.height), (135., 0.));
+    }
+
+    #[test]
+    fn lines_are_placed_by_their_ends() {
+        let frame = Frame::from_line((0., 0.), (100., 100.), 0.);
+        assert_eq!(frame.rotation, 45.);
+        let (start, end) = frame.line_ends();
+        assert!(near(start, (0., 0.)) && near(end, (100., 100.)));
+        let vertical = Frame::from_line((10., 50.), (10., 0.), 0.);
+        assert_eq!(vertical.rotation, -90.);
+        assert_eq!(Frame::from_line((5., 5.), (5., 5.), 30.).rotation, 30.);
+    }
+
+    #[test]
+    fn a_line_in_a_stretched_group_keeps_its_ends_on_the_group() {
+        let mut presentation = Presentation::new();
+        let id = add_shape(
+            &mut presentation,
+            Frame::from_line((0., 0.), (100., 100.), 0.),
+            line(),
+        );
+        let other = add_shape(
+            &mut presentation,
+            Frame {
+                x: 0.,
+                y: 0.,
+                width: 10.,
+                height: 10.,
+                rotation: 0.,
+            },
+            ElementKind::Rectangle(RectangleElement::default()),
+        );
+        let group = presentation.new_element_id();
+        let operations = presentation.group_operations(group, &[id, other]).unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let from = presentation.element(group).unwrap().frame;
+        assert_eq!((from.width, from.height), (100., 100.));
+        presentation
+            .apply(Operation::SetFrame {
+                id: group,
+                frame: Frame {
+                    width: 200.,
+                    ..from
+                },
+            })
+            .unwrap();
+        let (start, end) = presentation.element(id).unwrap().frame.line_ends();
+        assert!(near(start, (0., 0.)), "{start:?}");
+        assert!(near(end, (200., 100.)), "{end:?}");
+    }
+
+    #[test]
+    fn a_group_of_one_horizontal_line_has_no_height() {
+        let mut presentation = Presentation::new();
+        let id = add_shape(
+            &mut presentation,
+            Frame::from_line((0., 50.), (100., 50.), 0.),
+            line(),
+        );
+        let group = presentation.new_element_id();
+        let operations = presentation.group_operations(group, &[id]).unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let from = presentation.element(group).unwrap().frame;
+        assert_eq!(from.height, 0.);
+        presentation
+            .apply(Operation::SetFrame {
+                id: group,
+                frame: Frame {
+                    width: 50.,
+                    height: 30.,
+                    ..from
+                },
+            })
+            .unwrap();
+        let (start, end) = presentation.element(id).unwrap().frame.line_ends();
+        assert!(near(start, (0., 50.)) && near(end, (50., 50.)), "{end:?}");
+    }
+
+    #[test]
+    fn shape_styles_undo_and_reject_fields_the_shape_lacks() {
+        let mut presentation = Presentation::new();
+        let rectangle = add_shape(
+            &mut presentation,
+            Frame::default(),
+            ElementKind::Rectangle(RectangleElement::default()),
+        );
+        let line = add_shape(&mut presentation, Frame::default(), line());
+        let before = presentation.clone();
+        let patch = ShapeStylePatch {
+            fill: Some(Fill::None),
+            stroke: Some(Some(Stroke::default())),
+            corner_radius: Some(12.),
+            ..ShapeStylePatch::default()
+        };
+        assert_eq!(patch.label(), "Shape style");
+        let inverse = presentation
+            .apply(Operation::SetShapeStyle {
+                id: rectangle,
+                patch,
+            })
+            .unwrap();
+        let kind = &presentation.element(rectangle).unwrap().kind;
+        assert_eq!(kind.fill(), Some(&Fill::None));
+        assert!(kind.stroke().is_some());
+        presentation.apply(inverse).unwrap();
+        assert_eq!(presentation, before);
+
+        let fill = ShapeStylePatch {
+            fill: Some(Fill::None),
+            end: Some(Arrowhead::new(HeadKind::Arrow, HeadSize::Large)),
+            ..ShapeStylePatch::default()
+        };
+        assert_eq!(
+            presentation.apply(Operation::SetShapeStyle {
+                id: line,
+                patch: fill
+            }),
+            Err(ApplyError::NotApplicable {
+                id: line,
+                field: "fill"
+            })
+        );
+        let remove = ShapeStylePatch {
+            stroke: Some(None),
+            ..ShapeStylePatch::default()
+        };
+        assert_eq!(
+            presentation.apply(Operation::SetShapeStyle {
+                id: line,
+                patch: remove
+            }),
+            Err(ApplyError::StrokeRequired(line))
+        );
+        let radius = ShapeStylePatch {
+            corner_radius: Some(-1.),
+            ..ShapeStylePatch::default()
+        };
+        assert_eq!(
+            presentation.apply(Operation::SetShapeStyle {
+                id: rectangle,
+                patch: radius
+            }),
+            Err(ApplyError::InvalidStyle)
+        );
+        assert_eq!(presentation, before);
+    }
+
+    #[test]
+    fn shapes_check_their_style_and_their_lock() {
+        let mut presentation = Presentation::new();
+        let slide = presentation.slides[0].id;
+        let bad = ElementKind::Ellipse(EllipseElement {
+            fill: Fill::Solid(SolidFill {
+                color: Rgb(0),
+                opacity: 2.,
+            }),
+            stroke: None,
+        });
+        let id = presentation.new_element_id();
+        assert_eq!(
+            presentation.apply(Operation::AddElement {
+                slide,
+                parent: None,
+                index: 0,
+                element: Element::new(id, Frame::default(), bad),
+            }),
+            Err(ApplyError::InvalidStyle)
+        );
+        let id = add_shape(
+            &mut presentation,
+            Frame::default(),
+            ElementKind::Ellipse(EllipseElement::default()),
+        );
+        presentation
+            .apply(Operation::SetLayer {
+                id,
+                patch: LayerPatch {
+                    locked: Some(true),
+                    ..LayerPatch::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            presentation.apply(Operation::SetShapeStyle {
+                id,
+                patch: ShapeStylePatch {
+                    fill: Some(Fill::None),
+                    ..ShapeStylePatch::default()
+                },
+            }),
+            Err(ApplyError::Locked(id))
+        );
+    }
+
+    #[test]
+    fn opacity_is_a_layer_field_that_groups_multiply() {
+        let (mut presentation, group, first, _) = grouped();
+        for (id, opacity) in [(group, 0.5), (first, 0.5)] {
+            presentation
+                .apply(Operation::SetLayer {
+                    id,
+                    patch: LayerPatch {
+                        opacity: Some(opacity),
+                        locked: Some(true),
+                        ..LayerPatch::default()
+                    },
+                })
+                .unwrap();
+        }
+        let node = presentation.slides[0]
+            .walk()
+            .into_iter()
+            .find(|node| node.element.id == first)
+            .unwrap();
+        assert_eq!(node.opacity, 0.25);
+        let patch = LayerPatch {
+            opacity: Some(0.8),
+            ..LayerPatch::default()
+        };
+        assert_eq!(patch.label(), "Opacity");
+        let inverse = presentation
+            .apply(Operation::SetLayer { id: first, patch })
+            .expect("a locked element accepts a new opacity");
+        presentation.apply(inverse).unwrap();
+        assert_eq!(presentation.element(first).unwrap().opacity, 0.5);
+        assert_eq!(
+            presentation.apply(Operation::SetLayer {
+                id: first,
+                patch: LayerPatch {
+                    opacity: Some(1.5),
+                    ..LayerPatch::default()
+                },
+            }),
+            Err(ApplyError::InvalidOpacity)
+        );
     }
 }

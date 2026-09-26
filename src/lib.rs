@@ -18,6 +18,7 @@ pub mod render;
 pub mod script;
 pub mod shortcuts;
 pub mod snap;
+pub mod style;
 pub mod text_layout;
 pub mod theme;
 pub mod ui;

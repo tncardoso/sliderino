@@ -55,15 +55,18 @@ impl ToolSpec {
 const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - add_slide {slide?: {id?, elements?}, index?}
 - remove_slide {id}; move_slide {id, index}
-- add_element {slide, parent?, element: {id?, name?, hidden?, locked?, frame: {x, y, width, height, rotation}, text: {content, sizing, style} | group: {children: [element]}}, index?}
+- add_element {slide, parent?, element, index?}. element: {id?, name?, hidden?, locked?, opacity?, frame: {x, y, width, height, rotation}} plus one kind key: text: {content, sizing, style} | group: {children: [element]} | rectangle: {fill?, stroke?, corner_radius?} | ellipse: {fill?, stroke?} | line: {stroke?, start?, end?, from?, to?}
 - remove_element {id}; set_frame {id, frame}; set_text_sizing {id, sizing}
 - set_text_style {id, patch}; replace_text {id, range: {start, end} (bytes), text}
+- set_shape_style {id, patch: {fill?, stroke?, corner_radius?, start?, end?}}: stroke holds only the fields to change, or null to remove the stroke of a rectangle or ellipse
+- set_line_points {id, from: {x, y}, to: {x, y}}: moves the ends of a line
 - move_element {id, parent?, index?}: into a group of the same slide, or to the slide without parent
 - group {id?, children: [id]}; ungroup {id}
-- set_layer {id, patch: {name?, hidden?, locked?}}; \"name\": null clears the name
+- set_layer {id, patch: {name?, hidden?, locked?, opacity?}}; \"name\": null clears the name
 - add_font {face}; remove_font {face}; batch {ops}
-Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too. frame.rotation is the final angle in degrees, clockwise around the frame center, kept in (-180, 180]; x, y, width and height are the frame before it turns. get_elements and find_elements add bounds {x, y, width, height}, the unrotated box around a rotated element. The frame of a group is the box around its children in the axes of the group rotation. set_frame on a group moves it, resizes it by scaling the positions and boxes of its children (not their fonts), or turns it and its children to the given angle; a new group has rotation 0, and the rotation of an added group only sets the axes of its box. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
-Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. Slides are 1600x900 units. sizing: auto_width | auto_height | fixed. style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color (\"1A1A1A\"), opacity (0-1). Fonts are embedded automatically from the bundled and system fonts.";
+Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too. frame.rotation is the final angle in degrees, clockwise around the frame center, kept in (-180, 180]; x, y, width and height are the frame before it turns. get_elements and find_elements add bounds {x, y, width, height}, the unrotated box around a rotated element. The frame of a group is the box around its children in the axes of the group rotation. set_frame on a group moves it, resizes it by scaling the positions and boxes of its children (not their fonts, stroke widths or corner radii), or turns it and its children to the given angle; a new group has rotation 0, and the rotation of an added group only sets the axes of its box. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. opacity (0-1, default 1) applies to the whole element; a group multiplies the opacity of its children. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
+Shapes: a line has a frame of height 0; it goes from the left end to the right end of the frame, turned by the rotation. A frame with a height becomes its horizontal center axis. Give a new line from and to instead of a frame to place it by its ends; get_elements adds points {from, to} for lines. fill: \"none\" | {\"solid\": {color, opacity?}} | {\"linear_gradient\": {angle (degrees clockwise, 0 = left to right, turns with the shape), stops}} | {\"radial_gradient\": {center?: {x, y}, radius?: {x, y} (fractions of the box, default 0.5), stops}}. stops: 2 to 10 of {position 0-1 in increasing order, color, opacity?}. A new rectangle or ellipse has a light gray fill and no stroke. stroke: {color?, opacity?, width? (default 4), dash?: solid | dashed | dotted}; the stroke is centered on the outline. corner_radius (rectangles) is in slide units. start and end (lines): none | triangle | arrow | diamond | circle, or {kind, size: small | medium | large}.
+Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. Slides are 1600x900 units. Colors are hex strings like \"1A1A1A\". sizing: auto_width | auto_height | fixed. style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color. Fonts are embedded automatically from the bundled and system fonts.";
 
 fn empty_schema() -> Value {
     json!({"type": "object", "properties": {}, "additionalProperties": false})
@@ -113,7 +116,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_slide",
-            description: "Elements of a slide in paint order (last on top), with frame, text content, sizing and style.",
+            description: "Elements of a slide in paint order (last on top), with frame and the content and style of each kind: text, group, rectangle, ellipse or line.",
             schema: json!({
                 "type": "object",
                 "properties": {"slide": slide_arg()},
@@ -443,6 +446,13 @@ fn get_elements(host: &dyn Host, args: ElementsArgs) -> Result<ToolOutput, ApiEr
         value["slide"] = json!(presentation.locate(id).map(|location| location.slide));
         if element.frame.rotation != 0. {
             value["bounds"] = bounds_json(&element.frame);
+        }
+        if element.is_line() {
+            let (from, to) = element.frame.line_ends();
+            value["points"] = json!({
+                "from": {"x": from.0, "y": from.1},
+                "to": {"x": to.0, "y": to.1},
+            });
         }
         if let Some(layout) = presentation.text_layout(id) {
             value["layout"] = json!({

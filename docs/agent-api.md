@@ -132,11 +132,16 @@ children of each group in `group.children`.
 - `group` and `ungroup` read the document after the earlier operations of
   the call. In a `batch`, they cannot use elements that the same batch adds.
 
-Use `set_layer` to set the name, the visibility and the lock of an element:
+Use `set_layer` to set the name, the visibility, the lock and the opacity
+of an element:
 
 ```json
 {"op": "set_layer", "id": 12, "patch": {"name": "Header", "locked": true}}
 ```
+
+- `opacity` is a number from 0 to 1. The default is 1. It applies to all
+  elements: texts, shapes and groups. The opacity of a group multiplies the
+  opacity of each child.
 
 - A hidden element and the children of a hidden group do not show in the
   editor, in screenshots or in diagnostics.
@@ -145,6 +150,91 @@ Use `set_layer` to set the name, the visibility and the lock of an element:
   element, set `"locked": false` first.
 - The person can move a group that holds a locked element. The locked
   element moves with the group.
+
+## Shapes
+
+A slide can have rectangles, ellipses and lines. Add them with
+`add_element`:
+
+```json
+[
+  {"op": "add_element", "slide": 1, "element": {"id": "$card",
+    "frame": {"x": 100, "y": 100, "width": 400, "height": 240},
+    "rectangle": {"corner_radius": 16,
+      "fill": {"linear_gradient": {"angle": 90, "stops": [
+        {"position": 0, "color": "1F4BFF"}, {"position": 1, "color": "7FD4FF"}]}},
+      "stroke": {"color": "111111", "width": 2, "dash": "dashed"}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 600, "y": 120, "width": 200, "height": 200},
+    "ellipse": {"fill": "none", "stroke": {"width": 6}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "line": {"from": {"x": 100, "y": 500}, "to": {"x": 400, "y": 600}, "end": "triangle"}}}
+]
+```
+
+- An ellipse touches the four sides of its frame. A square frame gives a
+  circle.
+- A new rectangle or ellipse has a light gray fill and no stroke.
+- The frame of a line has a height of 0. The line goes from the left end to
+  the right end of the frame. The rotation of the frame is the angle of the
+  line. If you give a frame with a height, the line is the horizontal center
+  axis of that frame.
+- To place a line by its ends, give `from` and `to` instead of a frame. To
+  move the ends later, use `set_line_points`. `get_elements` gives the ends
+  of a line in `points`.
+- When a group changes size, the ends of each line in the group move with
+  the group. The stroke width and the corner radius do not change.
+
+Fill (rectangles and ellipses):
+
+| Fill | Fields |
+| --- | --- |
+| `"none"` | |
+| `{"solid": {..}}` | `color`, `opacity` (optional, 0 to 1) |
+| `{"linear_gradient": {..}}` | `angle` (degrees, clockwise; 0 goes from left to right), `stops` |
+| `{"radial_gradient": {..}}` | `center` (optional, `{"x": 0.5, "y": 0.5}`), `radius` (optional, `{"x": 0.5, "y": 0.5}`), `stops` |
+
+- A gradient has 2 to 10 `stops`. A stop is `{"position": 0.5, "color":
+  "FFFFFF", "opacity": 1}`. The positions go from 0 to 1, in increasing
+  order.
+- A gradient turns with its shape. The angle of a linear gradient is in the
+  axes of the shape.
+- The `center` and the `radius` of a radial gradient are fractions of the
+  frame. The radius 0.5 touches the sides of the frame.
+
+Stroke (all shapes):
+
+| Field | Value |
+| --- | --- |
+| `color` | Hex color. The default is `"111111"`. |
+| `opacity` | 0 to 1. The default is 1. |
+| `width` | Slide units, more than 0. The default is 4. |
+| `dash` | `solid`, `dashed` or `dotted`. The default is `solid`. |
+
+- The stroke is on the center of the outline.
+- A rectangle or an ellipse without `stroke` has no stroke. A line always
+  has a stroke.
+
+Other fields:
+
+- `corner_radius` (rectangles): the radius of all corners, in slide units.
+  A radius larger than half of the shorter side shows as half of the shorter
+  side.
+- `start` and `end` (lines): the arrowhead at each end. Use `none`,
+  `triangle`, `arrow`, `diamond` or `circle`. To set the size, use
+  `{"kind": "triangle", "size": "large"}`. The sizes are `small`, `medium`
+  (the default) and `large`: 2, 3 and 5 times the stroke width.
+
+Use `set_shape_style` to change the style. Give only the fields to change:
+
+```json
+{"op": "set_shape_style", "id": 12, "patch": {"stroke": {"width": 8}, "end": "arrow"}}
+```
+
+- In `stroke`, give only the stroke fields to change. `"stroke": null`
+  removes the stroke of a rectangle or an ellipse.
+- A field that the shape does not have makes the operation fail. For
+  example, a line has no `fill`.
 
 ## Rotation
 
