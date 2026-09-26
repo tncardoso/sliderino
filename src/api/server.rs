@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::api::API_VERSION;
 use crate::api::client::{self, InstanceInfo};
-use crate::api::ops::{Applied, Op, OpError};
+use crate::api::ops::{self, Applied, Op, OpError};
 use crate::api::protocol::{
     self, ApiError, ClientKind, Request, RequestBody, Response, ToolOutput,
 };
@@ -99,6 +99,12 @@ pub enum Event {
         tool: String,
         args: Value,
         reply: mpsc::Sender<Result<ToolOutput, ApiError>>,
+    },
+    /// The part of `render_shader_video` that reads the document; the
+    /// connection thread renders the video.
+    ShaderVideoJob {
+        args: Value,
+        reply: mpsc::Sender<Result<(crate::shaders::VideoJob, Value), ApiError>>,
     },
 }
 
@@ -199,17 +205,39 @@ fn serve(stream: UnixStream, connection: u64, events: async_channel::Sender<Even
                 }
                 Ok(json!({"api_version": API_VERSION, "pid": std::process::id()}).into())
             }
-            RequestBody::Call { tool, args } => {
-                let (reply, result) = mpsc::channel();
-                if events
-                    .send_blocking(Event::Call { tool, args, reply })
-                    .is_err()
+            RequestBody::Call { tool, mut args } => {
+                if tool == "apply_operations"
+                    && let Some(ops) = args.get_mut("ops")
                 {
-                    break;
+                    // Converting a video takes long: do it here, off the
+                    // UI thread of the editor.
+                    ops::prepare_videos(ops);
                 }
-                result
-                    .recv()
-                    .unwrap_or_else(|_| Err(ApiError::new("closed", "the editor closed")))
+                let closed = || ApiError::new("closed", "the editor closed");
+                if tool == "render_shader_video" {
+                    // Rendering the video takes long: only reading the
+                    // document happens on the UI thread.
+                    let (reply, result) = mpsc::channel();
+                    if events
+                        .send_blocking(Event::ShaderVideoJob { args, reply })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    result
+                        .recv()
+                        .unwrap_or_else(|_| Err(closed()))
+                        .and_then(|(job, value)| tools::shader_video_output(&job, value))
+                } else {
+                    let (reply, result) = mpsc::channel();
+                    if events
+                        .send_blocking(Event::Call { tool, args, reply })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    result.recv().unwrap_or_else(|_| Err(closed()))
+                }
             }
         };
         if protocol::send(&mut writer, &Response::new(request.id, outcome)).is_err() {
@@ -252,6 +280,10 @@ impl EditorView {
             Event::Call { tool, args, reply } => {
                 let _span = crate::perf::span("api_call");
                 reply.send(tools::handle(self, &tool, args)).ok();
+            }
+            Event::ShaderVideoJob { args, reply } => {
+                let args = if args.is_null() { json!({}) } else { args };
+                reply.send(tools::shader_video_job(self, args)).ok();
             }
         }
         cx.notify();

@@ -3094,4 +3094,94 @@ pub(crate) mod tests {
         unused.apply(inverse).unwrap();
         assert_eq!(unused, before);
     }
+
+    #[test]
+    fn videos_embed_undo_and_stay_while_a_fill_uses_them() {
+        if !crate::videos::tests::plugins_or_skip() {
+            return;
+        }
+        let mut presentation = Presentation::new();
+        let data = VideoData::read(crate::videos::tests::mp4(320, 180)).unwrap();
+        let video = presentation.new_video_id();
+        let rectangle = || {
+            ElementKind::Rectangle(RectangleElement {
+                fill: Fill::Video(VideoFill::new(video)),
+                ..RectangleElement::default()
+            })
+        };
+        let slide = presentation.slides[0].id;
+        let id = presentation.new_element_id();
+        assert_eq!(
+            presentation.apply(Operation::AddElement {
+                slide,
+                parent: None,
+                index: 0,
+                element: Element::new(id, Frame::default(), rectangle()),
+            }),
+            Err(ApplyError::MissingVideo(video))
+        );
+        let before = presentation.clone();
+        let inverse = presentation
+            .apply(Operation::AddVideo {
+                id: video,
+                data: data.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            presentation.apply(Operation::AddVideo {
+                id: video,
+                data: data.clone()
+            }),
+            Err(ApplyError::DuplicateVideo(video))
+        );
+        add_shape(&mut presentation, Frame::default(), rectangle());
+        assert!(presentation.video_in_use(video));
+        assert_eq!(
+            presentation.apply(Operation::RemoveVideo { id: video }),
+            Err(ApplyError::VideoInUse(video))
+        );
+        let mut unused = before.clone();
+        let added = unused
+            .apply(Operation::AddVideo { id: video, data })
+            .unwrap();
+        assert_eq!(added, inverse);
+        unused.apply(inverse).unwrap();
+        assert_eq!(unused, before);
+    }
+
+    #[test]
+    fn a_shader_keeps_the_image_of_its_channel() {
+        let mut presentation = Presentation::new();
+        let data = ImageData::read(crate::images::tests::png(8, 4)).unwrap();
+        let image = presentation.new_image_id();
+        let shader = |channel0| {
+            ElementKind::Ellipse(EllipseElement {
+                fill: Fill::Shader(ShaderFill {
+                    channel0,
+                    ..ShaderFill::default()
+                }),
+                stroke: None,
+            })
+        };
+        let slide = presentation.slides[0].id;
+        let id = presentation.new_element_id();
+        assert_eq!(
+            presentation.apply(Operation::AddElement {
+                slide,
+                parent: None,
+                index: 0,
+                element: Element::new(id, Frame::default(), shader(Some(image))),
+            }),
+            Err(ApplyError::MissingImage(image))
+        );
+        presentation
+            .apply(Operation::AddImage { id: image, data })
+            .unwrap();
+        add_shape(&mut presentation, Frame::default(), shader(Some(image)));
+        assert_eq!(
+            presentation.apply(Operation::RemoveImage { id: image }),
+            Err(ApplyError::ImageInUse(image))
+        );
+        add_shape(&mut presentation, Frame::default(), shader(None));
+    }
 }

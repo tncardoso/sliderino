@@ -634,6 +634,101 @@ pub fn clamp_size(width: u32, height: u32) -> (u32, u32) {
     )
 }
 
+/// What a shader video is made of.
+#[derive(Clone, Debug)]
+pub struct VideoJob {
+    pub source: Arc<str>,
+    pub channel0: Option<Arc<Pixmap>>,
+    /// Size of the picture; the video has the [`crate::videos::encode_size`]
+    /// of it.
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// Seconds.
+    pub duration: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VideoJobError {
+    Render(RenderError),
+    Video(crate::videos::VideoError),
+}
+
+impl std::fmt::Display for VideoJobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VideoJobError::Render(error) => error.fmt(f),
+            VideoJobError::Video(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for VideoJobError {}
+
+/// Encoded shader videos by the hash of their job, most recently used last.
+static VIDEOS: Mutex<Vec<(u64, Arc<[u8]>)>> = Mutex::new(Vec::new());
+
+/// Most shader videos kept encoded.
+const VIDEOS_KEPT: usize = 4;
+
+impl VideoJob {
+    fn key(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.source.hash(&mut hasher);
+        if let Some(channel) = &self.channel0 {
+            channel.data().hash(&mut hasher);
+        }
+        (self.width, self.height, self.fps, self.duration.to_bits()).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Renders the shader from time 0 to `duration` and encodes the frames
+    /// to an MP4 with H.264: the video that PPTX plays for a shader fill.
+    /// The last job results are kept, so an export does not render the same
+    /// shader twice. Slow: call it off the UI thread.
+    pub fn encode(&self) -> Result<Arc<[u8]>, VideoJobError> {
+        let key = self.key();
+        if let Ok(mut videos) = VIDEOS.lock()
+            && let Some(index) = videos.iter().position(|(found, _)| *found == key)
+        {
+            let entry = videos.remove(index);
+            let bytes = entry.1.clone();
+            videos.push(entry);
+            return Ok(bytes);
+        }
+        // Checks the shader and the GPU before GStreamer starts.
+        let gpu = gpu().ok_or(VideoJobError::Render(RenderError::NoGpu))?;
+        gpu.program(&self.source)
+            .map_err(|error| VideoJobError::Render(RenderError::Shader(error)))?;
+        let fps = self.fps.clamp(1, 60);
+        let (width, height) = crate::videos::encode_size(self.width, self.height);
+        let count = ((self.duration * fps as f32).round() as u32).max(1);
+        let mut failed = None;
+        let bytes = crate::videos::encode_frames(width, height, fps, count, &mut |n| {
+            let time = n as f32 / fps as f32;
+            let inputs = Inputs {
+                time,
+                time_delta: 1. / fps as f32,
+                frame: n as i32,
+            };
+            gpu.render(&self.source, self.channel0.as_ref(), width, height, inputs)
+                .map_err(|error| failed = Some(error))
+                .ok()
+        });
+        if let Some(error) = failed {
+            return Err(VideoJobError::Render(error));
+        }
+        let bytes: Arc<[u8]> = Arc::from(bytes.map_err(VideoJobError::Video)?);
+        if let Ok(mut videos) = VIDEOS.lock() {
+            videos.push((key, bytes.clone()));
+            if videos.len() > VIDEOS_KEPT {
+                videos.remove(0);
+            }
+        }
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,6 +783,40 @@ mod tests {
         assert!((126..=129).contains(&pixel.red()), "{pixel:?}");
         assert_eq!(pixel.green(), 255);
         assert!((100..=103).contains(&pixel.blue()), "{pixel:?}");
+    }
+
+    #[test]
+    fn encodes_a_video_of_the_duration_once() {
+        if !gpu_or_skip() || !crate::videos::tests::plugins_or_skip() {
+            return;
+        }
+        let job = VideoJob {
+            source: Arc::from(DEFAULT_SOURCE),
+            channel0: None,
+            width: 320,
+            height: 180,
+            fps: 10,
+            duration: 1.,
+        };
+        let bytes = job.encode().unwrap();
+        assert!(
+            Arc::ptr_eq(&bytes, &job.encode().unwrap()),
+            "the second is cached"
+        );
+        let data = crate::videos::VideoData::read(bytes).unwrap();
+        assert_eq!(
+            (data.width, data.height),
+            crate::videos::encode_size(320, 180)
+        );
+        assert!((data.duration - 1.).abs() < 0.2, "{data:?}");
+        let broken = VideoJob {
+            source: Arc::from("void mainImage(out vec4 c, in vec2 p) { nope; }\n"),
+            ..job
+        };
+        assert!(matches!(
+            broken.encode(),
+            Err(VideoJobError::Render(RenderError::Shader(_)))
+        ));
     }
 
     #[test]

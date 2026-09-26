@@ -57,6 +57,25 @@ enum Command {
         /// Draw text frames, line boxes, baselines and overflow.
         #[arg(long)]
         overlay: bool,
+        /// Seconds after the shaders start.
+        #[arg(long)]
+        time: Option<f32>,
+    },
+    /// Render the shader fill of an element to an MP4 file
+    /// (render_shader_video).
+    ShaderVideo {
+        /// Id of the element with the shader fill.
+        element: u64,
+        /// MP4 file to write.
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+        /// Frames per second.
+        #[arg(long)]
+        fps: Option<u32>,
     },
     /// Apply a JSON list of operations as one undo step (apply_operations).
     Apply {
@@ -118,6 +137,7 @@ fn main() -> ExitCode {
             slide,
             scale,
             overlay,
+            time,
         } => {
             let mut args = json!({"path": output, "overlay": overlay});
             if let Some(slide) = slide {
@@ -126,7 +146,25 @@ fn main() -> ExitCode {
             if let Some(scale) = scale {
                 args["scale"] = json!(scale);
             }
+            if let Some(time) = time {
+                args["time"] = json!(time);
+            }
             Ok(("get_screenshot".into(), args))
+        }
+        Command::ShaderVideo {
+            element,
+            output,
+            width,
+            height,
+            fps,
+        } => {
+            let mut args = json!({"element": element, "path": output});
+            for (key, value) in [("width", width), ("height", height), ("fps", fps)] {
+                if let Some(value) = value {
+                    args[key] = json!(value);
+                }
+            }
+            Ok(("render_shader_video".into(), args))
         }
         Command::Apply {
             file,

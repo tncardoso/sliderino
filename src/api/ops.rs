@@ -33,8 +33,9 @@ use serde_json::Value;
 use crate::document::{
     ApplyError, Arrowhead, Dash, Element, ElementId, ElementKind, EllipseElement, Fill, FontData,
     FontFace, Frame, GroupElement, ImageData, ImageFill, ImageFit, ImageId, LayerPatch,
-    LineElement, Operation, Presentation, RectangleElement, Rgb, ShapeStylePatch, Slide, SlideId,
-    Stroke, TextElement, TextSizing, TextStylePatch, Vec2,
+    LineElement, Operation, Presentation, RectangleElement, Rgb, ShaderFill, ShapeStylePatch,
+    Slide, SlideId, Start, Stroke, TextElement, TextSizing, TextStylePatch, Vec2, VideoData,
+    VideoFill, VideoId,
 };
 use crate::fonts;
 
@@ -133,14 +134,58 @@ pub struct NewEllipse {
     pub stroke: Option<Stroke>,
 }
 
-/// A [`Fill`] whose image is an id or a `"$name"` reference to an image
-/// that an earlier op added.
+/// A [`Fill`] whose image or video is an id or a `"$name"` reference to
+/// one that an earlier op added.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewFill {
     Image(NewImageFill),
+    Video(NewVideoFill),
+    Shader(NewShaderFill),
     #[serde(untagged)]
     Other(Fill),
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn ten() -> f32 {
+    10.
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewVideoFill {
+    pub id: IdRef,
+    #[serde(default)]
+    pub fit: ImageFit,
+    #[serde(default = "one")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub start: Start,
+    #[serde(rename = "loop", default = "yes")]
+    pub looped: bool,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewShaderFill {
+    /// GLSL with `mainImage`; the default shader when left out.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub channel0: Option<IdRef>,
+    #[serde(default = "one")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub start: Start,
+    #[serde(rename = "loop", default = "yes")]
+    pub looped: bool,
+    #[serde(default = "ten")]
+    pub duration: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -360,6 +405,21 @@ pub enum Op {
     RemoveImage {
         id: IdRef,
     },
+    /// Embeds a video given as base64 `data`. Clients read `path` into
+    /// `data`, and the editor converts a video that is not an MP4 with
+    /// H.264 and AAC before it applies the op. A video with the same bytes
+    /// as one already embedded is not added again.
+    AddVideo {
+        #[serde(default)]
+        id: Option<IdRef>,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    RemoveVideo {
+        id: IdRef,
+    },
     Batch {
         ops: Vec<Op>,
     },
@@ -394,6 +454,8 @@ impl Op {
             Op::RemoveFont { .. } => "Remove font",
             Op::AddImage { .. } => "Add image",
             Op::RemoveImage { .. } => "Remove image",
+            Op::AddVideo { .. } => "Add video",
+            Op::RemoveVideo { .. } => "Remove video",
             Op::Batch { .. } => "Batch",
         }
     }
@@ -403,8 +465,8 @@ pub fn parse(text: &str) -> Result<Vec<Op>, serde_json::Error> {
     serde_json::from_str(text)
 }
 
-/// Reads the file of each `add_image` and `add_font` op that gives a `path`, inside
-/// batches too, into its `data` as base64. A relative path is taken from
+/// Reads the file of each `add_image`, `add_video` and `add_font` op that
+/// gives a `path`, inside batches too, into its `data` as base64. A relative path is taken from
 /// `base`. Clients run this before they send the ops: the editor reads no
 /// files.
 pub fn inline_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
@@ -420,7 +482,7 @@ pub fn inline_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
         }
         if !matches!(
             object.get("op").and_then(Value::as_str),
-            Some("add_image" | "add_font")
+            Some("add_image" | "add_video" | "add_font")
         ) {
             continue;
         }
@@ -437,6 +499,40 @@ pub fn inline_paths(ops: &mut Value, base: &Path) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Converts the video of each `add_video` op, inside batches too, to an
+/// MP4 with H.264 and AAC when it is in another format, in place. The
+/// editor runs this off its UI thread before it applies the ops; it leaves
+/// ops it cannot convert as they are, for the op to report the error.
+pub fn prepare_videos(ops: &mut Value) {
+    let Some(ops) = ops.as_array_mut() else {
+        return;
+    };
+    for op in ops {
+        let Some(object) = op.as_object_mut() else {
+            continue;
+        };
+        if let Some(inner) = object.get_mut("ops") {
+            prepare_videos(inner);
+        }
+        if object.get("op").and_then(Value::as_str) != Some("add_video") {
+            continue;
+        }
+        let Some(bytes) = object.get("data").and_then(Value::as_str).and_then(|data| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data.trim())
+                .ok()
+        }) else {
+            continue;
+        };
+        if let Ok((video, true)) = crate::videos::prepare(Arc::from(bytes), &|_| {}) {
+            object.insert(
+                "data".into(),
+                Value::String(base64::engine::general_purpose::STANDARD.encode(&video.bytes)),
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -462,6 +558,7 @@ pub enum OpErrorKind {
     /// The op is malformed; the text says how.
     Invalid(&'static str),
     Image(crate::images::ImageError),
+    Video(crate::videos::VideoError),
     FontFile(fonts::FontFileError),
     /// `add_font` names a face that its file does not have.
     FaceNotInFile(FontFace),
@@ -494,6 +591,7 @@ impl std::fmt::Display for OpError {
             }
             OpErrorKind::Invalid(reason) => write!(f, "{reason}"),
             OpErrorKind::Image(error) => write!(f, "{error}"),
+            OpErrorKind::Video(error) => write!(f, "{error}"),
             OpErrorKind::FontFile(error) => write!(f, "{error}"),
             OpErrorKind::FaceNotInFile(face) => write!(
                 f,
@@ -584,6 +682,7 @@ enum Made {
     Slide(SlideId),
     Element(ElementId),
     Image(ImageId),
+    Video(VideoId),
 }
 
 impl Made {
@@ -592,6 +691,7 @@ impl Made {
             Made::Slide(id) => id.0,
             Made::Element(id) => id.0,
             Made::Image(id) => id.0,
+            Made::Video(id) => id.0,
         }
     }
 }
@@ -822,6 +922,21 @@ impl Compiler {
             Op::RemoveImage { id } => Operation::RemoveImage {
                 id: self.image(&id)?,
             },
+            Op::AddVideo { id, data, path } => {
+                if path.is_some() {
+                    return Err(OpErrorKind::Invalid(
+                        "add_video.path is read by the client; send data (base64) instead",
+                    ));
+                }
+                let data = data.ok_or(OpErrorKind::Invalid("add_video needs data or path"))?;
+                match self.add_video(presentation, id, &data, out)? {
+                    Some(operation) => operation,
+                    None => return Ok(()),
+                }
+            }
+            Op::RemoveVideo { id } => Operation::RemoveVideo {
+                id: self.video(&id)?,
+            },
             Op::Batch { ops } => {
                 let mut inner = Vec::with_capacity(ops.len());
                 for op in ops {
@@ -980,6 +1095,16 @@ impl Compiler {
         }
     }
 
+    fn video(&self, id: &IdRef) -> Result<VideoId, OpErrorKind> {
+        match id {
+            IdRef::Id(id) => Ok(VideoId(*id)),
+            IdRef::Ref(name) => match self.lookup(name)? {
+                Made::Video(id) => Ok(id),
+                _ => Err(OpErrorKind::WrongRefKind(name.clone())),
+            },
+        }
+    }
+
     fn fill(&self, fill: NewFill) -> Result<Fill, OpErrorKind> {
         Ok(match fill {
             NewFill::Image(image) => Fill::Image(ImageFill {
@@ -987,8 +1112,66 @@ impl Compiler {
                 fit: image.fit,
                 opacity: image.opacity,
             }),
+            NewFill::Video(video) => Fill::Video(VideoFill {
+                id: self.video(&video.id)?,
+                fit: video.fit,
+                opacity: video.opacity,
+                start: video.start,
+                looped: video.looped,
+                muted: video.muted,
+            }),
+            NewFill::Shader(shader) => Fill::Shader(ShaderFill {
+                source: shader
+                    .source
+                    .map_or_else(|| ShaderFill::default().source, Arc::from),
+                channel0: shader.channel0.map(|id| self.image(&id)).transpose()?,
+                opacity: shader.opacity,
+                start: shader.start,
+                looped: shader.looped,
+                duration: shader.duration,
+            }),
             NewFill::Other(fill) => fill,
         })
+    }
+
+    /// An `AddVideo` of base64 bytes of an embeddable video (see
+    /// [`prepare_videos`]); nothing when the same bytes are already
+    /// embedded, or added by an earlier operation of the op.
+    fn add_video(
+        &mut self,
+        presentation: &mut Presentation,
+        id: Option<IdRef>,
+        data: &str,
+        out: &[Operation],
+    ) -> Result<Option<Operation>, OpErrorKind> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .map_err(|_| OpErrorKind::Invalid("add_video.data is not base64"))?;
+        let embedded = presentation.videos.find(&bytes).or_else(|| {
+            out.iter().find_map(|operation| match operation {
+                Operation::AddVideo { id, data } if data.bytes[..] == bytes => Some(*id),
+                _ => None,
+            })
+        });
+        if let Some(existing) = embedded
+            && !matches!(id, Some(IdRef::Id(_)))
+        {
+            if let Some(IdRef::Ref(name)) = id {
+                self.name(name, Made::Video(existing))?;
+            }
+            return Ok(None);
+        }
+        let data = VideoData::read(Arc::from(bytes)).map_err(OpErrorKind::Video)?;
+        let id = match id {
+            Some(IdRef::Id(id)) => VideoId(id),
+            Some(IdRef::Ref(name)) => {
+                let id = presentation.new_video_id();
+                self.name(name, Made::Video(id))?;
+                id
+            }
+            None => presentation.new_video_id(),
+        };
+        Ok(Some(Operation::AddVideo { id, data }))
     }
 
     /// An `AddImage` of base64 bytes; nothing when the same bytes are
@@ -1468,6 +1651,157 @@ mod tests {
         let mut missing = serde_json::json!([{"op": "add_image", "path": "nope.png"}]);
         assert!(inline_paths(&mut missing, &dir).is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn agents_add_a_video_once_and_fill_shapes_with_it() {
+        if !crate::videos::tests::plugins_or_skip() {
+            return;
+        }
+        let mut presentation = Presentation::new();
+        let data =
+            base64::engine::general_purpose::STANDARD.encode(crate::videos::tests::mp4(320, 180));
+        let text = format!(
+            r#"[
+              {{"op": "add_video", "id": "$clip", "data": "{data}"}},
+              {{"op": "add_video", "id": "$again", "data": "{data}"}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$box",
+                "rectangle": {{"fill": {{"video": {{"id": "$clip", "start": "on_click",
+                  "loop": false, "muted": true}}}}}}}}}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$round",
+                "ellipse": {{"fill": "none"}}}}}},
+              {{"op": "set_shape_style", "id": "$round",
+                "patch": {{"fill": {{"video": {{"id": "$again", "fit": "contain"}}}}}}}}
+            ]"#
+        );
+        let applied = apply(&mut presentation, parse(&text).unwrap(), AGENT).unwrap();
+        assert_eq!(applied.refs["$clip"], applied.refs["$again"]);
+        assert_eq!(presentation.videos.iter().count(), 1);
+        let video = VideoId(applied.refs["$clip"]);
+        let rectangle = presentation
+            .element(ElementId(applied.refs["$box"]))
+            .unwrap();
+        assert_eq!(
+            rectangle.kind.fill(),
+            Some(&Fill::Video(VideoFill {
+                start: Start::OnClick,
+                looped: false,
+                muted: true,
+                ..VideoFill::new(video)
+            }))
+        );
+        let ellipse = presentation
+            .element(ElementId(applied.refs["$round"]))
+            .unwrap();
+        assert_eq!(
+            ellipse.kind.fill(),
+            Some(&Fill::Video(VideoFill {
+                fit: ImageFit::Contain,
+                ..VideoFill::new(video)
+            }))
+        );
+        assert_eq!(applied.steps[0].label, "Add video");
+        let remove = parse(&format!(r#"[{{"op": "remove_video", "id": {}}}]"#, video.0)).unwrap();
+        let error = apply(&mut presentation, remove, AGENT).unwrap_err();
+        assert_eq!(
+            error.kind,
+            OpErrorKind::Apply(ApplyError::VideoInUse(video))
+        );
+    }
+
+    #[test]
+    fn videos_need_data_that_is_a_video() {
+        if !crate::videos::tests::plugins_or_skip() {
+            return;
+        }
+        let mut presentation = Presentation::new();
+        let ops = parse(r#"[{"op": "add_video", "path": "/tmp/clip.mp4"}]"#).unwrap();
+        let error = apply(&mut presentation, ops, AGENT).unwrap_err();
+        assert!(matches!(error.kind, OpErrorKind::Invalid(_)), "{error}");
+        let png = png_base64();
+        let ops = parse(&format!(r#"[{{"op": "add_video", "data": "{png}"}}]"#)).unwrap();
+        let error = apply(&mut presentation, ops, AGENT).unwrap_err();
+        assert!(matches!(error.kind, OpErrorKind::Video(_)), "{error}");
+        let missing = parse(
+            r#"[{"op": "add_element", "slide": 1, "element": {
+                 "rectangle": {"fill": {"video": {"id": 9}}}}}]"#,
+        )
+        .unwrap();
+        let error = apply(&mut presentation, missing, AGENT).unwrap_err();
+        assert_eq!(
+            error.kind,
+            OpErrorKind::Apply(ApplyError::MissingVideo(VideoId(9)))
+        );
+    }
+
+    #[test]
+    fn agents_fill_shapes_with_shaders() {
+        let mut presentation = Presentation::new();
+        let data = png_base64();
+        let text = format!(
+            r#"[
+              {{"op": "add_image", "id": "$noise", "data": "{data}"}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$plain",
+                "rectangle": {{"fill": {{"shader": {{}}}}}}}}}},
+              {{"op": "add_element", "slide": 1, "element": {{"id": "$box",
+                "rectangle": {{"fill": "none"}}}}}},
+              {{"op": "set_shape_style", "id": "$box", "patch": {{"fill": {{"shader": {{
+                "source": "void mainImage(out vec4 c, in vec2 p) {{ c = texture(iChannel0, p); }}",
+                "channel0": "$noise", "duration": 4, "loop": false}}}}}}}}
+            ]"#
+        );
+        let applied = apply(&mut presentation, parse(&text).unwrap(), AGENT).unwrap();
+        let plain = presentation
+            .element(ElementId(applied.refs["$plain"]))
+            .unwrap();
+        assert_eq!(
+            plain.kind.fill(),
+            Some(&Fill::Shader(ShaderFill::default()))
+        );
+        let image = ImageId(applied.refs["$noise"]);
+        let Some(Fill::Shader(shader)) = presentation
+            .element(ElementId(applied.refs["$box"]))
+            .unwrap()
+            .kind
+            .fill()
+        else {
+            panic!("a shader fill");
+        };
+        assert_eq!(shader.channel0, Some(image));
+        assert_eq!((shader.duration, shader.looped), (4., false));
+        assert!(
+            presentation.image_in_use(image),
+            "the channel uses the image"
+        );
+        let long = parse(
+            r#"[{"op": "add_element", "slide": 1, "element": {
+                 "rectangle": {"fill": {"shader": {"duration": 90}}}}}]"#,
+        )
+        .unwrap();
+        let error = apply(&mut presentation, long, AGENT).unwrap_err();
+        assert_eq!(error.kind, OpErrorKind::Apply(ApplyError::InvalidStyle));
+    }
+
+    #[test]
+    fn videos_in_other_formats_are_converted_before_the_ops() {
+        if !crate::videos::tests::plugins_or_skip() {
+            return;
+        }
+        let Some(webm) = crate::videos::tests::webm() else {
+            eprintln!("no VP8 or Vorbis encoder: skipping");
+            return;
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(&webm);
+        let mut ops = serde_json::json!([
+            {"op": "batch", "ops": [{"op": "add_video", "id": "$v", "data": data}]}
+        ]);
+        prepare_videos(&mut ops);
+        let converted = ops[0]["ops"][0]["data"].as_str().unwrap();
+        assert_ne!(converted, data);
+        let mut presentation = Presentation::new();
+        let ops: Vec<Op> = serde_json::from_value(ops).unwrap();
+        apply(&mut presentation, ops, AGENT).unwrap();
+        assert_eq!(presentation.videos.iter().count(), 1);
     }
 
     fn png_base64_of(width: u32, height: u32) -> String {

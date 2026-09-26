@@ -1001,7 +1001,7 @@ pub(crate) mod tests {
     }
 
     /// A WebM with VP8 video and Vorbis audio, from GStreamer test sources.
-    fn webm() -> Option<Arc<[u8]>> {
+    pub fn webm() -> Option<Arc<[u8]>> {
         init().ok()?;
         let output = output_file("webm").ok()?;
         let pipeline = gst::parse::launch(&format!(

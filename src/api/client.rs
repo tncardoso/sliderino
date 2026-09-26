@@ -198,8 +198,9 @@ impl Session {
     }
 
     /// Calls any tool. `instance` in `args` picks the instance; for
-    /// `get_screenshot`, `path` writes the image to a file here instead of
-    /// returning it. The `add_image` ops of `apply_operations` read their
+    /// `get_screenshot` and `render_shader_video`, `path` writes the image
+    /// or the video to a file here instead of returning it. The `add_image`,
+    /// `add_video` and `add_font` ops of `apply_operations` read their
     /// `path` here.
     pub fn call(&mut self, tool: &str, mut args: Value) -> Result<ToolOutput, ApiError> {
         let Some(spec) = tools::spec(tool) else {
@@ -221,14 +222,19 @@ impl Session {
             ),
         };
         let path = match (tool, object.remove("path")) {
-            ("get_screenshot", Some(Value::String(path))) => Some(PathBuf::from(path)),
+            ("get_screenshot" | "render_shader_video", Some(Value::String(path))) => {
+                Some(PathBuf::from(path))
+            }
+            ("render_shader_video", None) => {
+                return Err(ApiError::invalid_args("render_shader_video needs path"));
+            }
             (_, None) => None,
             (_, Some(_)) => return Err(ApiError::invalid_args("path must be a file path")),
         };
         if tool == "apply_operations"
             && let Some(ops) = object.get_mut("ops")
         {
-            // The editor reads no files: images go by value.
+            // The editor reads no files: images and videos go by value.
             let base = std::env::current_dir().unwrap_or_default();
             crate::api::ops::inline_paths(ops, &base)
                 .map_err(|message| ApiError::new("io", message))?;
@@ -292,8 +298,8 @@ impl Session {
     }
 }
 
-/// Writes the image of a tool output to `path`, replacing the image by the
-/// path in the output.
+/// Writes the image (or the video) of a tool output to `path`, replacing it
+/// by the path in the output.
 fn save_image(mut output: ToolOutput, path: &Path) -> Result<ToolOutput, ApiError> {
     let Some(image) = output.image.take() else {
         return Ok(output);

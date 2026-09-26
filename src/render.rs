@@ -1001,4 +1001,53 @@ mod tests {
         assert_eq!(rgb(&stretch, 110, 110), (255, 0, 0));
         assert_eq!(rgb(&stretch, 290, 110), (0, 0, 255));
     }
+
+    #[test]
+    fn videos_show_their_first_frame_with_their_fit() {
+        if !crate::videos::tests::plugins_or_skip() {
+            return;
+        }
+        use base64::Engine as _;
+        // Red on the left half and blue on the right, 512 × 256.
+        let data =
+            base64::engine::general_purpose::STANDARD.encode(crate::videos::tests::mp4(512, 256));
+        let ops = format!(
+            r#"[{{"op": "add_video", "id": "$v", "data": "{data}"}},
+                {{"op": "add_element", "slide": 1, "element": {{
+                  "frame": {{"x": 100, "y": 100, "width": 200, "height": 200}},
+                  "rectangle": {{"fill": {{"video": {{"id": "$v", "fit": "contain"}}}}}}}}}}]"#
+        );
+        let pixmap = render_slide(&scene(&ops), SlideId(1), 1., false).unwrap();
+        assert_eq!(
+            rgb(&pixmap, 200, 110),
+            (255, 255, 255),
+            "a bar above the video"
+        );
+        let (r, _, b) = rgb(&pixmap, 120, 200);
+        assert!(r > 200 && b < 60, "red on the left: {r} {b}");
+    }
+
+    #[test]
+    fn shaders_fill_their_shape_at_the_time() {
+        if !crate::shaders::available() {
+            eprintln!("no GPU adapter: skipping");
+            return;
+        }
+        let ops = r#"[{"op": "add_element", "slide": 1, "element": {
+              "frame": {"x": 100, "y": 100, "width": 200, "height": 100},
+              "ellipse": {"fill": {"shader": {"source":
+                "void mainImage(out vec4 c, in vec2 p) { c = vec4(iTime / 4.0, 0, 0, 1); }",
+                "duration": 4}}}}}]"#;
+        let presentation = scene(ops);
+        let start = render_slide_at(&presentation, SlideId(1), 1., false, 0.).unwrap();
+        assert_eq!(rgb(&start, 200, 150), (0, 0, 0));
+        assert_eq!(
+            rgb(&start, 105, 105),
+            (255, 255, 255),
+            "outside the ellipse"
+        );
+        let later = render_slide_at(&presentation, SlideId(1), 1., false, 6.).unwrap();
+        let (red, _, _) = rgb(&later, 200, 150);
+        assert!((126..=129).contains(&red), "it loops at 4 s: {red}");
+    }
 }
