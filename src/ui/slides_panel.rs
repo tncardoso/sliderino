@@ -14,7 +14,7 @@ use gpui_kit::{
 
 use crate::editor::EditorView;
 use crate::theme;
-use crate::ui::canvas::{PaintText, paint_texts};
+use crate::ui::canvas::{PaintItem, paint_items};
 use crate::ui::hierarchy_panel::hierarchy_panel;
 
 const THUMB_WIDTH: f32 = 184.;
@@ -33,7 +33,7 @@ pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> im
         .filter(|_| !hierarchy)
         .enumerate()
         .map(|(ix, id)| {
-            let texts = editor.paint_texts(id, false, cx);
+            let items = editor.paint_items(id, false, cx);
             let active = id == editor.current_slide;
             h_flex()
                 .id(("slide", ix))
@@ -46,7 +46,7 @@ pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> im
                     cx.notify();
                 }))
                 .child(slide_number(ix + 1, active))
-                .child(thumbnail(editor, texts, active))
+                .child(thumbnail(editor, items, active))
         })
         .collect();
 
@@ -126,7 +126,7 @@ fn slide_number(number: usize, active: bool) -> impl IntoElement {
 
 /// The slide drawn small, clipped to its edges; the active slide gets a 2px
 /// accent ring.
-fn thumbnail(editor: &EditorView, texts: Vec<PaintText>, active: bool) -> Div {
+fn thumbnail(editor: &EditorView, items: Vec<PaintItem>, active: bool) -> Div {
     let size = editor.presentation.size;
     let zoom = THUMB_WIDTH / size.width as f32;
     let height = size.height as f32 * zoom;
@@ -143,7 +143,7 @@ fn thumbnail(editor: &EditorView, texts: Vec<PaintText>, active: bool) -> Div {
                 |_, _, _| {},
                 move |bounds, _, window, _| {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        paint_texts(&texts, bounds.origin, zoom, true, window);
+                        paint_items(&items, bounds.origin, zoom, true, window);
                     });
                 },
             )

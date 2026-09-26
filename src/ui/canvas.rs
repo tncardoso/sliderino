@@ -20,8 +20,8 @@ use gpui_kit::{
 
 use crate::camera::Camera;
 use crate::document::{
-    ElementId, FontData, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
-    normalize_degrees,
+    Element, ElementId, FontData, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing,
+    TextStyle, normalize_degrees,
 };
 use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
@@ -29,6 +29,7 @@ use crate::snap::{Guide, Handle, ResizeMode, Targets, resize_rotated, snap_move,
 use crate::text_layout::{BoxRect, TextLayout};
 use crate::theme;
 use crate::ui::hierarchy_panel::layer_menu;
+use crate::ui::shape_paint::{PaintShape, paint_shape, render_image, translated};
 
 /// Space kept around a fitted slide; the bottom clears the tool palette.
 const FIT_INSETS: Edges<gpui_kit::Pixels> = Edges {
@@ -66,6 +67,7 @@ const ROTATE_SNAP: f32 = 2.;
 /// A text element ready to paint: its layout and the GPUI font of its face.
 #[derive(Clone)]
 pub struct PaintText {
+    pub id: ElementId,
     pub frame: Frame,
     pub layout: Arc<TextLayout>,
     /// None when GPUI cannot load the embedded face; the text is skipped.
@@ -78,17 +80,25 @@ pub struct PaintText {
     pub strikethrough: bool,
 }
 
+/// An element ready to paint, in paint order.
+#[derive(Clone)]
+pub enum PaintItem {
+    Text(PaintText),
+    Shape(PaintShape),
+}
+
 /// Everything the canvas paints over the slide, in slide units.
 pub struct CanvasScene {
-    texts: Vec<PaintText>,
+    items: Vec<PaintItem>,
     /// Box of the selection (see [`EditorView::selection_box`]), whether it
     /// shows resize handles and whether its text overflows.
     selection: Option<(Frame, bool, bool)>,
     /// Thin outlines: each element of a multiple selection, and the layer
     /// under the pointer in the hierarchy.
     outlines: Vec<Frame>,
-    /// Frame of the text box being edited; the text selection, the caret
-    /// and the marked text are placed in it.
+    /// The text box being edited and its frame; the text selection, the
+    /// caret and the marked text are placed in it.
+    edit_id: Option<ElementId>,
     edit_frame: Frame,
     highlight: Vec<BoxRect>,
     caret: Option<BoxRect>,
@@ -103,10 +113,10 @@ pub struct CanvasScene {
 }
 
 impl EditorView {
-    /// Visible text elements of a slide, laid out and ready to paint. With
-    /// `preview`, dragged elements show their drag preview; without, the
-    /// document (the thumbnails change when the drag ends).
-    pub fn paint_texts(&mut self, slide: SlideId, preview: bool, cx: &App) -> Vec<PaintText> {
+    /// Visible elements of a slide in paint order, texts laid out, ready to
+    /// paint. With `preview`, dragged elements show their drag preview;
+    /// without, the document (the thumbnails change when the drag ends).
+    pub fn paint_items(&mut self, slide: SlideId, preview: bool, cx: &App) -> Vec<PaintItem> {
         let dragged = if preview {
             self.drag_preview()
         } else {
@@ -115,10 +125,20 @@ impl EditorView {
         let Some(slide) = self.presentation.slide(slide) else {
             return Vec::new();
         };
-        let mut texts = Vec::new();
+        let mut items = Vec::new();
         for node in slide.visible_leaves() {
             let element = node.element;
             let Some(text) = element.as_text() else {
+                if element.kind.is_shape() {
+                    let (frame, _) = dragged.apply(element);
+                    items.push(PaintItem::Shape(PaintShape {
+                        element: Element {
+                            frame,
+                            ..element.clone()
+                        },
+                        opacity: node.opacity,
+                    }));
+                }
                 continue;
             };
             let (frame, sizing) = dragged.apply(element);
@@ -134,7 +154,8 @@ impl EditorView {
             let font_id = font.and_then(|data| self.fonts.font_id(&style.font, data, cx));
             let font = font.filter(|_| frame.rotation != 0.).cloned();
             let color: Hsla = gpui_kit::rgb(style.color.0).into();
-            texts.push(PaintText {
+            items.push(PaintItem::Text(PaintText {
+                id: element.id,
                 frame,
                 layout,
                 font_id,
@@ -142,18 +163,19 @@ impl EditorView {
                 color: color.opacity(node.opacity),
                 underline: style.underline,
                 strikethrough: style.strikethrough,
-            });
+            }));
         }
-        texts
+        items
     }
 
     pub fn canvas_scene(&mut self, cx: &App) -> CanvasScene {
         let _span = crate::perf::span("canvas_scene");
-        let texts = self.paint_texts(self.current_slide, true, cx);
+        let items = self.paint_items(self.current_slide, true, cx);
         let mut scene = CanvasScene {
-            texts,
+            items,
             selection: None,
             outlines: Vec::new(),
+            edit_id: None,
             edit_frame: Frame::default(),
             highlight: Vec::new(),
             caret: None,
@@ -219,6 +241,7 @@ impl EditorView {
             && let Some(layout) = self.layout_of(edit.id)
             && let Some(frame) = self.frame_of(edit.id)
         {
+            scene.edit_id = Some(edit.id);
             scene.edit_frame = frame;
             scene.highlight = layout.selection_rects(edit.selection());
             if let Some(marked) = &edit.marked {
@@ -251,7 +274,14 @@ impl EditorView {
             .into_iter()
             .rev()
             .filter(|node| !node.hidden && !node.locked && node.element.as_group().is_none())
-            .find(|node| inflate(&node.element.frame, reach).contains(at.x, at.y))
+            .find(|node| {
+                let element = node.element;
+                if element.kind.is_shape() {
+                    crate::shape::hit(element, at.x, at.y, reach)
+                } else {
+                    inflate(&element.frame, reach).contains(at.x, at.y)
+                }
+            })
             .map(|node| node.element.id)
     }
 
@@ -530,15 +560,23 @@ impl EditorView {
                 .element(id)
                 .is_some_and(|element| element.as_group().is_some())
         };
+        let is_text = |this: &Self, id| {
+            this.presentation
+                .element(id)
+                .is_some_and(|element| element.as_text().is_some())
+        };
         if event.click_count >= 2 && !shift {
             if is_group(self, target) {
                 // Enters the group: selects its child under the pointer.
                 let child = self.child_toward(target, leaf).unwrap_or(leaf);
                 self.selection = vec![child];
                 self.start_move(at, None);
-            } else {
+            } else if is_text(self, target) {
                 self.selection = vec![target];
                 self.press_text(target, at, event);
+            } else {
+                self.selection = vec![target];
+                self.start_move(at, None);
             }
             return;
         }
@@ -1080,12 +1118,37 @@ fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
     .size_full()
 }
 
-/// Paints text elements with the slide's top-left corner at `origin`,
-/// scaled by `zoom`. Shared by the canvas and the slide thumbnails; with
+/// Paints elements with the slide's top-left corner at `origin`, scaled by
+/// `zoom`, in order. Shared by the canvas and the slide thumbnails; with
 /// `raster_turned` (the thumbnails), rotated texts are cached images instead
 /// of paths.
-pub fn paint_texts(
-    texts: &[PaintText],
+pub fn paint_items(
+    items: &[PaintItem],
+    origin: Point<Pixels>,
+    zoom: f32,
+    raster_turned: bool,
+    window: &mut Window,
+) {
+    for item in items {
+        paint_item(item, origin, zoom, raster_turned, window);
+    }
+}
+
+fn paint_item(
+    item: &PaintItem,
+    origin: Point<Pixels>,
+    zoom: f32,
+    raster_turned: bool,
+    window: &mut Window,
+) {
+    match item {
+        PaintItem::Text(text) => paint_text(text, origin, zoom, raster_turned, window),
+        PaintItem::Shape(shape) => paint_shape(shape, origin, zoom, window),
+    }
+}
+
+fn paint_text(
+    text: &PaintText,
     origin: Point<Pixels>,
     zoom: f32,
     raster_turned: bool,
@@ -1093,54 +1156,52 @@ pub fn paint_texts(
 ) {
     let _span = crate::perf::span("paint_glyphs");
     let at = |x: f32, y: f32| origin + point(px(x * zoom), px(y * zoom));
-    for text in texts {
-        if text.frame.rotation != 0. {
-            paint_turned_text(text, origin, zoom, raster_turned, window);
+    if text.frame.rotation != 0. {
+        paint_turned_text(text, origin, zoom, raster_turned, window);
+        return;
+    }
+    let Some(font_id) = text.font_id else {
+        return;
+    };
+    let layout = &text.layout;
+    let font_size = px(layout.font_size * zoom);
+    let decorations = layout.decorations;
+    for line in &layout.lines {
+        let baseline = text.frame.y + line.baseline;
+        for glyph in &line.glyphs {
+            let position = at(text.frame.x + glyph.x, baseline + glyph.y);
+            // A glyph the atlas cannot take is dropped, not fatal.
+            let _ = window.paint_glyph(
+                position,
+                font_id,
+                GlyphId(glyph.id as u32),
+                font_size,
+                text.color,
+            );
+        }
+        if line.right <= line.left {
             continue;
         }
-        let Some(font_id) = text.font_id else {
-            continue;
+        let mut stroke = |offset: f32, thickness: f32| {
+            let top_left = at(text.frame.x + line.left, baseline + offset);
+            let width = (line.right - line.left) * zoom;
+            let height = (thickness * zoom).max(1.);
+            window.paint_quad(fill(
+                gpui_kit::Bounds::new(top_left, size(px(width), px(height))),
+                text.color,
+            ));
         };
-        let layout = &text.layout;
-        let font_size = px(layout.font_size * zoom);
-        let decorations = layout.decorations;
-        for line in &layout.lines {
-            let baseline = text.frame.y + line.baseline;
-            for glyph in &line.glyphs {
-                let position = at(text.frame.x + glyph.x, baseline + glyph.y);
-                // A glyph the atlas cannot take is dropped, not fatal.
-                let _ = window.paint_glyph(
-                    position,
-                    font_id,
-                    GlyphId(glyph.id as u32),
-                    font_size,
-                    text.color,
-                );
-            }
-            if line.right <= line.left {
-                continue;
-            }
-            let mut stroke = |offset: f32, thickness: f32| {
-                let top_left = at(text.frame.x + line.left, baseline + offset);
-                let width = (line.right - line.left) * zoom;
-                let height = (thickness * zoom).max(1.);
-                window.paint_quad(fill(
-                    gpui_kit::Bounds::new(top_left, size(px(width), px(height))),
-                    text.color,
-                ));
-            };
-            if text.underline {
-                stroke(
-                    decorations.underline_offset,
-                    decorations.underline_thickness,
-                );
-            }
-            if text.strikethrough {
-                stroke(
-                    decorations.strikeout_offset,
-                    decorations.strikeout_thickness,
-                );
-            }
+        if text.underline {
+            stroke(
+                decorations.underline_offset,
+                decorations.underline_thickness,
+            );
+        }
+        if text.strikethrough {
+            stroke(
+                decorations.strikeout_offset,
+                decorations.strikeout_thickness,
+            );
         }
     }
 }
@@ -1247,16 +1308,6 @@ thread_local! {
     static TURNED: std::cell::RefCell<TurnedCache> = std::cell::RefCell::default();
 }
 
-/// The path moved by `by`.
-fn translated(path: &gpui_kit::Path<Pixels>, by: Point<Pixels>) -> gpui_kit::Path<Pixels> {
-    let mut path = path.clone();
-    path.bounds.origin += by;
-    for vertex in &mut path.vertices {
-        vertex.xy_position += by;
-    }
-    path
-}
-
 /// Tessellates the glyphs and decorations of a rotated text, in window
 /// pixels from the center of its frame.
 fn tessellate_turned(
@@ -1352,14 +1403,7 @@ fn rasterize_turned(text: &PaintText, scale: f32) -> Option<Turned> {
         strikethrough: text.strikethrough,
     };
     let (pixmap, area) = crate::render::render_text_box(&ink, &text.frame, scale)?;
-    let (width, height) = (pixmap.width(), pixmap.height());
-    let mut bytes = Vec::with_capacity((width * height * 4) as usize);
-    for pixel in pixmap.pixels() {
-        let pixel = pixel.demultiply();
-        bytes.extend_from_slice(&[pixel.blue(), pixel.green(), pixel.red(), pixel.alpha()]);
-    }
-    let buffer = image::RgbaImage::from_raw(width, height, bytes)?;
-    let image = gpui_kit::RenderImage::new(vec![image::Frame::new(buffer)]);
+    let image = render_image(&pixmap)?;
     let (cx, cy) = text.frame.center();
     Some(Turned::Image {
         image: Arc::new(image),
@@ -1582,11 +1626,18 @@ fn content_layer(
             };
 
             let edit = scene.edit_frame;
-            for highlight in &scene.highlight {
-                let color = theme::accent().opacity(0.22);
-                fill_turned(window, &edit, highlight, slide.origin, zoom, color);
+            for item in &scene.items {
+                // Under the edited text, above what is under it.
+                if let PaintItem::Text(text) = item
+                    && Some(text.id) == scene.edit_id
+                {
+                    for highlight in &scene.highlight {
+                        let color = theme::accent().opacity(0.22);
+                        fill_turned(window, &edit, highlight, slide.origin, zoom, color);
+                    }
+                }
+                paint_item(item, slide.origin, zoom, false, window);
             }
-            paint_texts(&scene.texts, slide.origin, zoom, false, window);
 
             // Content past the slide edge stays visible, faded: the export
             // cuts it off.

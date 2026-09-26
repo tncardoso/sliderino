@@ -12,6 +12,9 @@ mod perf_tests;
 pub mod properties_panel;
 #[cfg(test)]
 mod rotation_tests;
+pub mod shape_paint;
+#[cfg(test)]
+mod shape_tests;
 pub mod slides_panel;
 #[cfg(test)]
 pub mod test_support;
