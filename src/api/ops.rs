@@ -371,6 +371,12 @@ impl Compiler {
                     {
                         "Resize"
                     }
+                    Some(element)
+                        if crate::document::normalize_degrees(frame.rotation)
+                            != element.frame.rotation =>
+                    {
+                        "Rotate"
+                    }
                     _ => "Move",
                 }
             }

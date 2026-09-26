@@ -64,6 +64,12 @@ fn copy_slide(presentation: &mut Presentation, copies: usize) {
 
 /// Ten slides of six boxes with long paragraphs, in every sizing mode.
 fn heavy_scene() -> Presentation {
+    heavy_scene_turned(0.)
+}
+
+/// [`heavy_scene`] with every box turned by `rotation` degrees: rotated
+/// text is drawn from glyph outlines, not from the glyph atlas.
+fn heavy_scene_turned(rotation: f32) -> Presentation {
     let paragraph = "Activation grew faster than signups this quarter because the new \
         onboarding flow shortened the path to the first slide. Teams that invited a \
         colleague in the first week kept working at twice the rate of solo authors, \
@@ -80,7 +86,8 @@ fn heavy_scene() -> Presentation {
         };
         ops.push(format!(
             r#"{{"op": "add_element", "slide": 1, "element": {{
-                "id": {id}, "frame": {{"x": {x}, "y": {y}, "width": 700, "height": 200}},
+                "id": {id}, "frame": {{"x": {x}, "y": {y}, "width": 700, "height": 200,
+                                       "rotation": {rotation}}},
                 "text": {{"content": {content:?}, "sizing": "{sizing}",
                           "style": {{"size": 20, "align": "justify"}}}}}}}}"#,
             id = box_ix + 1,
@@ -220,6 +227,7 @@ fn bench_resize(cx: &mut TestAppContext, presentation: Presentation, id: Element
 fn bench_drag_move(cx: &mut TestAppContext) {
     bench_move(cx, example_scene(), "move, example scene");
     bench_move(cx, heavy_scene(), "move, heavy scene");
+    bench_move(cx, heavy_scene_turned(15.), "move, heavy scene turned 15°");
 }
 
 #[gpui_kit::test]

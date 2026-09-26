@@ -6446,6 +6446,7 @@ dependencies = [
  "clap",
  "fontdb",
  "gpui-kit",
+ "image",
  "libc",
  "rmcp",
  "rustybuzz",

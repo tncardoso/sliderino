@@ -130,6 +130,18 @@ pub enum Drag {
     },
     /// Extending the text selection of the box being edited.
     SelectText { id: ElementId },
+    /// Turning the selection around `pivot`, the center of its box `origin`.
+    /// `origin_rotation` is the angle of a single element, 0 for several;
+    /// `delta` is the turn so far. The document keeps the frames until the
+    /// drag ends.
+    Rotate {
+        ids: Vec<ElementId>,
+        pivot: SlidePoint,
+        grab_angle: f32,
+        origin: Frame,
+        origin_rotation: f32,
+        delta: f32,
+    },
 }
 
 /// How a drag changes the frames the canvas shows; see
@@ -156,6 +168,12 @@ pub enum Preview {
         from: Frame,
         to: Frame,
     },
+    /// The elements and their descendants turn by `degrees` around `pivot`.
+    Turn {
+        ids: HashSet<ElementId>,
+        pivot: (f32, f32),
+        degrees: f32,
+    },
 }
 
 impl Preview {
@@ -173,7 +191,15 @@ impl Preview {
             ),
             Preview::Resize { id, frame, sizing } if *id == element.id => (*frame, Some(*sizing)),
             Preview::Scale { ids, from, to } if ids.contains(&element.id) => (
-                crate::document::scale_frame(&element.frame, from, to, sizing),
+                crate::document::map_frame(&element.frame, from, to, sizing),
+                sizing,
+            ),
+            Preview::Turn {
+                ids,
+                pivot,
+                degrees,
+            } if ids.contains(&element.id) => (
+                crate::document::turn_frame(&element.frame, *pivot, *degrees),
                 sizing,
             ),
             _ => (element.frame, sizing),
@@ -299,6 +325,8 @@ pub struct EditorView {
     pub renaming: Option<crate::ui::hierarchy_panel::Renaming>,
     /// Snap guides of the drag in progress.
     pub guides: Vec<Guide>,
+    /// The pointer is in a rotation zone of the selection, outside a corner.
+    pub hover_rotate: bool,
     pub layouts: LayoutCache,
     pub fonts: FontRegistry,
     pub inspector: Inspector,
@@ -365,6 +393,7 @@ impl EditorView {
             layer_drop: None,
             renaming: None,
             guides: Vec::new(),
+            hover_rotate: false,
             layouts: LayoutCache::default(),
             fonts: FontRegistry::default(),
             inspector: Inspector::new(window, cx),
@@ -442,6 +471,13 @@ impl EditorView {
                 from: *origin,
                 to: *current,
             },
+            Some(Drag::Rotate {
+                ids, pivot, delta, ..
+            }) => Preview::Turn {
+                ids: subtree(ids),
+                pivot: (pivot.x, pivot.y),
+                degrees: *delta,
+            },
             _ => Preview::None,
         }
     }
@@ -496,6 +532,48 @@ impl EditorView {
         crate::document::union(&frames)
     }
 
+    /// The box the canvas draws around the selection, with its handles: the
+    /// frame of a single element, rotated or not; the union of the frames for
+    /// several, turned with them while they rotate.
+    pub fn selection_box(&self) -> Option<Frame> {
+        if let Some(Drag::Rotate {
+            ids,
+            pivot,
+            origin,
+            delta,
+            ..
+        }) = &self.drag
+            && ids.len() > 1
+        {
+            return Some(crate::document::turn_frame(
+                origin,
+                (pivot.x, pivot.y),
+                *delta,
+            ));
+        }
+        match self.selection_roots().as_slice() {
+            [id] => self.shown_frame(*id),
+            _ => self.selection_frame(),
+        }
+    }
+
+    /// The operations that turn `ids` by `degrees` around `pivot`.
+    pub fn turn_operations(
+        &self,
+        ids: &[ElementId],
+        pivot: SlidePoint,
+        degrees: f32,
+    ) -> Vec<Operation> {
+        ids.iter()
+            .filter_map(|id| {
+                let element = self.presentation.element(*id)?;
+                let frame =
+                    crate::document::turn_frame(&element.frame, (pivot.x, pivot.y), degrees);
+                (frame != element.frame).then_some(Operation::SetFrame { id: *id, frame })
+            })
+            .collect()
+    }
+
     /// Some selected element is locked, directly or by an ancestor.
     pub fn selection_locked(&self) -> bool {
         self.selection
@@ -515,7 +593,7 @@ impl EditorView {
             .filter_map(|id| {
                 let element = self.presentation.element(*id)?;
                 let sizing = element.as_text().map(|text| text.sizing);
-                let frame = crate::document::scale_frame(&element.frame, &from, &to, sizing);
+                let frame = crate::document::map_frame(&element.frame, &from, &to, sizing);
                 (frame != element.frame).then_some(Operation::SetFrame { id: *id, frame })
             })
             .collect()
@@ -535,6 +613,10 @@ impl EditorView {
             fitted.width = layout.content_width;
         }
         fitted.height = layout.content_height;
+        if frame.rotation != 0. {
+            let (x, y) = frame.to_slide(0., 0.);
+            fitted = fitted.with_top_left_at(x, y);
+        }
         fitted
     }
 
@@ -550,6 +632,7 @@ impl EditorView {
                     | Drag::ResizeGroup { .. }
                     | Drag::Create { .. }
                     | Drag::Marquee { .. }
+                    | Drag::Rotate { .. }
             )
         })
     }

@@ -110,15 +110,19 @@ The elements of a slide are a tree. A group holds its children in paint
 order: the last child is on top. `get_slide` gives the tree, with the
 children of each group in `group.children`.
 
-- All frames are in slide units, also the frames of children.
-- The frame of a group is the union of the frames of its children. The
-  editor calculates it.
-- `set_frame` on a group with the same size moves the group and its
-  children.
+- All frames are in slide units, also the frames of children. The rotation
+  of a child is its angle on the slide.
+- The frame of a group is the box around the frames of its children, in the
+  axes of the rotation of the group. The editor calculates it.
+- `set_frame` on a group with the same size and rotation moves the group and
+  its children.
 - `set_frame` on a group with a different size scales the positions and the
   boxes of the children. The font sizes do not change. A text with
   `auto_width` sizing keeps its size and only moves.
-- A group cannot rotate. A `set_frame` with a rotation fails.
+- `set_frame` on a group with a different rotation turns the group and its
+  children around the center of the group, to the angle you give.
+- A new group has the rotation 0. In `add_element`, the rotation of a group
+  only sets the axes of its box. The children do not turn.
 - `group` puts elements of one slide into a new group. The group goes to the
   position of the topmost element.
 - `ungroup` puts the children of a group in its position and removes the
@@ -141,6 +145,24 @@ Use `set_layer` to set the name, the visibility and the lock of an element:
   element, set `"locked": false` first.
 - The person can move a group that holds a locked element. The locked
   element moves with the group.
+
+## Rotation
+
+- `frame.rotation` is an angle in degrees. A positive angle turns the element
+  clockwise around the center of its frame.
+- The rotation is the final angle, not a change. If you send the same
+  `set_frame` two times, the result is the same as one time.
+- The editor keeps the angle between -180 (not included) and 180. For
+  example, 270 becomes -90.
+- `x`, `y`, `width` and `height` are the frame before it turns.
+- When a rotated text changes size to fit its content, its rotated top-left
+  corner stays in position.
+- For a rotated element, `get_elements` and `find_elements` also give
+  `bounds`: the unrotated box around the element, in slide units. Use it to
+  find overlaps and elements that go past the edge of the slide.
+- If a child turns by an angle that is not a multiple of 90° in its group,
+  a resize of the group that is not proportional changes the child
+  approximately. A box cannot stretch along an axis that is not its own.
 
 ## Detect changes by other clients
 

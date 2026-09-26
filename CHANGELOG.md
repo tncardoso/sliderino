@@ -45,6 +45,17 @@
   group, ungroup, hide, lock or delete it.
 - Agents can add groups and use the `group`, `ungroup`, `move_element` and
   `set_layer` operations.
+- Rotate text boxes and groups. Drag just outside a corner of the
+  selection to turn it; hold Shift to turn in steps of 15°. Near 0°, 90°,
+  180° and 270° the angle snaps to the exact value. You can also type the
+  angle in the rotation field of the Design tab. With more than one element
+  selected, the field turns each element around its own center.
+- A rotated group keeps its angle: its box and its handles turn with it, and
+  a resize scales it along its own axes.
+- Agents can rotate text and groups with the `rotation` of `set_frame`. The
+  angle is the final angle, so the same operation gives the same result each
+  time. `get_elements` and `find_elements` give the `bounds` of rotated
+  elements.
 
 ### Changed
 
@@ -56,3 +67,5 @@
   responding during the drag.
 - The first selection of a text box no longer waits for the system fonts to
   load.
+- The selection rectangle and the outline of each selected element now show
+  on the slide.

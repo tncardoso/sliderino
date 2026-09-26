@@ -5,9 +5,10 @@
 //! Content past the slide edge is cut off, as in an export. The debug overlay
 //! draws text frames, line boxes, baselines and overflow.
 
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{Color, FillRule, PathBuilder, Rect, Stroke, Transform};
+pub use tiny_skia::{Paint, Pixmap};
 
-use crate::document::{Element, ElementId, Frame, Presentation, Rgb, SlideId};
+use crate::document::{Element, ElementId, FontData, Frame, Presentation, Rgb, SlideId};
 use crate::text_layout::TextLayout;
 
 /// Colors of the overlay, from the editor palette (`theme.rs`).
@@ -59,21 +60,34 @@ pub fn render_slide(
 
     if overlay {
         for (element, layout) in &texts {
+            let transform = turned(transform, &element.frame);
             paint_overlay_under(&mut pixmap, &element.frame, layout, transform);
         }
     }
     for (element, layout) in &texts {
+        let transform = turned(transform, &element.frame);
         paint_text(&mut pixmap, presentation, element, layout, transform);
     }
     if overlay {
         for (element, layout) in &texts {
+            let transform = turned(transform, &element.frame);
             paint_overlay_over(&mut pixmap, &element.frame, layout, scale, transform);
         }
     }
     Ok(pixmap)
 }
 
-fn paint(color: Rgb, alpha: f32) -> Paint<'static> {
+/// `transform` with the rotation of `frame` around its center applied first.
+fn turned(transform: Transform, frame: &Frame) -> Transform {
+    if frame.rotation == 0. {
+        return transform;
+    }
+    let (cx, cy) = frame.center();
+    transform.pre_concat(Transform::from_rotate_at(frame.rotation, cx, cy))
+}
+
+/// A solid paint of `color` at `alpha`, anti-aliased.
+pub fn paint(color: Rgb, alpha: f32) -> Paint<'static> {
     let mut paint = Paint::default();
     let [_, r, g, b] = color.0.to_be_bytes();
     paint.set_color_rgba8(r, g, b, (alpha.clamp(0., 1.) * 255.).round() as u8);
@@ -145,14 +159,36 @@ fn paint_text(
     let Some(data) = presentation.fonts.get(&style.font) else {
         return;
     };
-    let Ok(face) = ttf_parser::Face::parse(&data.bytes, data.index) else {
+    let ink = TextInk {
+        font: data,
+        layout,
+        color: paint(style.color, style.opacity),
+        underline: style.underline,
+        strikethrough: style.strikethrough,
+    };
+    draw_text(pixmap, &ink, &element.frame, transform);
+}
+
+/// What fills the text of one box.
+pub struct TextInk<'a> {
+    pub font: &'a FontData,
+    pub layout: &'a TextLayout,
+    pub color: Paint<'static>,
+    pub underline: bool,
+    pub strikethrough: bool,
+}
+
+/// Fills the glyphs and decorations of a text box. `transform` maps slide
+/// units to pixels; the rotation of the frame is not applied here.
+fn draw_text(pixmap: &mut Pixmap, ink: &TextInk, frame: &Frame, transform: Transform) {
+    let Ok(face) = ttf_parser::Face::parse(&ink.font.bytes, ink.font.index) else {
         return;
     };
-    let color = paint(style.color, style.opacity);
-    let frame = &element.frame;
+    let layout = ink.layout;
+    let color = &ink.color;
     let mut glyphs = GlyphPath {
         builder: PathBuilder::new(),
-        scale: style.size / face.units_per_em() as f32,
+        scale: layout.font_size / face.units_per_em() as f32,
         x: 0.,
         y: 0.,
     };
@@ -165,7 +201,7 @@ fn paint_text(
         }
     }
     if let Some(path) = glyphs.builder.finish() {
-        pixmap.fill_path(&path, &color, FillRule::Winding, transform, None);
+        pixmap.fill_path(&path, color, FillRule::Winding, transform, None);
     }
 
     let decorations = layout.decorations;
@@ -181,21 +217,61 @@ fn paint_text(
                 line.right - line.left,
                 thickness,
             );
-            fill_rect(pixmap, rect, &color, transform);
+            fill_rect(pixmap, rect, color, transform);
         };
-        if style.underline {
+        if ink.underline {
             stroke(
                 decorations.underline_offset,
                 decorations.underline_thickness,
             );
         }
-        if style.strikethrough {
+        if ink.strikethrough {
             stroke(
                 decorations.strikeout_offset,
                 decorations.strikeout_thickness,
             );
         }
     }
+}
+
+/// Renders one text box alone, turned by its rotation, at `scale` pixels per
+/// slide unit. Returns the image and the area of the slide it covers: the
+/// bounds of the frame and a pixel of margin. The pixels are premultiplied.
+pub fn render_text_box(ink: &TextInk, frame: &Frame, scale: f32) -> Option<(Pixmap, Frame)> {
+    if !scale.is_finite() || scale <= 0. {
+        return None;
+    }
+    let bounds = frame.bounds();
+    let margin = 1. / scale;
+    // Glyphs may reach past the frame, such as the overflow of a fixed box.
+    let content_bottom = ink
+        .layout
+        .lines
+        .last()
+        .map_or(0., |line| line.top + line.height);
+    let reach = Frame {
+        height: frame.height.max(content_bottom),
+        ..*frame
+    }
+    .bounds();
+    let area = Frame {
+        x: bounds.x.min(reach.x) - margin,
+        y: bounds.y.min(reach.y) - margin,
+        width: bounds.width.max(reach.width) + 2. * margin,
+        height: bounds.height.max(reach.height) + 2. * margin,
+        rotation: 0.,
+    };
+    let width = (area.width * scale).ceil() as u32;
+    let height = (area.height * scale).ceil() as u32;
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))?;
+    let transform = Transform::from_scale(scale, scale).pre_translate(-area.x, -area.y);
+    draw_text(&mut pixmap, ink, frame, turned(transform, frame));
+    let area = Frame {
+        width: width as f32 / scale,
+        height: height as f32 / scale,
+        ..area
+    };
+    Some((pixmap, area))
 }
 
 /// Overlay drawn below the text: line boxes and the overflow band.
@@ -276,12 +352,17 @@ impl std::fmt::Display for TextReport {
         let frame = &self.frame;
         write!(
             f,
-            "text {}: frame {:.1},{:.1} {:.1}×{:.1}, {} line{}, overflow {:.1} px, missing glyphs {}",
+            "text {}: frame {:.1},{:.1} {:.1}×{:.1}{}, {} line{}, overflow {:.1} px, missing glyphs {}",
             self.id.0,
             frame.x,
             frame.y,
             frame.width,
             frame.height,
+            if frame.rotation == 0. {
+                String::new()
+            } else {
+                format!(" turned {:.1}°", frame.rotation)
+            },
             self.lines,
             if self.lines == 1 { "" } else { "s" },
             self.overflow,
@@ -366,6 +447,36 @@ mod tests {
         );
         assert!(inside > 500, "the glyphs are filled: {inside}");
         assert_eq!(outside, 0);
+    }
+
+    #[test]
+    fn rotated_text_is_drawn_turned_around_its_center() {
+        let presentation = scene(
+            r#"[
+          {"op": "add_font", "face": {"family": "Inter"}},
+          {"op": "add_element", "slide": 1, "element": {
+            "id": 1, "frame": {"x": 400, "y": 400, "rotation": 90},
+            "text": {"content": "Hello world", "style": {"size": 64}}}}
+        ]"#,
+        );
+        let frame = presentation.element(ElementId(1)).unwrap().frame;
+        assert!(frame.width > frame.height * 2., "a wide line: {frame:?}");
+        let bounds = frame.bounds();
+        let pixmap = render_slide(&presentation, SlideId(1), 1., false).unwrap();
+        let (inside, outside) = ink(
+            &pixmap,
+            bounds.x as u32,
+            bounds.y as u32,
+            (bounds.x + bounds.width).ceil() as u32 + 1,
+            (bounds.y + bounds.height).ceil() as u32 + 1,
+        );
+        assert!(inside > 500, "the glyphs are filled: {inside}");
+        assert_eq!(outside, 0, "the text stands upright in its turned box");
+        assert!(
+            report(&presentation, SlideId(1))[0]
+                .to_string()
+                .contains("turned 90.0°")
+        );
     }
 
     #[test]

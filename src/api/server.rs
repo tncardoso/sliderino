@@ -272,12 +272,26 @@ impl EditorView {
     /// the agent edited. With follow on, shows what the agent changed.
     fn after_agent_change(&mut self, change: AgentChange, applied: Option<&Applied>) {
         let stale_drag = match &self.drag {
-            Some(Drag::Move { ids, origin, .. } | Drag::ResizeGroup { ids, origin, .. }) => {
+            Some(Drag::Move { ids, origin, .. }) => {
                 let frames: Option<Vec<_>> = ids
                     .iter()
                     .map(|id| self.presentation.element(*id).map(|element| element.frame))
                     .collect();
                 frames.and_then(|frames| crate::document::union(&frames)) != Some(*origin)
+            }
+            Some(Drag::ResizeGroup { ids, origin, .. } | Drag::Rotate { ids, origin, .. }) => {
+                // The box of the selection when the drag started: the frame
+                // of one element, the union of several.
+                let frames: Option<Vec<_>> = ids
+                    .iter()
+                    .map(|id| self.presentation.element(*id).map(|element| element.frame))
+                    .collect();
+                let current = match frames.as_deref() {
+                    Some([frame]) => Some(*frame),
+                    Some(frames) => crate::document::union(frames),
+                    None => None,
+                };
+                current != Some(*origin)
             }
             Some(Drag::Resize {
                 id, origin, sizing, ..

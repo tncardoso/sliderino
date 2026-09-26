@@ -53,15 +53,17 @@ pub enum Operation {
         parent: Option<ElementId>,
         index: usize,
     },
-    /// Moves or resizes an element. Auto-sized text keeps the dimensions its
-    /// content dictates. A group moves its descendants; resized, it scales
-    /// their positions and boxes but not their fonts.
+    /// Moves, resizes or turns an element; the rotation is the final angle.
+    /// Auto-sized text keeps the dimensions its content dictates. A group
+    /// moves its descendants; resized or turned, it scales and turns their
+    /// positions and boxes but not their fonts.
     SetFrame {
         id: ElementId,
         frame: Frame,
     },
-    /// Sets frames of descendants of group `id`, checking only the lock of
-    /// the group. It undoes the resize of a group.
+    /// Sets frames of group `id` and its descendants, checking only the lock
+    /// of the group. It undoes the resize or the turn of a group; the group
+    /// keeps only the rotation of its frame, then fits its children.
     SetGroupFrames {
         id: ElementId,
         frames: Vec<(ElementId, Frame)>,
@@ -264,8 +266,6 @@ pub enum ApplyError {
     NotGroup(ElementId),
     /// The parent is on another slide, or inside the moved element.
     InvalidParent(ElementId),
-    /// A group frame changes only by moving or resizing: its rotation is 0.
-    GroupFrame,
     GroupAcrossSlides,
     EmptyGroup,
 }
@@ -291,7 +291,6 @@ impl std::fmt::Display for ApplyError {
             ApplyError::InvalidParent(id) => {
                 write!(f, "element {} cannot hold this element", id.0)
             }
-            ApplyError::GroupFrame => write!(f, "a group cannot rotate"),
             ApplyError::GroupAcrossSlides => {
                 write!(f, "grouped elements must be on the same slide")
             }

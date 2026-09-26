@@ -163,3 +163,43 @@ fn the_view_follows_agent_edits_only_when_asked(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui_kit::test]
+fn an_agent_sets_the_final_angle_of_a_group(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let first = create_text(cx, handle, "One");
+    let second = create_text(cx, handle, "Two");
+    call(
+        cx,
+        handle,
+        "apply_operations",
+        json!({"ops": [{"op": "group", "id": "$g", "children": [first.0, second.0]}]}),
+    )
+    .unwrap();
+    let group = read(cx, handle, |editor| {
+        editor.presentation.slides[0].elements[0].id
+    });
+    let frame = read(cx, handle, |editor| editor.frame_of(group).unwrap());
+    let turn = json!({"ops": [{"op": "set_frame", "id": group.0, "frame": {
+        "x": frame.x, "y": frame.y, "width": frame.width, "height": frame.height, "rotation": 450
+    }}]});
+    call(cx, handle, "apply_operations", turn.clone()).unwrap();
+    let once = read(cx, handle, |editor| editor.frame_of(first).unwrap());
+    assert_eq!(once.rotation, 90., "450° is kept as 90°");
+    call(cx, handle, "apply_operations", turn).unwrap();
+    let twice = read(cx, handle, |editor| editor.frame_of(first).unwrap());
+    assert!(
+        (twice.x - once.x).abs() < 0.01 && (twice.y - once.y).abs() < 0.01,
+        "the angle is final: {once:?} {twice:?}"
+    );
+    assert_eq!(twice.rotation, 90.);
+
+    let read_back = call(cx, handle, "get_elements", json!({"ids": [first.0]})).unwrap();
+    let element = &read_back["elements"][0];
+    assert_eq!(element["frame"]["rotation"], 90.);
+    let bounds = &element["bounds"];
+    assert!(
+        (bounds["width"].as_f64().unwrap() - f64::from(once.height)).abs() < 0.01,
+        "a quarter turn swaps the sides of the bounds: {element}"
+    );
+}

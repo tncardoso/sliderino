@@ -2,7 +2,7 @@
 //! of its handles and snapping moved or resized frames to the slide, to the
 //! other elements and to text baselines. Slide units throughout.
 
-use crate::document::Frame;
+use crate::document::{Frame, rotate_vector};
 
 /// The eight resize handles around a selected frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +45,31 @@ impl Handle {
             Handle::BottomLeft | Handle::Bottom | Handle::BottomRight => 1.,
             Handle::Left | Handle::Right => 0.,
         }
+    }
+
+    /// The handle on the other side of the frame.
+    pub fn opposite(self) -> Handle {
+        match self {
+            Handle::TopLeft => Handle::BottomRight,
+            Handle::Top => Handle::Bottom,
+            Handle::TopRight => Handle::BottomLeft,
+            Handle::Right => Handle::Left,
+            Handle::BottomRight => Handle::TopLeft,
+            Handle::Bottom => Handle::Top,
+            Handle::BottomLeft => Handle::TopRight,
+            Handle::Left => Handle::Right,
+        }
+    }
+
+    /// Where the handle sits on the slide for a frame that may be rotated.
+    pub fn slide_position(self, frame: &Frame) -> (f32, f32) {
+        let local = Frame {
+            x: 0.,
+            y: 0.,
+            ..*frame
+        };
+        let (x, y) = self.position(&local);
+        frame.to_slide(x, y)
     }
 
     /// The handle sits on the left or right edge only.
@@ -129,6 +154,42 @@ pub fn resize(origin: &Frame, handle: Handle, dx: f32, dy: f32, mode: ResizeMode
         width,
         height,
         rotation: origin.rotation,
+    }
+}
+
+/// [`resize`] for a frame that may be rotated: the pointer moves by (`dx`,
+/// `dy`) on the slide, the frame resizes along its own axes, and the point it
+/// resizes from (the opposite handle, or the center) keeps its place on the
+/// slide.
+pub fn resize_rotated(origin: &Frame, handle: Handle, dx: f32, dy: f32, mode: ResizeMode) -> Frame {
+    if origin.rotation == 0. {
+        return resize(origin, handle, dx, dy, mode);
+    }
+    let local = Frame {
+        x: 0.,
+        y: 0.,
+        rotation: 0.,
+        ..*origin
+    };
+    let (u, v) = rotate_vector(dx, dy, -origin.rotation);
+    let resized = resize(&local, handle, u, v, mode);
+    let anchor = if mode.from_center {
+        (local.width / 2., local.height / 2.)
+    } else {
+        handle.opposite().position(&local)
+    };
+    let (ax, ay) = origin.to_slide(anchor.0, anchor.1);
+    let placed = Frame {
+        x: 0.,
+        y: 0.,
+        rotation: origin.rotation,
+        ..resized
+    };
+    let (px, py) = placed.to_slide(anchor.0 - resized.x, anchor.1 - resized.y);
+    Frame {
+        x: ax - px,
+        y: ay - py,
+        ..placed
     }
 }
 
@@ -284,6 +345,22 @@ mod tests {
             height,
             rotation: 0.,
         }
+    }
+
+    #[test]
+    fn a_rotated_resize_keeps_the_opposite_corner_on_the_slide() {
+        let origin = Frame {
+            rotation: 90.,
+            ..frame(100., 100., 200., 100.)
+        };
+        let anchor = Handle::TopLeft.slide_position(&origin);
+        // Turned a quarter, the bottom-right handle moves down the slide
+        // to widen the box.
+        let resized = resize_rotated(&origin, Handle::BottomRight, 0., 50., ResizeMode::default());
+        assert!((resized.width - 250.).abs() < 0.01, "{resized:?}");
+        assert!((resized.height - 100.).abs() < 0.01, "{resized:?}");
+        let kept = Handle::TopLeft.slide_position(&resized);
+        assert!((kept.0 - anchor.0).abs() < 0.01 && (kept.1 - anchor.1).abs() < 0.01);
     }
 
     #[test]

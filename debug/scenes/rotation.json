@@ -1,0 +1,28 @@
+[
+  {"op": "add_font", "face": {"family": "Inter", "weight": 400}},
+  {"op": "add_font", "face": {"family": "Inter", "weight": 600}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 1, "frame": {"x": 120, "y": 120, "rotation": -15},
+    "text": {"content": "Turned title", "sizing": "auto_width",
+             "style": {"font": {"family": "Inter", "weight": 600}, "size": 72, "underline": true}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 2, "frame": {"x": 900, "y": 150, "width": 420, "height": 90, "rotation": 30},
+    "text": {"content": "This fixed box holds more text than fits, so it runs past its bottom edge.",
+             "sizing": "fixed", "style": {"size": 28}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 3, "frame": {"x": 200, "y": 500, "rotation": 90},
+    "text": {"content": "A quarter turn", "sizing": "auto_width", "style": {"size": 40}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 10, "frame": {"x": 0, "y": 0}, "group": {"children": [
+      {"id": 11, "frame": {"x": 700, "y": 560, "width": 360},
+       "text": {"content": "Grouped and turned", "sizing": "auto_height", "style": {"size": 36}}},
+      {"id": 12, "frame": {"x": 700, "y": 640},
+       "text": {"content": "with its children", "sizing": "auto_width",
+                "style": {"size": 28, "color": "#1F4BFF"}}}
+    ]}}},
+  {"op": "set_frame", "id": 10, "frame": {"x": 700, "y": 560, "width": 360, "height": 114, "rotation": 20}}
+]

@@ -10,6 +10,8 @@ pub mod inspector;
 #[cfg(all(test, feature = "perf"))]
 mod perf_tests;
 pub mod properties_panel;
+#[cfg(test)]
+mod rotation_tests;
 pub mod slides_panel;
 #[cfg(test)]
 pub mod test_support;

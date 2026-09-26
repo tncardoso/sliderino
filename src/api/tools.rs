@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::api::API_VERSION;
 use crate::api::ops::{self, Applied, Op, OpError, Options};
 use crate::api::protocol::{ApiError, Image, ToolOutput};
-use crate::document::{ApplyError, ElementId, Presentation, SlideId};
+use crate::document::{ApplyError, ElementId, Frame, Presentation, SlideId};
 use crate::history::History;
 use crate::{fonts, render};
 
@@ -62,7 +62,7 @@ const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - group {id?, children: [id]}; ungroup {id}
 - set_layer {id, patch: {name?, hidden?, locked?}}; \"name\": null clears the name
 - add_font {face}; remove_font {face}; batch {ops}
-Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too; the frame of a group is the union of its children. set_frame on a group moves it, or resizes it by scaling the positions and boxes of its children (not their fonts); a group cannot rotate. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
+Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too. frame.rotation is the final angle in degrees, clockwise around the frame center, kept in (-180, 180]; x, y, width and height are the frame before it turns. get_elements and find_elements add bounds {x, y, width, height}, the unrotated box around a rotated element. The frame of a group is the box around its children in the axes of the group rotation. set_frame on a group moves it, resizes it by scaling the positions and boxes of its children (not their fonts), or turns it and its children to the given angle; a new group has rotation 0, and the rotation of an added group only sets the axes of its box. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
 Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. Slides are 1600x900 units. sizing: auto_width | auto_height | fixed. style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color (\"1A1A1A\"), opacity (0-1). Fonts are embedded automatically from the bundled and system fonts.";
 
 fn empty_schema() -> Value {
@@ -441,6 +441,9 @@ fn get_elements(host: &dyn Host, args: ElementsArgs) -> Result<ToolOutput, ApiEr
         };
         let mut value = serde_json::to_value(element).expect("elements serialize");
         value["slide"] = json!(presentation.locate(id).map(|location| location.slide));
+        if element.frame.rotation != 0. {
+            value["bounds"] = bounds_json(&element.frame);
+        }
         if let Some(layout) = presentation.text_layout(id) {
             value["layout"] = json!({
                 "lines": layout.lines.len(),
@@ -453,6 +456,13 @@ fn get_elements(host: &dyn Host, args: ElementsArgs) -> Result<ToolOutput, ApiEr
         elements.push(value);
     }
     Ok(json!({"revision": presentation.revision(), "elements": elements}).into())
+}
+
+/// The unrotated box around a rotated frame, for agents that check overlap
+/// or the slide edges.
+fn bounds_json(frame: &Frame) -> Value {
+    let bounds = frame.bounds();
+    json!({"x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height})
 }
 
 fn find_elements(host: &dyn Host, args: FindArgs) -> Result<ToolOutput, ApiError> {
@@ -474,12 +484,16 @@ fn find_elements(host: &dyn Host, args: FindArgs) -> Result<ToolOutput, ApiError
         .filter_map(|(slide, element)| {
             let text = element.as_text()?;
             text.content.to_lowercase().contains(&needle).then(|| {
-                json!({
+                let mut value = json!({
                     "id": element.id,
                     "slide": slide,
                     "content": text.content,
                     "frame": element.frame,
-                })
+                });
+                if element.frame.rotation != 0. {
+                    value["bounds"] = bounds_json(&element.frame);
+                }
+                value
             })
         })
         .collect();

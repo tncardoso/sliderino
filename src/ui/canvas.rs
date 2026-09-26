@@ -11,19 +11,21 @@ use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{Selectable as _, h_flex};
 use gpui_kit::{
     AnyElement, App, BorderStyle, BoxShadow, Context, CursorStyle, DispatchPhase, Edges,
-    ElementInputHandler, Entity, FocusHandle, FontId, FontWeight, GlyphId, Hsla,
+    ElementInputHandler, Entity, FillOptions, FocusHandle, FontId, FontWeight, GlyphId, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, ScrollDelta, ScrollWheelEvent, Styled,
-    TestSupportExt as _, Window, canvas as paint_canvas, div, fill, hsla, outline, point, px, size,
+    MouseUpEvent, ParentElement, PathBuilder, PathStyle, Pixels, Point, ScrollDelta,
+    ScrollWheelEvent, Styled, TestSupportExt as _, Window, canvas as paint_canvas, div, fill, hsla,
+    outline, point, px, size,
 };
 
 use crate::camera::Camera;
 use crate::document::{
-    ElementId, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
+    ElementId, FontData, Frame, Operation, SlideId, SlideSize, TextElement, TextSizing, TextStyle,
+    normalize_degrees,
 };
 use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
 use crate::shortcuts::WheelAction;
-use crate::snap::{Guide, Handle, ResizeMode, Targets, resize, snap_move, snap_resize};
+use crate::snap::{Guide, Handle, ResizeMode, Targets, resize_rotated, snap_move, snap_resize};
 use crate::text_layout::{BoxRect, TextLayout};
 use crate::theme;
 use crate::ui::hierarchy_panel::layer_menu;
@@ -51,6 +53,16 @@ const HANDLE_REACH: f32 = 6.;
 /// Side of a drawn resize handle.
 const HANDLE_SIZE: f32 = 7.;
 
+/// Distance on screen outside a corner of the selection within which a drag
+/// rotates it.
+const ROTATE_REACH: f32 = 18.;
+
+/// Step of the angle while Shift is held, in degrees.
+const ROTATE_STEP: f32 = 15.;
+
+/// Distance to a quarter turn within which the angle snaps to it, in degrees.
+const ROTATE_SNAP: f32 = 2.;
+
 /// A text element ready to paint: its layout and the GPUI font of its face.
 #[derive(Clone)]
 pub struct PaintText {
@@ -58,6 +70,9 @@ pub struct PaintText {
     pub layout: Arc<TextLayout>,
     /// None when GPUI cannot load the embedded face; the text is skipped.
     pub font_id: Option<FontId>,
+    /// The embedded face, whose outlines draw rotated text: the glyph atlas
+    /// only draws upright glyphs.
+    pub font: Option<FontData>,
     pub color: Hsla,
     pub underline: bool,
     pub strikethrough: bool,
@@ -66,12 +81,15 @@ pub struct PaintText {
 /// Everything the canvas paints over the slide, in slide units.
 pub struct CanvasScene {
     texts: Vec<PaintText>,
-    /// Outline of the selection (the union of its frames), whether it shows
-    /// resize handles and whether its text overflows.
+    /// Box of the selection (see [`EditorView::selection_box`]), whether it
+    /// shows resize handles and whether its text overflows.
     selection: Option<(Frame, bool, bool)>,
     /// Thin outlines: each element of a multiple selection, and the layer
     /// under the pointer in the hierarchy.
     outlines: Vec<Frame>,
+    /// Frame of the text box being edited; the text selection, the caret
+    /// and the marked text are placed in it.
+    edit_frame: Frame,
     highlight: Vec<BoxRect>,
     caret: Option<BoxRect>,
     /// Stretch of text an input method is composing, underlined.
@@ -108,16 +126,15 @@ impl EditorView {
                 continue;
             };
             let style = &text.style;
-            let font_id = self
-                .presentation
-                .fonts
-                .get(&style.font)
-                .and_then(|data| self.fonts.font_id(&style.font, data, cx));
+            let font = self.presentation.fonts.get(&style.font);
+            let font_id = font.and_then(|data| self.fonts.font_id(&style.font, data, cx));
+            let font = font.filter(|_| frame.rotation != 0.).cloned();
             let color: Hsla = gpui_kit::rgb(style.color.0).into();
             texts.push(PaintText {
                 frame,
                 layout,
                 font_id,
+                font,
                 color: color.opacity(style.opacity),
                 underline: style.underline,
                 strikethrough: style.strikethrough,
@@ -133,6 +150,7 @@ impl EditorView {
             texts,
             selection: None,
             outlines: Vec::new(),
+            edit_frame: Frame::default(),
             highlight: Vec::new(),
             caret: None,
             marked: Vec::new(),
@@ -142,7 +160,7 @@ impl EditorView {
             badge: None,
             editing: self.text_edit.is_some(),
         };
-        if let Some(frame) = self.selection_frame() {
+        if let Some(frame) = self.selection_box() {
             let text = self.single_selection().filter(|id| {
                 self.presentation
                     .element(*id)
@@ -170,11 +188,20 @@ impl EditorView {
                 let under = Frame {
                     height: frame.height.max(bottom),
                     ..frame
+                }
+                .bounds();
+                let label = match &self.drag {
+                    Some(Drag::Rotate {
+                        origin_rotation,
+                        delta,
+                        ..
+                    }) => format!(
+                        "{}°",
+                        crate::ui::inspector::number(normalize_degrees(origin_rotation + delta))
+                    ),
+                    _ => format!("{} × {}", frame.width.round(), frame.height.round()),
                 };
-                scene.badge = Some((
-                    under,
-                    format!("{} × {}", frame.width.round(), frame.height.round()),
-                ));
+                scene.badge = Some((under, label));
             }
         }
         if let Some(id) = self.hovered_layer
@@ -188,25 +215,12 @@ impl EditorView {
             && let Some(layout) = self.layout_of(edit.id)
             && let Some(frame) = self.frame_of(edit.id)
         {
-            let offset = |rect: BoxRect| BoxRect {
-                left: rect.left + frame.x,
-                top: rect.top + frame.y,
-                right: rect.right + frame.x,
-                bottom: rect.bottom + frame.y,
-            };
-            scene.highlight = layout
-                .selection_rects(edit.selection())
-                .into_iter()
-                .map(offset)
-                .collect();
+            scene.edit_frame = frame;
+            scene.highlight = layout.selection_rects(edit.selection());
             if let Some(marked) = &edit.marked {
-                scene.marked = layout
-                    .selection_rects(marked.clone())
-                    .into_iter()
-                    .map(offset)
-                    .collect();
+                scene.marked = layout.selection_rects(marked.clone());
             }
-            scene.caret = Some(offset(layout.caret(edit.caret)));
+            scene.caret = Some(layout.caret(edit.caret));
         }
         match &self.drag {
             Some(Drag::Create { start, current }) => {
@@ -274,7 +288,7 @@ impl EditorView {
             .walk()
             .into_iter()
             .filter(|node| !node.hidden && !node.locked && node.element.as_group().is_none())
-            .filter(|node| intersects(&node.element.frame, &rect))
+            .filter(|node| node.element.frame.intersects(&rect))
             .map(|node| node.element.id)
             .collect();
         let mut hits = Vec::new();
@@ -296,14 +310,60 @@ impl EditorView {
         if self.text_edit.is_some() || self.selection_locked() {
             return None;
         }
-        let frame = self.selection_frame()?;
+        let frame = self.selection_box()?;
         Handle::ALL.into_iter().find(|handle| {
-            let (x, y) = handle.position(&frame);
+            let (x, y) = handle.slide_position(&frame);
             self.to_window(x, y).is_some_and(|at| {
                 (f32::from(at.x - position.x)).abs() <= HANDLE_REACH
                     && (f32::from(at.y - position.y)).abs() <= HANDLE_REACH
             })
         })
+    }
+
+    /// Whether a window position is in a rotation zone of the selection:
+    /// near a corner, outside the box and off the handles.
+    pub fn rotation_zone_at(&self, position: Point<Pixels>) -> bool {
+        if self.effective_tool() != Tool::Move
+            || self.text_edit.is_some()
+            || self.selection_locked()
+            || self.handle_at(position).is_some()
+        {
+            return false;
+        }
+        let (Some(frame), Some(at)) = (self.selection_box(), self.to_slide(position)) else {
+            return false;
+        };
+        if frame.contains(at.x, at.y) {
+            return false;
+        }
+        frame.corners().into_iter().any(|(x, y)| {
+            self.to_window(x, y).is_some_and(|corner| {
+                f32::from(corner.x - position.x).hypot(f32::from(corner.y - position.y))
+                    <= ROTATE_REACH
+            })
+        })
+    }
+
+    /// Starts turning the selection around the center of its box.
+    fn start_rotate(&mut self, at: SlidePoint) {
+        let Some(origin) = self.selection_box() else {
+            return;
+        };
+        let ids = self.selection_roots();
+        let (cx, cy) = origin.center();
+        let pivot = point(cx, cy);
+        let origin_rotation = match ids.as_slice() {
+            [_] => origin.rotation,
+            _ => 0.,
+        };
+        self.drag = Some(Drag::Rotate {
+            ids,
+            pivot,
+            grab_angle: angle_to(pivot, at),
+            origin,
+            origin_rotation,
+            delta: 0.,
+        });
     }
 
     /// Lines and baselines the dragged elements snap to: every other visible
@@ -336,8 +396,11 @@ impl EditorView {
             })
             .collect();
         for (other, frame, text) in others {
-            targets.add_frame(&frame);
-            if text && let Some(layout) = self.layout_of(other) {
+            targets.add_frame(&frame.bounds());
+            if text
+                && frame.rotation == 0.
+                && let Some(layout) = self.layout_of(other)
+            {
                 targets.baselines.push(frame.y + layout.first_baseline());
             }
         }
@@ -367,7 +430,8 @@ impl EditorView {
         let (Some(layout), Some(frame)) = (self.layout_of(id), self.frame_of(id)) else {
             return;
         };
-        let index = layout.index_at(at.x - frame.x, at.y - frame.y);
+        let (x, y) = frame.to_local(at.x, at.y);
+        let index = layout.index_at(x, y);
         let editing = self.text_edit.as_ref().is_some_and(|edit| edit.id == id);
         if !editing {
             self.begin_text_edit(id, index, index);
@@ -422,7 +486,7 @@ impl EditorView {
                     current: frame,
                     current_sizing: sizing,
                 });
-            } else if let Some(origin) = self.selection_frame() {
+            } else if let Some(origin) = self.selection_box() {
                 self.drag = Some(Drag::ResizeGroup {
                     ids: self.selection_roots(),
                     handle,
@@ -431,6 +495,10 @@ impl EditorView {
                     current: origin,
                 });
             }
+            return;
+        }
+        if self.rotation_zone_at(event.position) {
+            self.start_rotate(at);
             return;
         }
         let deep = event.modifiers.secondary();
@@ -563,6 +631,14 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if self.drag.is_none() {
+            let hover = self.rotation_zone_at(event.position);
+            if hover != self.hover_rotate {
+                self.hover_rotate = hover;
+                cx.notify();
+            }
+            return;
+        }
         let (Some(drag), Some(at), Some(camera)) = (
             self.drag.clone(),
             self.to_slide(event.position),
@@ -617,7 +693,9 @@ impl EditorView {
                     let _span = crate::perf::span("snap");
                     let targets = self.snap_targets(&ids);
                     let baseline = match ids.as_slice() {
-                        [id] => self.layout_of(*id).map(|layout| layout.first_baseline()),
+                        [id] if self.frame_of(*id).is_some_and(|frame| frame.rotation == 0.) => {
+                            self.layout_of(*id).map(|layout| layout.first_baseline())
+                        }
                         _ => None,
                     };
                     (frame, self.guides) = snap_move(&frame, baseline, &targets, threshold);
@@ -644,9 +722,9 @@ impl EditorView {
                     keep_ratio: event.modifiers.shift,
                     from_center: event.modifiers.alt,
                 };
-                let mut frame = resize(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
+                let mut frame = resize_rotated(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
                 self.guides.clear();
-                if snap && mode == ResizeMode::default() {
+                if snap && mode == ResizeMode::default() && origin.rotation == 0. {
                     let targets = self.snap_targets(&[id]);
                     (frame, self.guides) = snap_resize(&frame, handle, &targets, threshold);
                 }
@@ -673,9 +751,9 @@ impl EditorView {
                     keep_ratio: event.modifiers.shift,
                     from_center: event.modifiers.alt,
                 };
-                let mut frame = resize(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
+                let mut frame = resize_rotated(&origin, handle, at.x - grab.x, at.y - grab.y, mode);
                 self.guides.clear();
-                if snap && mode == ResizeMode::default() {
+                if snap && mode == ResizeMode::default() && origin.rotation == 0. {
                     let targets = self.snap_targets(&ids);
                     (frame, self.guides) = snap_resize(&frame, handle, &targets, threshold);
                 }
@@ -689,9 +767,29 @@ impl EditorView {
             }
             Drag::SelectText { id } => {
                 if let (Some(layout), Some(frame)) = (self.layout_of(id), self.frame_of(id)) {
-                    let index = layout.index_at(at.x - frame.x, at.y - frame.y);
+                    let (x, y) = frame.to_local(at.x, at.y);
+                    let index = layout.index_at(x, y);
                     self.move_caret(index, true);
                 }
+            }
+            Drag::Rotate {
+                ids,
+                pivot,
+                grab_angle,
+                origin,
+                origin_rotation,
+                ..
+            } => {
+                let turned = origin_rotation + angle_to(pivot, at) - grab_angle;
+                let rotation = snap_angle(turned, event.modifiers.shift, snap);
+                self.drag = Some(Drag::Rotate {
+                    ids,
+                    pivot,
+                    grab_angle,
+                    origin,
+                    origin_rotation,
+                    delta: normalize_degrees(rotation - origin_rotation),
+                });
             }
         }
         cx.notify();
@@ -782,14 +880,38 @@ impl EditorView {
                     self.commit_pruning("Resize", operations, selection);
                 }
             }
+            Drag::Rotate {
+                ids, pivot, delta, ..
+            } => {
+                let operations = self.turn_operations(&ids, pivot, delta);
+                if !operations.is_empty() {
+                    self.commit_pruning("Rotate", operations, selection);
+                }
+            }
             Drag::Move { .. } | Drag::SelectText { .. } | Drag::Marquee { .. } => {}
         }
         cx.notify();
     }
 }
 
-fn intersects(a: &Frame, b: &Frame) -> bool {
-    a.x <= b.x + b.width && b.x <= a.x + a.width && a.y <= b.y + b.height && b.y <= a.y + a.height
+/// Direction from `pivot` to `at`, in degrees clockwise from the x axis.
+fn angle_to(pivot: SlidePoint, at: SlidePoint) -> f32 {
+    (at.y - pivot.y).atan2(at.x - pivot.x).to_degrees()
+}
+
+/// The angle a rotation drag gives: steps of [`ROTATE_STEP`] with `step`
+/// (Shift), else pulled to a quarter turn within [`ROTATE_SNAP`] when
+/// snapping is on.
+pub fn snap_angle(degrees: f32, step: bool, snap: bool) -> f32 {
+    let nearest = |step: f32| (degrees / step).round() * step;
+    let angle = if step {
+        nearest(ROTATE_STEP)
+    } else if snap && (degrees - nearest(90.)).abs() <= ROTATE_SNAP {
+        nearest(90.)
+    } else {
+        degrees
+    };
+    normalize_degrees(angle)
 }
 
 /// The sizing a text box takes when resized from `handle`: dragging a side
@@ -836,8 +958,11 @@ pub fn canvas(
         (true, _, _) => CursorStyle::ClosedHand,
         (false, Tool::Hand, _) => CursorStyle::OpenHand,
         (false, _, Some(Drag::Resize { handle, .. } | Drag::ResizeGroup { handle, .. })) => {
-            resize_cursor(*handle)
+            let rotation = editor.selection_box().map_or(0., |frame| frame.rotation);
+            resize_cursor(*handle, rotation)
         }
+        (false, _, Some(Drag::Rotate { .. })) => CursorStyle::Crosshair,
+        (false, Tool::Move, None) if editor.hover_rotate => CursorStyle::Crosshair,
         (false, Tool::Text, _) | (false, _, Some(Drag::SelectText { .. })) => CursorStyle::IBeam,
         _ => CursorStyle::Arrow,
     };
@@ -887,12 +1012,22 @@ pub fn canvas(
         )
 }
 
-fn resize_cursor(handle: Handle) -> CursorStyle {
-    match handle {
-        Handle::Left | Handle::Right => CursorStyle::ResizeLeftRight,
-        Handle::Top | Handle::Bottom => CursorStyle::ResizeUpDown,
-        Handle::TopLeft | Handle::BottomRight => CursorStyle::ResizeUpLeftDownRight,
-        Handle::TopRight | Handle::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+/// The resize cursor nearest to the direction of `handle` on a frame turned
+/// by `rotation` degrees.
+fn resize_cursor(handle: Handle, rotation: f32) -> CursorStyle {
+    let direction = match handle {
+        Handle::Left | Handle::Right => 0.,
+        Handle::TopLeft | Handle::BottomRight => 45.,
+        Handle::Top | Handle::Bottom => 90.,
+        Handle::TopRight | Handle::BottomLeft => 135.,
+    };
+    // A cursor points both ways, so directions repeat every half turn.
+    let eighth = ((direction + rotation) / 45.).round() as i32;
+    match eighth.rem_euclid(4) {
+        0 => CursorStyle::ResizeLeftRight,
+        1 => CursorStyle::ResizeUpLeftDownRight,
+        2 => CursorStyle::ResizeUpDown,
+        _ => CursorStyle::ResizeUpRightDownLeft,
     }
 }
 
@@ -942,11 +1077,23 @@ fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
 }
 
 /// Paints text elements with the slide's top-left corner at `origin`,
-/// scaled by `zoom`. Shared by the canvas and the slide thumbnails.
-pub fn paint_texts(texts: &[PaintText], origin: Point<Pixels>, zoom: f32, window: &mut Window) {
+/// scaled by `zoom`. Shared by the canvas and the slide thumbnails; with
+/// `raster_turned` (the thumbnails), rotated texts are cached images instead
+/// of paths.
+pub fn paint_texts(
+    texts: &[PaintText],
+    origin: Point<Pixels>,
+    zoom: f32,
+    raster_turned: bool,
+    window: &mut Window,
+) {
     let _span = crate::perf::span("paint_glyphs");
     let at = |x: f32, y: f32| origin + point(px(x * zoom), px(y * zoom));
     for text in texts {
+        if text.frame.rotation != 0. {
+            paint_turned_text(text, origin, zoom, raster_turned, window);
+            continue;
+        }
         let Some(font_id) = text.font_id else {
             continue;
         };
@@ -994,6 +1141,422 @@ pub fn paint_texts(texts: &[PaintText], origin: Point<Pixels>, zoom: f32, window
     }
 }
 
+/// Builds glyph outlines into a GPUI path, from the frame's local
+/// coordinates through `place`.
+struct TurnedGlyphs<'a> {
+    builder: PathBuilder,
+    place: &'a dyn Fn(f32, f32) -> Point<Pixels>,
+    scale: f32,
+    x: f32,
+    y: f32,
+}
+
+impl TurnedGlyphs<'_> {
+    fn at(&self, x: f32, y: f32) -> Point<Pixels> {
+        (self.place)(self.x + x * self.scale, self.y - y * self.scale)
+    }
+}
+
+impl ttf_parser::OutlineBuilder for TurnedGlyphs<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let to = self.at(x, y);
+        self.builder.move_to(to);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let to = self.at(x, y);
+        self.builder.line_to(to);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (ctrl, to) = (self.at(x1, y1), self.at(x, y));
+        self.builder.curve_to(to, ctrl);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (a, b, to) = (self.at(x1, y1), self.at(x2, y2), self.at(x, y));
+        self.builder.cubic_bezier_to(to, a, b);
+    }
+
+    fn close(&mut self) {
+        self.builder.close();
+    }
+}
+
+/// What a tessellated rotated text depends on, besides its layout: its
+/// position is left out, so moving it, panning or drawing it in a thumbnail
+/// reuses the tessellation.
+#[derive(Clone, Copy, PartialEq)]
+struct TurnedKey {
+    width: f32,
+    height: f32,
+    rotation: f32,
+    zoom: f32,
+    underline: bool,
+    strikethrough: bool,
+    /// Device pixels per window pixel for an image; 0 for paths.
+    raster: f32,
+    /// Baked into an image; paths take it when painted.
+    color: Hsla,
+}
+
+/// How a rotated text is drawn, placed from the center of its frame.
+enum Turned {
+    /// Glyphs and decorations as paths, in window pixels. Sharp at any size,
+    /// but each glyph is hundreds of vertices.
+    Paths {
+        glyphs: Box<gpui_kit::Path<Pixels>>,
+        decorations: Option<Box<gpui_kit::Path<Pixels>>>,
+    },
+    /// One image, and the area it covers in slide units. One sprite per box,
+    /// for the thumbnails, which draw every slide at every frame.
+    Image {
+        image: Arc<gpui_kit::RenderImage>,
+        area: Frame,
+    },
+}
+
+/// A rotated text ready to place.
+struct TurnedEntry {
+    /// Held so that the address of the layout is not reused by another.
+    layout: Arc<TextLayout>,
+    key: TurnedKey,
+    turned: Turned,
+    used: u64,
+}
+
+/// Tessellations and images of rotated texts. Tessellating glyph outlines
+/// costs milliseconds per text box: done every frame for every box on the
+/// canvas and in the thumbnails, it stalls the editor.
+#[derive(Default)]
+struct TurnedCache {
+    entries: Vec<TurnedEntry>,
+    /// Counts the calls to [`paint_turned_text`]; entries unused for
+    /// [`TURNED_KEEP`] calls go when the cache grows past [`TURNED_ENTRIES`].
+    clock: u64,
+}
+
+const TURNED_ENTRIES: usize = 256;
+const TURNED_KEEP: u64 = 1024;
+
+thread_local! {
+    static TURNED: std::cell::RefCell<TurnedCache> = std::cell::RefCell::default();
+}
+
+/// The path moved by `by`.
+fn translated(path: &gpui_kit::Path<Pixels>, by: Point<Pixels>) -> gpui_kit::Path<Pixels> {
+    let mut path = path.clone();
+    path.bounds.origin += by;
+    for vertex in &mut path.vertices {
+        vertex.xy_position += by;
+    }
+    path
+}
+
+/// Tessellates the glyphs and decorations of a rotated text, in window
+/// pixels from the center of its frame.
+fn tessellate_turned(
+    text: &PaintText,
+    zoom: f32,
+) -> Option<(gpui_kit::Path<Pixels>, Option<gpui_kit::Path<Pixels>>)> {
+    let _span = crate::perf::span("tessellate_turned_text");
+    let data = text.font.as_ref()?;
+    let face = ttf_parser::Face::parse(&data.bytes, data.index).ok()?;
+    let frame = text.frame;
+    let layout = &text.layout;
+    let (cx, cy) = frame.center();
+    let place = |x: f32, y: f32| {
+        let (x, y) = frame.to_slide(x, y);
+        point(px((x - cx) * zoom), px((y - cy) * zoom))
+    };
+    let mut glyphs = TurnedGlyphs {
+        builder: PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::non_zero())),
+        place: &place,
+        scale: layout.font_size / face.units_per_em() as f32,
+        x: 0.,
+        y: 0.,
+    };
+    for line in &layout.lines {
+        for glyph in &line.glyphs {
+            glyphs.x = glyph.x;
+            glyphs.y = line.baseline + glyph.y;
+            face.outline_glyph(ttf_parser::GlyphId(glyph.id), &mut glyphs);
+        }
+    }
+    let glyphs = glyphs.builder.build().ok()?;
+
+    // Apart from the glyphs: with the non-zero rule, a contour of a glyph
+    // that winds the other way would cut a hole in the line.
+    let mut lines = PathBuilder::fill();
+    let mut any = false;
+    let decorations = layout.decorations;
+    for line in &layout.lines {
+        if line.right <= line.left {
+            continue;
+        }
+        let mut stroke = |offset: f32, thickness: f32| {
+            let top = line.baseline + offset;
+            // At least one screen pixel thick, like the upright text.
+            let bottom = top + thickness.max(1. / zoom);
+            let corners = [
+                (line.left, top),
+                (line.right, top),
+                (line.right, bottom),
+                (line.left, bottom),
+            ]
+            .map(|(x, y)| place(x, y));
+            lines.add_polygon(&corners, true);
+            any = true;
+        };
+        if text.underline {
+            stroke(
+                decorations.underline_offset,
+                decorations.underline_thickness,
+            );
+        }
+        if text.strikethrough {
+            stroke(
+                decorations.strikeout_offset,
+                decorations.strikeout_thickness,
+            );
+        }
+    }
+    let decorations = if any { lines.build().ok() } else { None };
+    Some((glyphs, decorations))
+}
+
+/// Renders a rotated text into an image at `scale` device pixels per slide
+/// unit, as GPUI takes it: BGRA with straight alpha.
+fn rasterize_turned(text: &PaintText, scale: f32) -> Option<Turned> {
+    let _span = crate::perf::span("rasterize_turned_text");
+    let font = text.font.as_ref()?;
+    let rgba = text.color.to_rgb();
+    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    let mut color = crate::render::Paint::default();
+    color.set_color_rgba8(
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        channel(rgba.a),
+    );
+    color.anti_alias = true;
+    let ink = crate::render::TextInk {
+        font,
+        layout: &text.layout,
+        color,
+        underline: text.underline,
+        strikethrough: text.strikethrough,
+    };
+    let (pixmap, area) = crate::render::render_text_box(&ink, &text.frame, scale)?;
+    let (width, height) = (pixmap.width(), pixmap.height());
+    let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+    for pixel in pixmap.pixels() {
+        let pixel = pixel.demultiply();
+        bytes.extend_from_slice(&[pixel.blue(), pixel.green(), pixel.red(), pixel.alpha()]);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, bytes)?;
+    let image = gpui_kit::RenderImage::new(vec![image::Frame::new(buffer)]);
+    let (cx, cy) = text.frame.center();
+    Some(Turned::Image {
+        image: Arc::new(image),
+        area: Frame {
+            x: area.x - cx,
+            y: area.y - cy,
+            ..area
+        },
+    })
+}
+
+/// Paints a rotated text element: the glyph atlas only draws upright
+/// glyphs. With `raster`, as a cached image (for the thumbnails); else from
+/// the cached tessellation of its glyph outlines. See [`TurnedCache`].
+fn paint_turned_text(
+    text: &PaintText,
+    origin: Point<Pixels>,
+    zoom: f32,
+    raster: bool,
+    window: &mut Window,
+) {
+    let _span = crate::perf::span("paint_turned_text");
+    let frame = text.frame;
+    let key = TurnedKey {
+        width: frame.width,
+        height: frame.height,
+        rotation: frame.rotation,
+        zoom,
+        underline: text.underline,
+        strikethrough: text.strikethrough,
+        raster: if raster { window.scale_factor() } else { 0. },
+        color: if raster { text.color } else { Hsla::default() },
+    };
+    let (cx, cy) = frame.center();
+    let center = origin + point(px(cx * zoom), px(cy * zoom));
+    let mut evicted = Vec::new();
+    let placed = TURNED.with_borrow_mut(|cache| {
+        cache.clock += 1;
+        let clock = cache.clock;
+        let found = cache
+            .entries
+            .iter_mut()
+            .position(|entry| entry.key == key && Arc::ptr_eq(&entry.layout, &text.layout));
+        let index = match found {
+            Some(index) => index,
+            None => {
+                let turned = if raster {
+                    rasterize_turned(text, zoom * key.raster)?
+                } else {
+                    let (glyphs, decorations) = tessellate_turned(text, zoom)?;
+                    Turned::Paths {
+                        glyphs: Box::new(glyphs),
+                        decorations: decorations.map(Box::new),
+                    }
+                };
+                if cache.entries.len() >= TURNED_ENTRIES {
+                    let (kept, old): (Vec<_>, Vec<_>) = std::mem::take(&mut cache.entries)
+                        .into_iter()
+                        .partition(|entry| clock - entry.used < TURNED_KEEP);
+                    cache.entries = kept;
+                    evicted.extend(old);
+                    if cache.entries.len() >= TURNED_ENTRIES {
+                        evicted.append(&mut cache.entries);
+                    }
+                }
+                cache.entries.push(TurnedEntry {
+                    layout: text.layout.clone(),
+                    key,
+                    turned,
+                    used: clock,
+                });
+                cache.entries.len() - 1
+            }
+        };
+        let entry = &mut cache.entries[index];
+        entry.used = clock;
+        Some(match &entry.turned {
+            Turned::Paths {
+                glyphs,
+                decorations,
+            } => Turned::Paths {
+                glyphs: Box::new(translated(glyphs, center)),
+                decorations: decorations
+                    .as_ref()
+                    .map(|path| Box::new(translated(path, center))),
+            },
+            Turned::Image { image, area } => Turned::Image {
+                image: image.clone(),
+                area: *area,
+            },
+        })
+    });
+    // Images leave the sprite atlas with the cache entry.
+    for entry in evicted {
+        if let Turned::Image { image, .. } = entry.turned {
+            window.drop_image(image).ok();
+        }
+    }
+    match placed {
+        Some(Turned::Paths {
+            glyphs,
+            decorations,
+        }) => {
+            window.paint_path(*glyphs, text.color);
+            if let Some(decorations) = decorations {
+                window.paint_path(*decorations, text.color);
+            }
+        }
+        Some(Turned::Image { image, area }) => {
+            let bounds = gpui_kit::Bounds::new(
+                center + point(px(area.x * zoom), px(area.y * zoom)),
+                size(px(area.width * zoom), px(area.height * zoom)),
+            );
+            window
+                .paint_image(bounds, bounds, Default::default(), image, 0, false)
+                .ok();
+        }
+        None => {}
+    }
+}
+
+/// The window point of a point given in the local coordinates of `frame`.
+fn slide_point(frame: &Frame, x: f32, y: f32, origin: Point<Pixels>, zoom: f32) -> Point<Pixels> {
+    let (x, y) = frame.to_slide(x, y);
+    origin + point(px(x * zoom), px(y * zoom))
+}
+
+/// The corners of `rect`, given in the local coordinates of `frame`, in the
+/// window.
+fn turned_corners(
+    frame: &Frame,
+    rect: &BoxRect,
+    origin: Point<Pixels>,
+    zoom: f32,
+) -> [Point<Pixels>; 4] {
+    [
+        (rect.left, rect.top),
+        (rect.right, rect.top),
+        (rect.right, rect.bottom),
+        (rect.left, rect.bottom),
+    ]
+    .map(|(x, y)| slide_point(frame, x, y, origin, zoom))
+}
+
+/// Fills `rect`, given in the local coordinates of `frame`, turned with it.
+fn fill_turned(
+    window: &mut Window,
+    frame: &Frame,
+    rect: &BoxRect,
+    origin: Point<Pixels>,
+    zoom: f32,
+    color: Hsla,
+) {
+    if frame.rotation == 0. {
+        let at = |x: f32, y: f32| origin + point(px(x * zoom), px(y * zoom));
+        window.paint_quad(fill(
+            gpui_kit::Bounds::from_corners(
+                at(frame.x + rect.left, frame.y + rect.top),
+                at(frame.x + rect.right, frame.y + rect.bottom),
+            ),
+            color,
+        ));
+        return;
+    }
+    let mut builder = PathBuilder::fill();
+    builder.add_polygon(&turned_corners(frame, rect, origin, zoom), true);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// Draws the one-pixel outline of `frame`, turned or not.
+fn outline_turned(
+    window: &mut Window,
+    frame: &Frame,
+    origin: Point<Pixels>,
+    zoom: f32,
+    color: Hsla,
+) {
+    let local = BoxRect {
+        left: 0.,
+        top: 0.,
+        right: frame.width,
+        bottom: frame.height,
+    };
+    if frame.rotation == 0. {
+        let [top_left, _, bottom_right, _] = turned_corners(frame, &local, origin, zoom);
+        window.paint_quad(outline(
+            gpui_kit::Bounds::from_corners(top_left, bottom_right),
+            color,
+            BorderStyle::Solid,
+        ));
+        return;
+    }
+    let mut builder = PathBuilder::stroke(px(1.));
+    builder.add_polygon(&turned_corners(frame, &local, origin, zoom), true);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
 /// Paints the slide's elements and, above them, the editing overlay:
 /// selection, handles, caret, snap guides. Registers the text input handler
 /// while a text box is being edited.
@@ -1014,18 +1577,12 @@ fn content_layer(
                 gpui_kit::Bounds::from_corners(at(left, top), at(right, bottom))
             };
 
+            let edit = scene.edit_frame;
             for highlight in &scene.highlight {
-                window.paint_quad(fill(
-                    rect(
-                        highlight.left,
-                        highlight.top,
-                        highlight.right,
-                        highlight.bottom,
-                    ),
-                    theme::accent().opacity(0.22),
-                ));
+                let color = theme::accent().opacity(0.22);
+                fill_turned(window, &edit, highlight, slide.origin, zoom, color);
             }
-            paint_texts(&scene.texts, slide.origin, zoom, window);
+            paint_texts(&scene.texts, slide.origin, zoom, false, window);
 
             // Content past the slide edge stays visible, faded: the export
             // cuts it off.
@@ -1048,25 +1605,38 @@ fn content_layer(
                 window.paint_quad(fill(band, fade));
             }
 
+            // One screen pixel, in slide units.
+            let pixel = 1. / zoom;
             for marked in &scene.marked {
-                let left = at(marked.left, marked.bottom);
-                window.paint_quad(fill(
-                    gpui_kit::Bounds::new(
-                        left,
-                        size(px((marked.right - marked.left) * zoom), px(1.)),
-                    ),
-                    theme::ink(),
-                ));
+                let line = BoxRect {
+                    top: marked.bottom,
+                    bottom: marked.bottom + pixel,
+                    ..*marked
+                };
+                fill_turned(window, &edit, &line, slide.origin, zoom, theme::ink());
             }
             if let Some(caret) = &scene.caret {
-                let top = at(caret.left, caret.top);
+                let bar = BoxRect {
+                    left: caret.left - 0.75 * pixel,
+                    right: caret.left + 0.75 * pixel,
+                    ..*caret
+                };
+                fill_turned(window, &edit, &bar, slide.origin, zoom, theme::accent());
+            }
+            for frame in &scene.outlines {
+                outline_turned(window, frame, slide.origin, zoom, theme::accent());
+            }
+            if let Some(frame) = scene.marquee {
                 window.paint_quad(fill(
-                    gpui_kit::Bounds::new(
-                        top - point(px(0.75), px(0.)),
-                        size(px(1.5), px((caret.bottom - caret.top) * zoom)),
+                    rect(
+                        frame.x,
+                        frame.y,
+                        frame.x + frame.width,
+                        frame.y + frame.height,
                     ),
-                    theme::accent(),
+                    theme::accent().opacity(0.08),
                 ));
+                outline_turned(window, &frame, slide.origin, zoom, theme::accent());
             }
             if let Some((frame, handles, overflow)) = scene.selection {
                 let color = if overflow {
@@ -1074,16 +1644,10 @@ fn content_layer(
                 } else {
                     theme::accent()
                 };
-                let bounds = rect(
-                    frame.x,
-                    frame.y,
-                    frame.x + frame.width,
-                    frame.y + frame.height,
-                );
-                window.paint_quad(outline(bounds, color, BorderStyle::Solid));
+                outline_turned(window, &frame, slide.origin, zoom, color);
                 if handles {
                     for handle in Handle::ALL {
-                        let (x, y) = handle.position(&frame);
+                        let (x, y) = handle.slide_position(&frame);
                         let center = at(x, y);
                         let half = px(HANDLE_SIZE / 2.);
                         window.paint_quad(gpui_kit::quad(

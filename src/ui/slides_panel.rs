@@ -143,7 +143,7 @@ fn thumbnail(editor: &EditorView, texts: Vec<PaintText>, active: bool) -> Div {
                 |_, _, _| {},
                 move |bounds, _, window, _| {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        paint_texts(&texts, bounds.origin, zoom, window);
+                        paint_texts(&texts, bounds.origin, zoom, true, window);
                     });
                 },
             )

@@ -172,71 +172,159 @@ fn translate(element: &mut Element, dx: f32, dy: f32) {
     }
 }
 
-/// Sets the frame of each group to the union of its children's frames,
-/// children first. An empty group keeps its frame.
+/// Sets the frame of each group to the box around its children's frames,
+/// in the axes of the group's rotation, children first. An empty group
+/// keeps its frame.
 fn refit_groups(elements: &mut [Element]) {
     for element in elements {
         let Some(group) = element.as_group_mut() else {
             continue;
         };
         refit_groups(&mut group.children);
-        if let Some(bounds) = union(group.children.iter().map(|child| &child.frame)) {
+        let rotation = element.frame.rotation;
+        let children = match &element.kind {
+            ElementKind::Group(group) => &group.children,
+            ElementKind::Text(_) => continue,
+        };
+        if let Some(bounds) = union_in(children.iter().map(|child| &child.frame), rotation) {
             element.frame = bounds;
         }
     }
 }
 
-/// The smallest unrotated frame holding every frame; `None` for none.
+/// The smallest unrotated frame holding every frame, rotated ones included;
+/// `None` for none.
 pub fn union<'a>(frames: impl IntoIterator<Item = &'a Frame>) -> Option<Frame> {
-    frames.into_iter().fold(None, |acc: Option<Frame>, frame| {
-        let (left, top) = (frame.x, frame.y);
-        let (right, bottom) = (frame.x + frame.width, frame.y + frame.height);
-        Some(match acc {
-            None => Frame {
-                x: left,
-                y: top,
-                width: frame.width,
-                height: frame.height,
-                rotation: 0.,
-            },
-            Some(acc) => {
-                let x = acc.x.min(left);
-                let y = acc.y.min(top);
-                Frame {
-                    x,
-                    y,
-                    width: (acc.x + acc.width).max(right) - x,
-                    height: (acc.y + acc.height).max(bottom) - y,
-                    rotation: 0.,
+    union_in(frames, 0.)
+}
+
+/// The smallest frame with `rotation` that holds every frame; `None` for
+/// none. The frame of a rotated group.
+pub fn union_in<'a>(frames: impl IntoIterator<Item = &'a Frame>, rotation: f32) -> Option<Frame> {
+    // Corners in the axes of `rotation`, turned around the slide origin.
+    let mut span: Option<(f32, f32, f32, f32)> = None;
+    for frame in frames {
+        for (x, y) in frame.corners() {
+            let (u, v) = rotate_vector(x, y, -rotation);
+            span = Some(match span {
+                None => (u, v, u, v),
+                Some((left, top, right, bottom)) => {
+                    (left.min(u), top.min(v), right.max(u), bottom.max(v))
                 }
-            }
-        })
+            });
+        }
+    }
+    let (left, top, right, bottom) = span?;
+    let (width, height) = (right - left, bottom - top);
+    if rotation == 0. {
+        return Some(Frame {
+            x: left,
+            y: top,
+            width,
+            height,
+            rotation: 0.,
+        });
+    }
+    let (cx, cy) = rotate_vector(left + width / 2., top + height / 2., rotation);
+    Some(Frame {
+        x: cx - width / 2.,
+        y: cy - height / 2.,
+        width,
+        height,
+        rotation,
     })
 }
 
-/// The frame a child takes when its group goes from `from` to `to`: its
-/// position scales with the group, and so does its size unless the text
+/// The frame turned by `degrees` around `pivot`: its center goes around the
+/// pivot and its rotation grows by the same angle.
+pub fn turn_frame(frame: &Frame, pivot: (f32, f32), degrees: f32) -> Frame {
+    let (cx, cy) = frame.center();
+    let (dx, dy) = rotate_vector(cx - pivot.0, cy - pivot.1, degrees);
+    Frame {
+        x: pivot.0 + dx - frame.width / 2.,
+        y: pivot.1 + dy - frame.height / 2.,
+        rotation: normalize_degrees(frame.rotation + degrees),
+        ..*frame
+    }
+}
+
+/// Turns the vector (`x`, `y`) by `degrees`, clockwise on the slide (y
+/// points down).
+pub fn rotate_vector(x: f32, y: f32, degrees: f32) -> (f32, f32) {
+    if degrees == 0. {
+        return (x, y);
+    }
+    let (sin, cos) = sin_cos(degrees);
+    (x * cos - y * sin, x * sin + y * cos)
+}
+
+/// Sine and cosine of an angle in degrees, exact for multiples of 90°.
+fn sin_cos(degrees: f32) -> (f32, f32) {
+    match normalize_degrees(degrees) {
+        0. => (0., 1.),
+        90. => (1., 0.),
+        180. => (0., -1.),
+        -90. => (-1., 0.),
+        other => other.to_radians().sin_cos(),
+    }
+}
+
+/// Two lengths or angles that differ only by rounding.
+fn nearly(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 1e-3
+}
+
+/// The same angle in (-180, 180].
+pub fn normalize_degrees(degrees: f32) -> f32 {
+    let turned = degrees.rem_euclid(360.);
+    if turned > 180. {
+        turned - 360.
+    } else if turned == 0. {
+        0.
+    } else {
+        turned
+    }
+}
+
+/// The frame a child takes when its group goes from `from` to `to`, both
+/// possibly rotated. The rotated top-left corner of the child follows the
+/// group: it keeps its place in the group's axes, scaled with the group. The
+/// child turns with the group, and its box scales with it unless the text
 /// sizes its own width. Font sizes do not change.
-pub fn scale_frame(child: &Frame, from: &Frame, to: &Frame, sizing: Option<TextSizing>) -> Frame {
+///
+/// A child turned by an angle that is not a multiple of 90° inside the group
+/// cannot stretch along one group axis without a skew: its box scales along
+/// the group axis nearest to each of its own, which is close enough.
+pub fn map_frame(child: &Frame, from: &Frame, to: &Frame, sizing: Option<TextSizing>) -> Frame {
     let ratio = |to: f32, from: f32| if from > 0. { to / from } else { 1. };
     let sx = ratio(to.width, from.width);
     let sy = ratio(to.height, from.height);
+    let (x, y) = child.to_slide(0., 0.);
+    let (u, v) = from.to_local(x, y);
+    let (x, y) = to.to_slide(u * sx, v * sy);
+    let (sin, cos) = sin_cos(child.rotation - from.rotation);
+    let (fx, fy) = if sin.abs() > cos.abs() {
+        (sy, sx)
+    } else {
+        (sx, sy)
+    };
     let keeps_size = sizing == Some(TextSizing::AutoWidth);
-    Frame {
-        x: to.x + (child.x - from.x) * sx,
-        y: to.y + (child.y - from.y) * sy,
+    let frame = Frame {
+        x: 0.,
+        y: 0.,
         width: if keeps_size {
             child.width
         } else {
-            child.width * sx
+            child.width * fx
         },
         height: if keeps_size {
             child.height
         } else {
-            child.height * sy
+            child.height * fy
         },
-        rotation: child.rotation,
-    }
+        rotation: normalize_degrees(child.rotation + to.rotation - from.rotation),
+    };
+    frame.with_top_left_at(x, y)
 }
 
 /// In JSON the kind is a key of the element: `{"id": 1, "frame": {..},
@@ -313,7 +401,9 @@ impl Element {
 }
 
 /// Position and size of an element, in slide units from the slide's top-left
-/// corner. Rotation is in degrees, clockwise, around the frame center.
+/// corner. Rotation is in degrees, clockwise, around the frame center, in
+/// (-180, 180]: `x`, `y`, `width` and `height` describe the frame before it
+/// turns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Frame {
@@ -325,8 +415,88 @@ pub struct Frame {
 }
 
 impl Frame {
+    pub fn center(&self) -> (f32, f32) {
+        (self.x + self.width / 2., self.y + self.height / 2.)
+    }
+
+    /// The slide point of a point given from the top-left corner of the
+    /// unrotated frame.
+    pub fn to_slide(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.rotation == 0. {
+            return (self.x + x, self.y + y);
+        }
+        let (cx, cy) = self.center();
+        let (dx, dy) = rotate_vector(x - self.width / 2., y - self.height / 2., self.rotation);
+        (cx + dx, cy + dy)
+    }
+
+    /// The inverse of [`Self::to_slide`].
+    pub fn to_local(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.rotation == 0. {
+            return (x - self.x, y - self.y);
+        }
+        let (cx, cy) = self.center();
+        let (dx, dy) = rotate_vector(x - cx, y - cy, -self.rotation);
+        (dx + self.width / 2., dy + self.height / 2.)
+    }
+
+    /// The corners on the slide: top-left, top-right, bottom-right and
+    /// bottom-left of the unrotated frame.
+    pub fn corners(&self) -> [(f32, f32); 4] {
+        [
+            self.to_slide(0., 0.),
+            self.to_slide(self.width, 0.),
+            self.to_slide(self.width, self.height),
+            self.to_slide(0., self.height),
+        ]
+    }
+
+    /// The smallest unrotated frame holding this one.
+    pub fn bounds(&self) -> Frame {
+        union(std::iter::once(self)).expect("one frame")
+    }
+
+    /// The same size and rotation, placed so that its rotated top-left
+    /// corner sits at (`x`, `y`).
+    pub fn with_top_left_at(self, x: f32, y: f32) -> Frame {
+        if self.rotation == 0. {
+            return Frame { x, y, ..self };
+        }
+        let (dx, dy) = rotate_vector(-self.width / 2., -self.height / 2., self.rotation);
+        Frame {
+            x: x - dx - self.width / 2.,
+            y: y - dy - self.height / 2.,
+            ..self
+        }
+    }
+
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
+        let (x, y) = self.to_local(x, y);
+        x >= 0. && x <= self.width && y >= 0. && y <= self.height
+    }
+
+    /// The two frames overlap or touch, rotated ones included.
+    pub fn intersects(&self, other: &Frame) -> bool {
+        let (a, b) = (self.corners(), other.corners());
+        let axes = [
+            self.rotation,
+            self.rotation + 90.,
+            other.rotation,
+            other.rotation + 90.,
+        ];
+        axes.into_iter().all(|degrees| {
+            let (ax, ay) = rotate_vector(1., 0., degrees);
+            let span = |corners: &[(f32, f32); 4]| {
+                corners
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(low, high), (x, y)| {
+                        let at = x * ax + y * ay;
+                        (low.min(at), high.max(at))
+                    })
+            };
+            let (a, b) = (span(&a), span(&b));
+            a.0 <= b.1 && b.0 <= a.1
+        })
     }
 }
 
@@ -337,9 +507,10 @@ pub enum ElementKind {
     Group(GroupElement),
 }
 
-/// Elements moved and resized together. The frame of a group is the union
-/// of its children's frames, kept by [`Presentation::apply`]; its rotation
-/// is always 0. Children frames stay in slide units, like every frame.
+/// Elements moved, resized and turned together. The frame of a group is the
+/// box around its children's frames in the axes of the group's rotation,
+/// kept by [`Presentation::apply`]. Children frames stay in slide units,
+/// like every frame, so a child's rotation is its angle on the slide.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupElement {
@@ -856,10 +1027,17 @@ impl Presentation {
             .map_err(|_| ApplyError::BadFont(text.style.font.clone()))?;
         let sizing = text.sizing;
         let frame = &mut self.element_mut(id)?.frame;
+        let before = *frame;
         if sizing == TextSizing::AutoWidth {
             frame.width = size.0;
         }
         frame.height = size.1;
+        // A rotated box grows from its rotated top-left corner, as an
+        // unrotated one does, instead of from its center.
+        if frame.rotation != 0. && (frame.width != before.width || frame.height != before.height) {
+            let (x, y) = before.to_slide(0., 0.);
+            *frame = frame.with_top_left_at(x, y);
+        }
         Ok(())
     }
 
@@ -933,11 +1111,12 @@ impl Presentation {
                 slide,
                 parent,
                 index,
-                element,
+                mut element,
             } => {
                 let slide_index = self
                     .index_of(slide)
                     .ok_or(ApplyError::UnknownSlide(slide))?;
+                normalize_rotations(&mut element);
                 self.check_parent(slide, parent)?;
                 let mut tree = Vec::new();
                 each_in_tree(&element, &mut |element| tree.push(element));
@@ -1002,6 +1181,10 @@ impl Presentation {
             }
             Operation::SetFrame { id, frame } => {
                 check_frame(&frame)?;
+                let frame = Frame {
+                    rotation: normalize_degrees(frame.rotation),
+                    ..frame
+                };
                 self.check_unlocked(id)?;
                 let element = self.element_mut(id)?;
                 let old = element.frame;
@@ -1023,7 +1206,7 @@ impl Presentation {
                 }
                 for (child, frame) in &frames {
                     check_frame(frame)?;
-                    if !self.ancestors(*child).contains(&id) {
+                    if *child != id && !self.ancestors(*child).contains(&id) {
                         return Err(ApplyError::InvalidParent(id));
                     }
                 }
@@ -1143,36 +1326,49 @@ impl Presentation {
         }
     }
 
-    /// Moves a group, or resizes it by scaling its descendants with
-    /// [`scale_frame`]. A resize is undone by restoring each descendant's
-    /// frame: the text fitted after scaling cannot be scaled back exactly.
+    /// Moves a group, or resizes and turns it by mapping its descendants
+    /// with [`map_frame`]. A resize or a turn is undone by restoring the
+    /// frames of the group and its descendants: the text fitted after
+    /// scaling cannot be scaled back exactly.
     fn set_group_frame(
         &mut self,
         id: ElementId,
         old: Frame,
         frame: Frame,
     ) -> Result<Operation, ApplyError> {
-        if frame.rotation != 0. {
-            return Err(ApplyError::GroupFrame);
-        }
-        if frame.width == old.width && frame.height == old.height {
+        // The box of a rotated group is computed, so a frame read back from
+        // it can differ by rounding.
+        if nearly(frame.width, old.width)
+            && nearly(frame.height, old.height)
+            && nearly(normalize_degrees(frame.rotation - old.rotation), 0.)
+        {
             let element = self.element_mut(id)?;
             translate(element, frame.x - old.x, frame.y - old.y);
             return Ok(Operation::SetFrame { id, frame: old });
         }
-        let mut leaves = Vec::new();
+        let mut nodes = Vec::new();
         let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
         each_in_tree(element, &mut |node| {
-            if node.as_group().is_none() {
-                leaves.push((node.id, node.frame, node.as_text().map(|text| text.sizing)));
+            if node.id != id {
+                let sizing = node.as_text().map(|text| text.sizing);
+                nodes.push((node.id, node.frame, sizing, node.as_group().is_some()));
             }
         });
-        let mut restore = Vec::with_capacity(leaves.len());
-        for (leaf, before, sizing) in leaves {
-            self.element_mut(leaf)?.frame = scale_frame(&before, &old, &frame, sizing);
-            self.fit(leaf)?;
-            restore.push((leaf, before));
+        let turn = frame.rotation - old.rotation;
+        let mut restore = Vec::with_capacity(nodes.len() + 1);
+        for (node, before, sizing, group) in nodes {
+            restore.push((node, before));
+            let target = &mut self.element_mut(node)?.frame;
+            if group {
+                // Its box follows its children when the groups are fitted.
+                target.rotation = normalize_degrees(before.rotation + turn);
+            } else {
+                *target = map_frame(&before, &old, &frame, sizing);
+                self.fit(node)?;
+            }
         }
+        restore.push((id, old));
+        self.element_mut(id)?.frame.rotation = frame.rotation;
         Ok(Operation::SetGroupFrames {
             id,
             frames: restore,
@@ -1185,6 +1381,14 @@ impl Presentation {
         } else {
             Err(ApplyError::MissingFont(face.clone()))
         }
+    }
+}
+
+/// Brings the rotations of the element and its descendants into (-180, 180].
+fn normalize_rotations(element: &mut Element) {
+    element.frame.rotation = normalize_degrees(element.frame.rotation);
+    if let Some(group) = element.as_group_mut() {
+        group.children.iter_mut().for_each(normalize_rotations);
     }
 }
 
@@ -1827,17 +2031,185 @@ pub(crate) mod tests {
         assert_eq!(second_after.width, second_before.width);
         assert_eq!(second_after.x, old.x + (second_before.x - old.x) * 2.);
         assert_eq!(size(&presentation, first), TextStyle::default().size);
-        let rotated = Frame {
-            rotation: 10.,
-            ..resized
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    fn close_frames(a: &Frame, b: &Frame) -> bool {
+        close(a.x, b.x)
+            && close(a.y, b.y)
+            && close(a.width, b.width)
+            && close(a.height, b.height)
+            && close(a.rotation, b.rotation)
+    }
+
+    #[test]
+    fn rotated_frames_map_points_both_ways() {
+        let frame = Frame {
+            x: 100.,
+            y: 100.,
+            width: 200.,
+            height: 100.,
+            rotation: 90.,
         };
-        assert_eq!(
-            presentation.apply(Operation::SetFrame {
-                id: group,
-                frame: rotated
-            }),
-            Err(ApplyError::GroupFrame)
+        // Turned a quarter clockwise around its center (200, 150).
+        let (x, y) = frame.to_slide(0., 0.);
+        assert!(close(x, 250.) && close(y, 50.), "{x}, {y}");
+        let (u, v) = frame.to_local(x, y);
+        assert!(close(u, 0.) && close(v, 0.));
+        assert!(frame.contains(200., 240.));
+        assert!(!frame.contains(290., 150.));
+        let bounds = frame.bounds();
+        assert!(close_frames(
+            &bounds,
+            &Frame {
+                x: 150.,
+                y: 50.,
+                width: 100.,
+                height: 200.,
+                rotation: 0.,
+            }
+        ));
+        assert_eq!(normalize_degrees(270.), -90.);
+        assert_eq!(normalize_degrees(-180.), 180.);
+        assert_eq!(normalize_degrees(-360.), 0.);
+    }
+
+    #[test]
+    fn rotated_frames_intersect_by_their_turned_shape() {
+        let diamond = Frame {
+            x: 0.,
+            y: 0.,
+            width: 100.,
+            height: 100.,
+            rotation: 45.,
+        };
+        // The bounds reach the corner (0, 0); the diamond does not.
+        let corner = Frame {
+            x: -5.,
+            y: -5.,
+            width: 15.,
+            height: 15.,
+            rotation: 0.,
+        };
+        assert!(corner.intersects(&diamond.bounds()));
+        assert!(!corner.intersects(&diamond));
+        assert!(diamond.intersects(&Frame {
+            x: 45.,
+            y: 45.,
+            ..corner
+        }));
+    }
+
+    #[test]
+    fn a_group_box_follows_the_axes_of_its_rotation() {
+        let child = Frame {
+            x: 0.,
+            y: 0.,
+            width: 100.,
+            height: 50.,
+            rotation: 30.,
+        };
+        let box_ = union_in([&child], 30.).unwrap();
+        assert!(close_frames(&box_, &child), "{box_:?}");
+    }
+
+    #[test]
+    fn turning_a_group_turns_its_children_and_is_idempotent() {
+        let (mut presentation, group, first, second) = grouped();
+        let old = frame(&presentation, group);
+        let turned = Frame {
+            rotation: 90.,
+            ..old
+        };
+        let set = Operation::SetFrame {
+            id: group,
+            frame: turned,
+        };
+        round_trip(&mut presentation, set.clone());
+        presentation.apply(set.clone()).unwrap();
+        let once = presentation.slides.clone();
+        let box_ = frame(&presentation, group);
+        assert!(close_frames(&box_, &turned), "{box_:?} {turned:?}");
+        assert_eq!(frame(&presentation, first).rotation, 90.);
+        assert_eq!(frame(&presentation, second).rotation, 90.);
+        presentation.apply(set).unwrap();
+        for (id, before) in [(first, &once), (second, &once)] {
+            let before = find(&before[0].elements, id).unwrap().frame;
+            assert!(
+                close_frames(&frame(&presentation, id), &before),
+                "the angle is final, not added"
+            );
+        }
+
+        // Editing a child keeps the axes of the group.
+        let child = frame(&presentation, first);
+        presentation
+            .apply(Operation::SetFrame {
+                id: first,
+                frame: Frame {
+                    x: child.x + 10.,
+                    ..child
+                },
+            })
+            .unwrap();
+        assert_eq!(frame(&presentation, group).rotation, 90.);
+    }
+
+    #[test]
+    fn a_rotated_text_grows_from_its_rotated_top_left_corner() {
+        let mut presentation = with_inter();
+        let id = add_text(
+            &mut presentation,
+            "Hi",
+            TextSizing::AutoWidth,
+            Frame {
+                x: 100.,
+                y: 100.,
+                rotation: 30.,
+                ..Frame::default()
+            },
         );
+        let before = frame(&presentation, id);
+        let corner = before.to_slide(0., 0.);
+        presentation
+            .apply(Operation::ReplaceText {
+                id,
+                range: 2..2,
+                text: " there, a longer line".into(),
+            })
+            .unwrap();
+        let after = frame(&presentation, id);
+        assert!(after.width > before.width);
+        let moved = after.to_slide(0., 0.);
+        assert!(close(moved.0, corner.0) && close(moved.1, corner.1));
+    }
+
+    #[test]
+    fn mapping_a_child_turned_a_quarter_swaps_its_scale() {
+        let from = Frame {
+            x: 0.,
+            y: 0.,
+            width: 100.,
+            height: 100.,
+            rotation: 0.,
+        };
+        let to = Frame {
+            width: 200.,
+            ..from
+        };
+        let child = Frame {
+            x: 25.,
+            y: 40.,
+            width: 50.,
+            height: 20.,
+            rotation: 90.,
+        };
+        let mapped = map_frame(&child, &from, &to, None);
+        // Its height lies along the group's width.
+        assert!(close(mapped.width, 50.) && close(mapped.height, 40.));
     }
 
     #[test]

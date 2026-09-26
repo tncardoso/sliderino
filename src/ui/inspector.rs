@@ -26,6 +26,7 @@ pub enum Field {
     Y,
     Width,
     Height,
+    Rotation,
     Size,
     LineHeight,
     LetterSpacing,
@@ -34,11 +35,12 @@ pub enum Field {
 }
 
 impl Field {
-    const ALL: [Field; 9] = [
+    const ALL: [Field; 10] = [
         Field::X,
         Field::Y,
         Field::Width,
         Field::Height,
+        Field::Rotation,
         Field::Size,
         Field::LineHeight,
         Field::LetterSpacing,
@@ -46,9 +48,13 @@ impl Field {
         Field::Opacity,
     ];
 
-    /// X, Y, width or height: the fields a group or several elements show.
+    /// X, Y, width, height or rotation: the fields a group or several
+    /// elements show.
     pub fn is_position(self) -> bool {
-        matches!(self, Field::X | Field::Y | Field::Width | Field::Height)
+        matches!(
+            self,
+            Field::X | Field::Y | Field::Width | Field::Height | Field::Rotation
+        )
     }
 
     /// The field's text for a frame and style.
@@ -58,6 +64,7 @@ impl Field {
             Field::Y => number(frame.y),
             Field::Width => number(frame.width),
             Field::Height => number(frame.height),
+            Field::Rotation => format!("{}°", number(frame.rotation)),
             Field::Size => number(style.size),
             Field::LineHeight => match style.line_height {
                 LineHeight::Auto => "Auto".into(),
@@ -84,9 +91,15 @@ pub fn number(value: f32) -> String {
     }
 }
 
-/// Parses what the author typed: a number, optionally followed by "%".
+/// Parses what the author typed: a number, optionally followed by "%" or
+/// "°".
 fn parse(text: &str) -> Option<f32> {
-    let value: f32 = text.trim().trim_end_matches('%').trim().parse().ok()?;
+    let value: f32 = text
+        .trim()
+        .trim_end_matches(['%', '°'])
+        .trim()
+        .parse()
+        .ok()?;
     value.is_finite().then_some(value)
 }
 
@@ -290,13 +303,17 @@ impl EditorView {
         let Some((id, frame, style, _)) = self.selected_text() else {
             self.inspector.shown = None;
             self.inspector.shown_group = self.selection_roots();
-            if let Some(frame) = self.selection_frame() {
+            if let Some(frame) = self.selection_box() {
                 let style = TextStyle::default();
+                let rotation = self.group_rotation_label();
                 for (field, input) in &self.inspector.fields {
                     if !field.is_position() {
                         continue;
                     }
-                    let shown = field.show(&frame, &style);
+                    let shown = match field {
+                        Field::Rotation => rotation.clone(),
+                        _ => field.show(&frame, &style),
+                    };
                     let state = input.read(cx);
                     if !state.focus_handle(cx).is_focused(window) && state.value() != shown.as_str()
                     {
@@ -409,17 +426,64 @@ impl EditorView {
         cx.notify();
     }
 
+    /// What the rotation field shows for a group or several elements: the
+    /// angle of the group, the angle the elements share, or "Mixed".
+    fn group_rotation_label(&self) -> String {
+        let mut angles = self
+            .selection_roots()
+            .into_iter()
+            .filter_map(|id| self.shown_frame(id))
+            .map(|frame| frame.rotation);
+        let Some(first) = angles.next() else {
+            return String::new();
+        };
+        if angles.all(|angle| angle == first) {
+            format!("{}°", number(first))
+        } else {
+            "Mixed".into()
+        }
+    }
+
     /// Commits a position field typed for a group or several elements: they
-    /// move, or scale to the typed size.
+    /// move, scale to the typed size, or each turn to the typed angle around
+    /// its own center.
     fn commit_group_field(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
         let ids = self.inspector.shown_group.clone();
         let frames: Vec<Frame> = ids.iter().filter_map(|id| self.frame_of(*id)).collect();
-        let Some(from) = crate::document::union(&frames) else {
-            return;
+        // The box the fields show: the frame of one element, the union of
+        // several.
+        let from = match frames.as_slice() {
+            [frame] => *frame,
+            frames => match crate::document::union(frames) {
+                Some(frame) => frame,
+                None => return,
+            },
         };
         let input = self.inspector.input(field).clone();
         let typed = input.read(cx).value().to_string();
         let style = TextStyle::default();
+        if field == Field::Rotation {
+            if let Some(value) = parse(&typed) {
+                let rotation = crate::document::normalize_degrees(value);
+                let operations: Vec<Operation> = ids
+                    .iter()
+                    .zip(&frames)
+                    .filter(|(_, frame)| frame.rotation != rotation)
+                    .map(|(id, frame)| Operation::SetFrame {
+                        id: *id,
+                        frame: Frame { rotation, ..*frame },
+                    })
+                    .collect();
+                if !operations.is_empty() {
+                    let selection = self.selection.clone();
+                    self.commit_pruning("Rotate", operations, selection);
+                }
+            }
+            let shown = self.group_rotation_label();
+            input.update(cx, |state, cx| state.set_value(shown, window, cx));
+            cx.notify();
+            return;
+        }
         if let Some(value) = parse(&typed).filter(|_| field.is_position()) {
             let mut to = from;
             match field {
@@ -439,7 +503,7 @@ impl EditorView {
                 self.commit_pruning(label, operations, selection);
             }
         }
-        if let Some(frame) = self.selection_frame() {
+        if let Some(frame) = self.selection_box() {
             let shown = field.show(&frame, &style);
             input.update(cx, |state, cx| state.set_value(shown, window, cx));
         }
@@ -595,6 +659,16 @@ fn field_edit(
             });
             ("Resize", Operation::Batch(operations))
         }
+        Field::Rotation => (
+            "Rotate",
+            Operation::SetFrame {
+                id,
+                frame: Frame {
+                    rotation: crate::document::normalize_degrees(value),
+                    ..*frame
+                },
+            },
+        ),
         Field::Height => {
             let mut operations = Vec::new();
             if sizing != TextSizing::Fixed {
@@ -664,6 +738,7 @@ mod tests {
         assert_eq!(number(-0.001), "-0");
         assert_eq!(parse(" 120 % "), Some(120.));
         assert_eq!(parse("abc"), None);
+        assert_eq!(parse("-45°"), Some(-45.));
     }
 
     #[test]

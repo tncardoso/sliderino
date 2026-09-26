@@ -18,7 +18,7 @@ use crate::text_layout::TextLayout;
 use crate::theme;
 use crate::ui::inspector::{Field, number};
 use crate::ui::widgets::{
-    field, field_icon, field_letter, input_field, section, section_label, segment, segmented,
+    field_icon, field_letter, input_field, section, section_label, segment, segmented,
 };
 
 /// The diagnostics the Design tab shows: those of the selected text, or of
@@ -208,7 +208,7 @@ fn selection_design(editor: &EditorView, cx: &mut Context<EditorView>) -> impl I
     };
     v_flex()
         .child(header(icon, title, subtitle))
-        .child(position_section(editor, 0., cx))
+        .child(position_section(editor, cx))
 }
 
 /// A short name for an element: its name, the start of its text, or
@@ -253,7 +253,7 @@ fn text_design(
             element_name(element),
             sizing_name(text.sizing).into(),
         ))
-        .child(position_section(editor, element.frame.rotation, cx))
+        .child(position_section(editor, cx))
         .child(layout_section(text.sizing, cx))
         .child(text_section(editor, style, text.sizing, cx))
         .child(fill_section(editor, style))
@@ -264,11 +264,7 @@ fn field_row(left: impl IntoElement, right: impl IntoElement) -> impl IntoElemen
     h_flex().gap(px(8.)).child(left).child(right)
 }
 
-fn position_section(
-    editor: &EditorView,
-    rotation: f32,
-    cx: &mut Context<EditorView>,
-) -> impl IntoElement {
+fn position_section(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
     let inputs = &editor.inspector;
     // Horizontal left, center, right, then vertical top, middle, bottom.
     let aligns: [(&'static str, IconName, Option<f32>, Option<f32>); 6] = [
@@ -308,9 +304,9 @@ fn position_section(
             input_field(field_letter("H"), inputs.input(Field::Height)),
         ))
         .child(field_row(
-            field(
+            input_field(
                 field_icon(IconName::RotateCw),
-                format!("{}°", number(rotation)),
+                inputs.input(Field::Rotation),
             ),
             div().flex_1(),
         ))
