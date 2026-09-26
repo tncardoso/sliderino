@@ -16,3 +16,11 @@
 - `sliderino-debug render` makes a PNG image of a slide from a scene file.
 - `sliderino-debug scene` opens a scene file in the editor and can capture
   the slide to a PNG image.
+- Press Esc while you move or resize a text box to cancel the change.
+
+### Fixed
+
+- Moving and resizing a text box is smooth. Before, the editor stopped
+  responding during the drag.
+- The first selection of a text box no longer waits for the system fonts to
+  load.

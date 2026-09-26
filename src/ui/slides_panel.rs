@@ -18,6 +18,7 @@ use crate::ui::canvas::{PaintText, paint_texts};
 const THUMB_WIDTH: f32 = 184.;
 
 pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+    let _span = crate::perf::span("slides_panel");
     let slides: Vec<_> = editor
         .presentation
         .slides
@@ -28,7 +29,7 @@ pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> im
         .into_iter()
         .enumerate()
         .map(|(ix, id)| {
-            let texts = editor.paint_texts(id, cx);
+            let texts = editor.paint_texts(id, false, cx);
             let active = id == editor.current_slide;
             h_flex()
                 .id(("slide", ix))

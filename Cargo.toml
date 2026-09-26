@@ -15,5 +15,14 @@ tiny-skia = "0.11"
 ttf-parser = "0.25"
 unicode-linebreak = "0.1"
 
+[features]
+# Timing spans for the benchmarks in src/ui/perf_tests.rs.
+perf = []
+
 [dev-dependencies]
 gpui-kit = { version = "0.6.6", features = ["test-support"] }
+
+# Optimize the dependencies (GPUI, text shaping) in debug builds: unoptimized,
+# they make the editor lag. Sliderino itself still builds fast.
+[profile.dev.package."*"]
+opt-level = 2

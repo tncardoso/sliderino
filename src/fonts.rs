@@ -32,8 +32,9 @@ pub struct Family {
 static CATALOG: OnceLock<Catalog> = OnceLock::new();
 static BUNDLED: OnceLock<Catalog> = OnceLock::new();
 
-/// The bundled and system fonts. Scanning the system takes a moment, so
-/// [`preload`] starts it in the background at launch.
+/// The bundled and system fonts. Scanning the system takes a moment and
+/// blocks; the editor loads it in the background and reads it with
+/// [`catalog_ready`].
 pub fn catalog() -> &'static Catalog {
     CATALOG.get_or_init(Catalog::load)
 }
@@ -55,10 +56,9 @@ fn bundled_db() -> fontdb::Database {
     db
 }
 
-pub fn preload() {
-    std::thread::spawn(|| {
-        catalog();
-    });
+/// The catalog if it has loaded, without waiting for it.
+pub fn catalog_ready() -> Option<&'static Catalog> {
+    CATALOG.get()
 }
 
 impl Catalog {

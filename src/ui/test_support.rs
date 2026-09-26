@@ -9,8 +9,17 @@ use gpui_kit::{
 };
 
 use crate::editor::EditorView;
+use crate::history::History;
 
 pub fn open(cx: &mut TestAppContext) -> WindowHandle<EditorView> {
+    open_with(cx, crate::document::Presentation::new())
+}
+
+/// Opens the editor on an existing presentation.
+pub fn open_with(
+    cx: &mut TestAppContext,
+    presentation: crate::document::Presentation,
+) -> WindowHandle<EditorView> {
     cx.update(|cx| {
         gpui_kit::init(cx);
         crate::theme::apply(cx);
@@ -18,7 +27,9 @@ pub fn open(cx: &mut TestAppContext) -> WindowHandle<EditorView> {
             .add_fonts(crate::assets::fonts())
             .expect("embedded Inter fonts load");
     });
-    let handle = cx.open_window(size(px(1440.), px(900.)), EditorView::new);
+    let handle = cx.open_window(size(px(1440.), px(900.)), move |window, cx| {
+        EditorView::with_document(presentation, History::default(), window, cx)
+    });
     cx.update_window(handle.into(), |editor, window, cx| {
         // The app focuses the editor when it opens the window.
         let focus = editor

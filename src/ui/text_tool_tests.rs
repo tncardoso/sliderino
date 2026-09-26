@@ -451,3 +451,117 @@ fn a_field_left_by_clicking_another_element_edits_the_first_one(cx: &mut TestApp
     });
     assert_eq!(sizes, (50., 32., Some(second)));
 }
+
+/// Presses at `from` and moves to `to` without releasing.
+fn press_and_move(
+    window: &mut gpui_kit::Window,
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    cx: &mut gpui_kit::App,
+) {
+    use gpui_kit::{InputEvent as _, MouseDownEvent, MouseMoveEvent};
+    for event in [
+        MouseMoveEvent {
+            position: from,
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        }
+        .to_platform_input(),
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: from,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+        .to_platform_input(),
+        MouseMoveEvent {
+            position: to,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::default(),
+        }
+        .to_platform_input(),
+    ] {
+        window.dispatch_event(event, cx);
+        window.render_frame(cx);
+    }
+}
+
+fn release_at(window: &mut gpui_kit::Window, position: Point<Pixels>, cx: &mut gpui_kit::App) {
+    use gpui_kit::{InputEvent as _, MouseUpEvent};
+    window.dispatch_event(
+        MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        }
+        .to_platform_input(),
+        cx,
+    );
+    window.render_frame(cx);
+}
+
+#[gpui_kit::test]
+fn the_document_changes_only_when_a_drag_ends(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let id = create_by_click(cx, handle, 200., 300., "Box");
+    with_window(cx, handle, |window, cx| key(window, "escape", true, cx));
+    let (_, origin, _) = text_of(cx, handle, id);
+    let steps = history(cx, handle).len();
+    let from = at(
+        cx,
+        handle,
+        origin.x + origin.width / 2.,
+        origin.y + origin.height / 2.,
+    );
+    let to = at(
+        cx,
+        handle,
+        origin.x + origin.width / 2. + 400.,
+        origin.y + origin.height / 2. + 50.,
+    );
+
+    with_window(cx, handle, |window, cx| {
+        press_and_move(window, from, to, cx)
+    });
+    let (_, during, _) = text_of(cx, handle, id);
+    assert_eq!(during, origin, "the document waits for the release");
+    let shown = read(cx, handle, |editor| editor.shown_frame(id).unwrap());
+    assert!(
+        shown.x > origin.x + 300.,
+        "the canvas shows the preview: {shown:?}"
+    );
+
+    with_window(cx, handle, |window, cx| release_at(window, to, cx));
+    let (_, after, _) = text_of(cx, handle, id);
+    assert_eq!(after, shown);
+    let steps_after = history(cx, handle);
+    assert_eq!(steps_after.len(), steps + 1);
+    assert_eq!(steps_after.last().map(String::as_str), Some("Move"));
+}
+
+#[gpui_kit::test]
+fn escape_cancels_a_drag(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let id = create_by_click(cx, handle, 200., 300., "Box");
+    with_window(cx, handle, |window, cx| key(window, "escape", true, cx));
+    let (_, origin, sizing) = text_of(cx, handle, id);
+    let steps = history(cx, handle).len();
+
+    // A resize from the right handle, cancelled before the release.
+    let (hx, hy) = Handle::Right.position(&origin);
+    let from = at(cx, handle, hx, hy);
+    let to = at(cx, handle, hx + 300., hy);
+    with_window(cx, handle, |window, cx| {
+        press_and_move(window, from, to, cx);
+        key(window, "escape", true, cx);
+        release_at(window, to, cx);
+    });
+    let (_, after, after_sizing) = text_of(cx, handle, id);
+    assert_eq!((after, after_sizing), (origin, sizing));
+    assert_eq!(history(cx, handle).len(), steps, "no step");
+    let shown = read(cx, handle, |editor| editor.shown_frame(id).unwrap());
+    assert_eq!(shown, origin);
+    assert_eq!(read(cx, handle, |editor| editor.selection), Some(id));
+}

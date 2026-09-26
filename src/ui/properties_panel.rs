@@ -21,9 +21,41 @@ use crate::ui::widgets::{
     field, field_icon, field_letter, input_field, section, section_label, segment, segmented,
 };
 
-pub fn properties_panel(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+/// The diagnostics the Design tab shows: those of the selected text, or of
+/// every text on the slide when nothing is selected. Uses the layouts the
+/// canvas already computed.
+pub fn diagnostics(editor: &mut EditorView) -> Vec<(Severity, String)> {
+    let _span = crate::perf::span("diagnostics");
+    if let Some(id) = editor.selection
+        && let Some(element) = editor.presentation.element(id).cloned()
+    {
+        return editor
+            .layout_of(id)
+            .map(|layout| text_problems(&layout, &element_font(&element)))
+            .unwrap_or_default();
+    }
+    let elements = editor.current_slide().elements.clone();
+    let mut problems = Vec::new();
+    for element in &elements {
+        let name = element_name(element);
+        let Some(layout) = editor.layout_of(element.id) else {
+            continue;
+        };
+        for (severity, message) in text_problems(&layout, &element_font(element)) {
+            problems.push((severity, format!("{name}: {message}")));
+        }
+    }
+    problems
+}
+
+pub fn properties_panel(
+    editor: &EditorView,
+    problems: Vec<(Severity, String)>,
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let _span = crate::perf::span("properties_panel");
     let content = match editor.inspector_tab {
-        0 => design_tab(editor, cx),
+        0 => design_tab(editor, problems, cx),
         2 => history_tab(editor),
         _ => div().into_any_element(),
     };
@@ -58,14 +90,18 @@ pub fn properties_panel(editor: &EditorView, cx: &mut Context<EditorView>) -> im
         )
 }
 
-fn design_tab(editor: &EditorView, cx: &mut Context<EditorView>) -> AnyElement {
+fn design_tab(
+    editor: &EditorView,
+    problems: Vec<(Severity, String)>,
+    cx: &mut Context<EditorView>,
+) -> AnyElement {
     let selected = editor.selection.and_then(|id| {
         let element = editor.presentation.element(id)?;
         element.as_text().map(|_| element)
     });
     match selected {
-        Some(element) => text_design(editor, element, cx).into_any_element(),
-        None => slide_design(editor).into_any_element(),
+        Some(element) => text_design(editor, element, problems, cx).into_any_element(),
+        None => slide_design(editor, problems).into_any_element(),
     }
 }
 
@@ -101,27 +137,12 @@ fn header(icon: IconName, title: String, subtitle: String) -> impl IntoElement {
 }
 
 /// Design tab with nothing selected: the slide and its diagnostics.
-fn slide_design(editor: &EditorView) -> impl IntoElement {
+fn slide_design(editor: &EditorView, problems: Vec<(Severity, String)>) -> impl IntoElement {
     let number = editor
         .presentation
         .index_of(editor.current_slide)
         .map_or(0, |ix| ix + 1);
     let size = editor.presentation.size;
-    let problems: Vec<(Severity, String)> = editor
-        .current_slide()
-        .elements
-        .iter()
-        .flat_map(|element| {
-            let name = element_name(element);
-            editor
-                .presentation
-                .text_layout(element.id)
-                .map(|layout| text_problems(&layout, &element_font(element)))
-                .unwrap_or_default()
-                .into_iter()
-                .map(move |(severity, message)| (severity, format!("{name}: {message}")))
-        })
-        .collect();
     v_flex()
         .child(header(
             IconName::Square,
@@ -171,15 +192,11 @@ fn sizing_name(sizing: TextSizing) -> &'static str {
 fn text_design(
     editor: &EditorView,
     element: &Element,
+    problems: Vec<(Severity, String)>,
     cx: &mut Context<EditorView>,
 ) -> impl IntoElement {
     let text = element.as_text().expect("a text element");
     let style = &text.style;
-    let layout = editor.presentation.text_layout(element.id);
-    let problems = layout
-        .as_ref()
-        .map(|layout| text_problems(layout, &element_font(element)))
-        .unwrap_or_default();
     v_flex()
         .child(header(
             IconName::Type,
@@ -519,7 +536,7 @@ fn fill_section(editor: &EditorView, style: &TextStyle) -> impl IntoElement {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Severity {
+pub enum Severity {
     Warning,
 }
 

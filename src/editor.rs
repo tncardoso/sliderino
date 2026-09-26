@@ -84,43 +84,106 @@ pub enum Drag {
         start: SlidePoint,
         current: SlidePoint,
     },
+    /// Moving an element. The document keeps `origin` until the drag ends;
+    /// the canvas shows `current`.
     Move {
         id: ElementId,
         grab: SlidePoint,
         origin: Frame,
+        current: Frame,
         moved: bool,
     },
+    /// Resizing a text box from a handle. The document keeps `origin` and
+    /// `sizing` until the drag ends; the canvas shows `current` laid out
+    /// with `current_sizing`.
     Resize {
         id: ElementId,
         handle: Handle,
         grab: SlidePoint,
         origin: Frame,
         sizing: TextSizing,
+        current: Frame,
+        current_sizing: TextSizing,
     },
     /// Extending the text selection of the box being edited.
     SelectText { id: ElementId },
 }
 
-/// Text layouts of the presentation's elements, recomputed when the text or
-/// its frame changes.
+/// Text layouts of the presentation's elements. A layout depends on the
+/// text, its sizing mode and the frame size, not on the frame position, so
+/// moving an element reuses its layout.
+///
+/// Each element keeps its [`LAYOUTS_PER_ELEMENT`] most recent layouts: during
+/// a resize the canvas asks for the preview while the panel asks for the
+/// document's layout, and one entry would make them evict each other.
 #[derive(Default)]
 pub struct LayoutCache {
-    entries: HashMap<ElementId, (TextElement, Frame, Arc<TextLayout>)>,
+    entries: HashMap<ElementId, Vec<CachedLayout>>,
+}
+
+const LAYOUTS_PER_ELEMENT: usize = 2;
+
+struct CachedLayout {
+    text: TextElement,
+    width: f32,
+    height: f32,
+    layout: Arc<TextLayout>,
 }
 
 impl LayoutCache {
     pub fn get(&mut self, presentation: &Presentation, id: ElementId) -> Option<Arc<TextLayout>> {
         let element = presentation.element(id)?;
-        let text = element.as_text()?;
-        if let Some((cached_text, frame, layout)) = self.entries.get(&id)
-            && cached_text == text
-            && *frame == element.frame
-        {
-            return Some(layout.clone());
+        let sizing = element.as_text()?.sizing;
+        self.get_for(presentation, id, element.frame, sizing)
+    }
+
+    /// The layout of an element's text in another frame or sizing mode, such
+    /// as the preview of a resize.
+    pub fn get_for(
+        &mut self,
+        presentation: &Presentation,
+        id: ElementId,
+        frame: Frame,
+        sizing: TextSizing,
+    ) -> Option<Arc<TextLayout>> {
+        let text = presentation.element(id)?.as_text()?;
+        // Only a fixed box places its text by its height.
+        let height = if sizing == TextSizing::Fixed {
+            frame.height
+        } else {
+            0.
+        };
+        let cached = self.entries.entry(id).or_default();
+        if let Some(position) = cached.iter().position(|cached| {
+            cached.width == frame.width
+                && cached.height == height
+                && cached.text.sizing == sizing
+                && cached.text.content == text.content
+                && cached.text.style == text.style
+        }) {
+            // Most recently used first.
+            let hit = cached.remove(position);
+            let layout = hit.layout.clone();
+            cached.insert(0, hit);
+            return Some(layout);
         }
-        let layout = Arc::new(presentation.text_layout(id)?);
-        self.entries
-            .insert(id, (text.clone(), element.frame, layout.clone()));
+        let _span = crate::perf::span("layout_cache_miss");
+        let text = TextElement {
+            sizing,
+            ..text.clone()
+        };
+        let font = presentation.fonts.get(&text.style.font)?;
+        let layout = Arc::new(crate::text_layout::layout(&text, &frame, font).ok()?);
+        cached.insert(
+            0,
+            CachedLayout {
+                text,
+                width: frame.width,
+                height,
+                layout: layout.clone(),
+            },
+        );
+        cached.truncate(LAYOUTS_PER_ELEMENT);
         Some(layout)
     }
 }
@@ -181,6 +244,15 @@ impl EditorView {
                 cx.notify();
             }
         });
+        // Scan the fonts off the UI thread, then show them in the pickers.
+        cx.spawn(async move |this, cx| {
+            gpui_kit::AppContext::background_spawn(cx, async {
+                crate::fonts::catalog();
+            })
+            .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
         Self {
             current_slide: presentation.slides[0].id,
             library_tab: 0,
@@ -223,6 +295,77 @@ impl EditorView {
 
     pub fn layout_of(&mut self, id: ElementId) -> Option<Arc<TextLayout>> {
         self.layouts.get(&self.presentation, id)
+    }
+
+    /// The element being moved or resized, with the frame and sizing the
+    /// canvas shows for it.
+    pub fn drag_preview(&self) -> Option<(ElementId, Frame, TextSizing)> {
+        match &self.drag {
+            Some(Drag::Move {
+                id,
+                current,
+                moved: true,
+                ..
+            }) => {
+                let sizing = self.presentation.element(*id)?.as_text()?.sizing;
+                Some((*id, *current, sizing))
+            }
+            Some(Drag::Resize {
+                id,
+                current,
+                current_sizing,
+                ..
+            }) => Some((*id, *current, *current_sizing)),
+            _ => None,
+        }
+    }
+
+    /// The frame the canvas shows for an element: the drag preview while it
+    /// is dragged, else its frame in the document.
+    pub fn shown_frame(&self, id: ElementId) -> Option<Frame> {
+        match self.drag_preview() {
+            Some((dragged, frame, _)) if dragged == id => Some(frame),
+            _ => self.presentation.element(id).map(|element| element.frame),
+        }
+    }
+
+    /// The layout the canvas shows for an element; see [`Self::shown_frame`].
+    pub fn shown_layout(&mut self, id: ElementId) -> Option<Arc<TextLayout>> {
+        match self.drag_preview() {
+            Some((dragged, frame, sizing)) if dragged == id => {
+                self.layouts.get_for(&self.presentation, id, frame, sizing)
+            }
+            _ => self.layout_of(id),
+        }
+    }
+
+    /// Fits a previewed frame to its text like [`Presentation::apply`] does:
+    /// an auto-sized box takes the size of its content.
+    pub fn fit_preview(&mut self, id: ElementId, frame: Frame, sizing: TextSizing) -> Frame {
+        if sizing == TextSizing::Fixed {
+            return frame;
+        }
+        let Some(layout) = self.layouts.get_for(&self.presentation, id, frame, sizing) else {
+            return frame;
+        };
+        let mut fitted = frame;
+        if sizing == TextSizing::AutoWidth {
+            fitted.width = layout.content_width;
+        }
+        fitted.height = layout.content_height;
+        fitted
+    }
+
+    /// Ends a move or resize without changing the document. Returns false
+    /// when no drag was in progress.
+    pub fn cancel_drag(&mut self) -> bool {
+        self.guides.clear();
+        self.drag.take().is_some_and(|drag| {
+            matches!(
+                drag,
+                Drag::Move { .. } | Drag::Resize { .. } | Drag::Create { .. }
+            )
+        })
     }
 
     /// Applies an edit and records it as one undo step, leaving `select`
@@ -605,6 +748,17 @@ impl EditorView {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
+        if keystroke.key == "escape"
+            && matches!(
+                self.drag,
+                Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Create { .. })
+            )
+        {
+            self.cancel_drag();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // Keys typed into the inspector's fields belong to them.
         let focused = self.focus.is_focused(window);
         if focused && self.text_edit.is_some() {
@@ -764,8 +918,10 @@ pub fn word_end(text: &str, index: usize) -> usize {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::perf::span("render");
         self.sync_inspector(window, cx);
         let scene = self.canvas_scene(cx);
+        let problems = crate::ui::properties_panel::diagnostics(self);
         v_flex()
             .id("editor")
             .track_focus(&self.focus)
@@ -784,7 +940,7 @@ impl Render for EditorView {
                     .items_start()
                     .child(slides_panel(self, cx))
                     .child(canvas(self, scene, cx))
-                    .child(properties_panel(self, cx)),
+                    .child(properties_panel(self, problems, cx)),
             )
     }
 }
@@ -792,6 +948,41 @@ impl Render for EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_an_element_reuses_its_layout() {
+        let mut presentation = crate::document::tests::with_inter();
+        let id = crate::document::tests::add_text(
+            &mut presentation,
+            "Hello",
+            TextSizing::AutoWidth,
+            Frame::default(),
+        );
+        let mut cache = LayoutCache::default();
+        let before = cache.get(&presentation, id).unwrap();
+        let frame = Frame {
+            x: 300.,
+            y: 200.,
+            ..presentation.element(id).unwrap().frame
+        };
+        presentation
+            .apply(Operation::SetFrame { id, frame })
+            .unwrap();
+        let after = cache.get(&presentation, id).unwrap();
+        assert!(Arc::ptr_eq(&before, &after), "the move reused the layout");
+
+        let wider = Frame {
+            width: frame.width + 100.,
+            ..frame
+        };
+        let resized = cache
+            .get_for(&presentation, id, wider, TextSizing::AutoHeight)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&after, &resized), "a new size lays out again");
+        // The document's layout is still cached next to the preview's.
+        let again = cache.get(&presentation, id).unwrap();
+        assert!(Arc::ptr_eq(&after, &again));
+    }
 
     #[test]
     fn word_boundaries_skip_spaces_and_punctuation() {

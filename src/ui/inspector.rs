@@ -264,6 +264,7 @@ impl EditorView {
     /// Updates the fields that are not being typed into to show the selected
     /// text. Runs before every render.
     pub fn sync_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _span = crate::perf::span("sync_inspector");
         // A field left for the canvas renders before it reports the blur:
         // commit what was typed before showing the new selection over it.
         for field in self.inspector.dirty.clone() {
@@ -282,6 +283,8 @@ impl EditorView {
             return;
         };
         self.inspector.shown = Some(id);
+        // While the element is dragged, the fields follow the preview.
+        let frame = self.shown_frame(id).unwrap_or(frame);
         for (field, input) in &self.inspector.fields {
             let shown = field.show(&frame, &style);
             let state = input.read(cx);
@@ -303,7 +306,11 @@ impl EditorView {
                 .update(cx, |state, cx| state.set_value(color, window, cx));
         }
 
-        let catalog = fonts::catalog();
+        // The fonts load in the background; the pickers fill in when they
+        // are ready, so the editor never waits for them.
+        let Some(catalog) = fonts::catalog_ready() else {
+            return;
+        };
         if !self.inspector.families_loaded {
             self.inspector.families_loaded = true;
             let names: Vec<SharedString> = catalog

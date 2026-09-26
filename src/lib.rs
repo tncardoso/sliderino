@@ -12,6 +12,7 @@ pub mod fonts;
 pub mod history;
 pub mod mock;
 pub mod operation;
+pub mod perf;
 pub mod render;
 pub mod script;
 pub mod shortcuts;

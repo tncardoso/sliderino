@@ -1,0 +1,35 @@
+[
+  {"op": "add_font", "face": {"family": "Inter", "weight": 400}},
+  {"op": "add_font", "face": {"family": "Inter", "weight": 600}},
+  {"op": "add_font", "face": {"family": "Inter", "weight": 400, "italic": true}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 1, "frame": {"x": 120, "y": 80, "width": 900},
+    "text": {"content": "Activation grew faster than signups", "sizing": "auto_height",
+             "style": {"font": {"family": "Inter", "weight": 600}, "size": 72,
+                       "line_height": {"percent": 110}}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 2, "frame": {"x": 120, "y": 300},
+    "text": {"content": "Auto width grows with its text", "sizing": "auto_width",
+             "style": {"size": 32, "underline": true}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 3, "frame": {"x": 120, "y": 400, "width": 420, "height": 90},
+    "text": {"content": "This fixed box holds more text than fits, so it runs past its bottom edge.",
+             "sizing": "fixed", "style": {"size": 28}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 4, "frame": {"x": 700, "y": 400, "width": 480},
+    "text": {"content": "Justified paragraphs stretch every line but the last one to the width of the box.\nA second paragraph follows the spacing.",
+             "sizing": "auto_height",
+             "style": {"font": {"family": "Inter", "weight": 400, "italic": true}, "size": 24,
+                       "align": "justify", "paragraph_spacing": 16, "color": "#1F4BFF"}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 5, "frame": {"x": 120, "y": 720},
+    "text": {"content": "growth · q3", "sizing": "auto_width",
+             "style": {"size": 20, "letter_spacing": 12, "case": "upper", "color": "6B6B6B"}}}},
+
+  {"op": "set_text_style", "id": 2, "patch": {"strikethrough": true}}
+]

@@ -1,5 +1,7 @@
 pub mod canvas;
 pub mod inspector;
+#[cfg(all(test, feature = "perf"))]
+mod perf_tests;
 pub mod properties_panel;
 pub mod slides_panel;
 #[cfg(test)]

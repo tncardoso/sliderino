@@ -307,6 +307,7 @@ fn run(
     fixed_height: Option<f32>,
     font: &FontData,
 ) -> Result<TextLayout, LayoutError> {
+    let _span = crate::perf::span("text_layout");
     let face = rustybuzz::Face::from_slice(&font.bytes, font.index).ok_or(LayoutError)?;
     let metrics = FontMetrics::of(&face);
     let scale = style.size / metrics.units_per_em;

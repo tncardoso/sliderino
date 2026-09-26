@@ -11,7 +11,7 @@ use crate::assets::{self, AppAssets};
 use crate::document::Presentation;
 use crate::editor::EditorView;
 use crate::history::History;
-use crate::{fonts, theme};
+use crate::theme;
 
 /// The GPUI application with Sliderino's embedded assets.
 pub fn application() -> Application {
@@ -26,7 +26,6 @@ pub fn init(cx: &mut App) {
         .add_fonts(assets::fonts())
         .expect("embedded Inter fonts load");
     theme::apply(cx);
-    fonts::preload();
 }
 
 /// Opens an editor window on `presentation` with its undo `history`, then

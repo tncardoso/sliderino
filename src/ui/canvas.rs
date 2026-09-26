@@ -78,17 +78,27 @@ pub struct CanvasScene {
 }
 
 impl EditorView {
-    /// Text elements of a slide, laid out and ready to paint.
-    pub fn paint_texts(&mut self, slide: SlideId, cx: &App) -> Vec<PaintText> {
+    /// Text elements of a slide, laid out and ready to paint. With
+    /// `preview`, a dragged element shows its drag preview; without, the
+    /// document (the thumbnails change when the drag ends).
+    pub fn paint_texts(&mut self, slide: SlideId, preview: bool, cx: &App) -> Vec<PaintText> {
         let Some(slide) = self.presentation.slide(slide) else {
             return Vec::new();
         };
+        let dragged = self.drag_preview().filter(|_| preview);
         let mut texts = Vec::new();
         for element in &slide.elements {
             let Some(text) = element.as_text() else {
                 continue;
             };
-            let Some(layout) = self.layouts.get(&self.presentation, element.id) else {
+            let (frame, sizing) = match dragged {
+                Some((id, frame, sizing)) if id == element.id => (frame, sizing),
+                _ => (element.frame, text.sizing),
+            };
+            let Some(layout) = self
+                .layouts
+                .get_for(&self.presentation, element.id, frame, sizing)
+            else {
                 continue;
             };
             let style = &text.style;
@@ -99,7 +109,7 @@ impl EditorView {
                 .and_then(|data| self.fonts.font_id(&style.font, data, cx));
             let color: Hsla = gpui_kit::rgb(style.color.0).into();
             texts.push(PaintText {
-                frame: element.frame,
+                frame,
                 layout,
                 font_id,
                 color: color.opacity(style.opacity),
@@ -111,7 +121,8 @@ impl EditorView {
     }
 
     pub fn canvas_scene(&mut self, cx: &App) -> CanvasScene {
-        let texts = self.paint_texts(self.current_slide, cx);
+        let _span = crate::perf::span("canvas_scene");
+        let texts = self.paint_texts(self.current_slide, true, cx);
         let mut scene = CanvasScene {
             texts,
             selection: None,
@@ -124,15 +135,15 @@ impl EditorView {
             editing: self.text_edit.is_some(),
         };
         if let Some(id) = self.selection
-            && let Some(frame) = self.frame_of(id)
+            && let Some(frame) = self.shown_frame(id)
         {
             let overflow = self
-                .layout_of(id)
+                .shown_layout(id)
                 .is_some_and(|layout| layout.overflow() > 0.);
             scene.selection = Some((frame, self.text_edit.is_none(), overflow));
             if self.text_edit.is_none() {
                 // Below the text that overflows the box, so it stays readable.
-                let bottom = self.layout_of(id).map_or(0., |layout| {
+                let bottom = self.shown_layout(id).map_or(0., |layout| {
                     layout
                         .lines
                         .last()
@@ -284,6 +295,8 @@ impl EditorView {
                 grab: at,
                 origin: element.frame,
                 sizing: text.sizing,
+                current: element.frame,
+                current_sizing: text.sizing,
             });
             return;
         }
@@ -294,10 +307,12 @@ impl EditorView {
             }
             Some(id) => {
                 self.selection = Some(id);
+                let origin = self.frame_of(id).expect("the hit element exists");
                 self.drag = Some(Drag::Move {
                     id,
                     grab: at,
-                    origin: self.frame_of(id).expect("the hit element exists"),
+                    origin,
+                    current: origin,
                     moved: false,
                 });
             }
@@ -351,6 +366,7 @@ impl EditorView {
     }
 
     fn on_pointer_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let _span = crate::perf::span("pointer_move");
         if let Some((button, last)) = self.pan_drag {
             if let Some(camera) = &mut self.camera {
                 camera.pan_by(event.position - last);
@@ -377,6 +393,7 @@ impl EditorView {
                 grab,
                 origin,
                 moved,
+                ..
             } => {
                 let distance = (at.x - grab.x).hypot(at.y - grab.y) * camera.zoom;
                 if !moved && distance < DRAG_START {
@@ -389,16 +406,17 @@ impl EditorView {
                 };
                 self.guides.clear();
                 if snap {
+                    let _span = crate::perf::span("snap");
                     let targets = self.snap_targets(id);
                     let baseline = self.layout_of(id).map(|layout| layout.first_baseline());
                     (frame, self.guides) = snap_move(&frame, baseline, &targets, threshold);
                 }
-                // Live preview; the step is recorded when the drag ends.
-                let _ = self.presentation.apply(Operation::SetFrame { id, frame });
+                // The document changes once, when the drag ends.
                 self.drag = Some(Drag::Move {
                     id,
                     grab,
                     origin,
+                    current: frame,
                     moved: true,
                 });
             }
@@ -408,6 +426,7 @@ impl EditorView {
                 grab,
                 origin,
                 sizing,
+                ..
             } => {
                 let mode = ResizeMode {
                     keep_ratio: event.modifiers.shift,
@@ -419,13 +438,17 @@ impl EditorView {
                     let targets = self.snap_targets(id);
                     (frame, self.guides) = snap_resize(&frame, handle, &targets, threshold);
                 }
-                let _ = self.presentation.apply(Operation::Batch(vec![
-                    Operation::SetTextSizing {
-                        id,
-                        sizing: resized_sizing(sizing, handle),
-                    },
-                    Operation::SetFrame { id, frame },
-                ]));
+                let current_sizing = resized_sizing(sizing, handle);
+                let current = self.fit_preview(id, frame, current_sizing);
+                self.drag = Some(Drag::Resize {
+                    id,
+                    handle,
+                    grab,
+                    origin,
+                    sizing,
+                    current,
+                    current_sizing,
+                });
             }
             Drag::SelectText { id } => {
                 if let (Some(layout), Some(frame)) = (self.layout_of(id), self.frame_of(id)) {
@@ -477,32 +500,36 @@ impl EditorView {
             Drag::Move {
                 id,
                 origin,
+                current,
                 moved: true,
                 ..
             } => {
-                self.history.record(
-                    "Move",
-                    Operation::SetFrame { id, frame: origin },
-                    selection,
-                    selection,
-                );
+                if current != origin {
+                    self.commit(
+                        "Move",
+                        Operation::SetFrame { id, frame: current },
+                        selection,
+                    );
+                }
             }
             Drag::Resize {
-                id, origin, sizing, ..
+                id,
+                origin,
+                sizing,
+                current,
+                current_sizing,
+                ..
             } => {
-                let current = self
-                    .presentation
-                    .element(id)
-                    .and_then(|element| Some((element.frame, element.as_text()?.sizing)));
-                if let Some((frame, now)) = current
-                    && (frame != origin || now != sizing)
-                {
-                    let mut undo = vec![Operation::SetFrame { id, frame: origin }];
-                    if now != sizing {
-                        undo.push(Operation::SetTextSizing { id, sizing });
+                if current != origin || current_sizing != sizing {
+                    let mut operations = Vec::new();
+                    if current_sizing != sizing {
+                        operations.push(Operation::SetTextSizing {
+                            id,
+                            sizing: current_sizing,
+                        });
                     }
-                    self.history
-                        .record("Resize", Operation::Batch(undo), selection, selection);
+                    operations.push(Operation::SetFrame { id, frame: current });
+                    self.commit("Resize", Operation::Batch(operations), selection);
                 }
             }
             Drag::Move { .. } | Drag::SelectText { .. } => {}
@@ -657,6 +684,7 @@ fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
 /// Paints text elements with the slide's top-left corner at `origin`,
 /// scaled by `zoom`. Shared by the canvas and the slide thumbnails.
 pub fn paint_texts(texts: &[PaintText], origin: Point<Pixels>, zoom: f32, window: &mut Window) {
+    let _span = crate::perf::span("paint_glyphs");
     let at = |x: f32, y: f32| origin + point(px(x * zoom), px(y * zoom));
     for text in texts {
         let Some(font_id) = text.font_id else {

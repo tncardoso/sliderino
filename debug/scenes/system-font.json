@@ -1,0 +1,7 @@
+[
+  {"op": "add_font", "face": {"family": "Droid Serif", "weight": 400}},
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 1, "frame": {"x": 120, "y": 120, "width": 800},
+    "text": {"content": "An installed font, embedded when the scene uses it.", "sizing": "auto_height",
+             "style": {"font": {"family": "Droid Serif", "weight": 400}, "size": 56}}}}
+]

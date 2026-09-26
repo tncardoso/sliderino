@@ -428,6 +428,7 @@ impl Presentation {
 
     /// Updates the frame of an auto-sized text box to fit its content.
     fn fit(&mut self, id: ElementId) -> Result<(), ApplyError> {
+        let _span = crate::perf::span("fit");
         let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
         let Some(text) = element.as_text() else {
             return Ok(());
@@ -528,7 +529,11 @@ impl Presentation {
                 check_frame(&frame)?;
                 let element = self.element_mut(id)?;
                 let old = std::mem::replace(&mut element.frame, frame);
-                self.fit(id)?;
+                // A frame is always fitted to its text, so a move alone
+                // cannot change the size the text needs.
+                if old.width != frame.width || old.height != frame.height {
+                    self.fit(id)?;
+                }
                 Ok(Operation::SetFrame { id, frame: old })
             }
             Operation::SetTextSizing { id, sizing } => {
@@ -1032,6 +1037,29 @@ pub(crate) mod tests {
             ]))
             .unwrap();
         assert_eq!(presentation.element(id).unwrap().frame.height, 10.);
+    }
+
+    #[test]
+    fn moving_an_auto_sized_box_keeps_its_size() {
+        let mut presentation = with_inter();
+        let id = add_text(
+            &mut presentation,
+            "Hello",
+            TextSizing::AutoWidth,
+            Frame::default(),
+        );
+        let fitted = presentation.element(id).unwrap().frame;
+        let moved = Frame {
+            x: 500.,
+            y: 40.,
+            ..fitted
+        };
+        let undo = presentation
+            .apply(Operation::SetFrame { id, frame: moved })
+            .unwrap();
+        assert_eq!(presentation.element(id).unwrap().frame, moved);
+        presentation.apply(undo).unwrap();
+        assert_eq!(presentation.element(id).unwrap().frame, fitted);
     }
 
     #[test]
