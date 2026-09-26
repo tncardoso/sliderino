@@ -234,7 +234,11 @@ impl Capture {
                     editor.zoom_to_fit();
                     cx.notify();
                 }
-                editor.camera.map(|_| size)
+                // A capture waits for the images to be decoded.
+                editor
+                    .camera
+                    .filter(|_| !editor.images_loading())
+                    .map(|_| size)
             })
             .ok()
             .flatten();

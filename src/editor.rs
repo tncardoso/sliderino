@@ -897,6 +897,12 @@ impl EditorView {
         }
     }
 
+    /// Whether images the canvas or the thumbnails draw are still being
+    /// decoded.
+    pub fn images_loading(&self) -> bool {
+        !self.images_pending.is_empty() || !self.images_wanted.is_empty()
+    }
+
     /// Decodes the images asked for since the last render, off the UI
     /// thread.
     fn load_images(&mut self, cx: &mut Context<Self>) {

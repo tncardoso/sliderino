@@ -58,7 +58,7 @@ The error data lists the instances.
 | --- | --- |
 | `list_instances` | List the open editors. |
 | `open_editor` | Start an editor and wait until it accepts calls. |
-| `get_basic_info` | Get the revision, the slides, the fonts and the undo state. |
+| `get_basic_info` | Get the revision, the slides, the fonts, the images and the undo state. |
 | `get_selection` | Get the slide, the list of elements and the text that the person selected. |
 | `get_slide` | Get the elements of a slide in paint order. |
 | `get_elements` | Get elements by id, with the text layout and the overflow. |
@@ -235,6 +235,38 @@ Use `set_shape_style` to change the style. Give only the fields to change:
   removes the stroke of a rectangle or an ellipse.
 - A field that the shape does not have makes the operation fail. For
   example, a line has no `fill`.
+
+## Images
+
+A presentation holds its images. Add an image with `add_image`, then use it
+as the fill of a rectangle or an ellipse:
+
+```json
+[
+  {"op": "add_image", "id": "$logo", "path": "/home/me/logo.png"},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 100, "y": 100, "width": 320, "height": 180},
+    "rectangle": {"corner_radius": 12, "fill": {"image": {"id": "$logo", "fit": "cover"}}}}}
+]
+```
+
+- Sliderino supports PNG and JPEG images. An image can have at most 16384
+  pixels on a side and 64 MiB.
+- Give `path` or `data`. The CLI and the MCP server read the file of `path`
+  and send its bytes to the editor. A relative path starts from the folder
+  where the client runs. `data` is the file in base64.
+- If the presentation already holds the same bytes, `add_image` does not add
+  them again. The reference names the image that is already there.
+- An image fill is `{"image": {"id", "fit", "opacity"}}`. `fit` is `cover`
+  (the default: the image covers the shape and the parts outside are cut
+  off), `contain` (all of the image shows in the shape) or `stretch` (the
+  image fills the frame and its proportions change).
+- A JPEG keeps its EXIF orientation. `width` and `height` in
+  `get_basic_info` are the size of the upright image. Use them to give the
+  frame the proportions of the image.
+- `remove_image` removes an image that no fill uses. An image that a fill
+  uses stays in the presentation after you delete the element, so that undo
+  can restore the element.
 
 ## Rotation
 

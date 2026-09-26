@@ -76,6 +76,8 @@ the same format (see `agent-api.md`).
 | `replace_text` | `id`, `range` (`{"start": 0, "end": 5}`, in bytes), `text` |
 | `add_font` | `face` |
 | `remove_font` | `face` |
+| `add_image` | `id` (optional), `path` (from the folder of the scene) or `data` (base64) |
+| `remove_image` | `id` |
 | `batch` | `ops` (a list of operations; all apply or none apply) |
 
 Rules:
@@ -106,4 +108,8 @@ Rules:
 - If an operation fails, the tool stops and shows the number of the
   operation (from 0).
 
-The folder `debug/scenes` has examples.
+The folder `debug/scenes` has examples: `shapes.json` shows the shapes,
+fills, strokes and arrowheads, and `images.json` shows image fills.
+
+The `scene` command waits until the editor decodes all images before it
+captures the slide.

@@ -1413,7 +1413,7 @@ fn paint_item(
 ) {
     match item {
         PaintItem::Text(text) => paint_text(text, origin, zoom, raster_turned, window),
-        PaintItem::Shape(shape) => paint_shape(shape, origin, zoom, window),
+        PaintItem::Shape(shape) => paint_shape(shape, origin, zoom, raster_turned, window),
     }
 }
 
@@ -1990,7 +1990,7 @@ fn content_layer(
                 }
             }
             if let Some(ghost) = &scene.ghost {
-                paint_shape(ghost, slide.origin, zoom, window);
+                paint_shape(ghost, slide.origin, zoom, false, window);
                 outline_turned(
                     window,
                     &ghost.element.frame,

@@ -1,0 +1,23 @@
+[
+  {"op": "add_image", "id": "$landscape", "path": "assets/landscape.png"},
+  {"op": "add_image", "id": "$rotated", "path": "assets/rotated.jpg"},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 80, "y": 80, "width": 480, "height": 320},
+    "rectangle": {"fill": {"image": {"id": "$landscape"}}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 640, "y": 80, "width": 320, "height": 320},
+    "rectangle": {"corner_radius": 40, "fill": {"image": {"id": "$landscape", "fit": "cover"}},
+                  "stroke": {"width": 4}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 1040, "y": 80, "width": 320, "height": 320},
+    "rectangle": {"fill": {"image": {"id": "$landscape", "fit": "contain"}},
+                  "stroke": {"width": 2, "dash": "dashed"}}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 80, "y": 480, "width": 320, "height": 320, "rotation": 15},
+    "ellipse": {"fill": {"image": {"id": "$landscape", "fit": "cover"}}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 640, "y": 480, "width": 200, "height": 300},
+    "rectangle": {"fill": {"image": {"id": "$rotated", "fit": "stretch"}}}}}
+]

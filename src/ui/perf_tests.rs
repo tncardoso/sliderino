@@ -301,3 +301,50 @@ fn bench_catalog_load() {
         start.elapsed().as_secs_f64() * 1e3
     );
 }
+
+/// 200 shapes of every kind and fill, some turned, and a copy of the slide
+/// for the thumbnails.
+fn shape_scene() -> Presentation {
+    let fills = [
+        r#"{"solid": {"color": "1F4BFF"}}"#,
+        r#"{"linear_gradient": {"angle": 90, "stops": [
+            {"position": 0, "color": "1F4BFF"}, {"position": 1, "color": "7FD4FF"}]}}"#,
+        r#"{"linear_gradient": {"angle": 30, "stops": [
+            {"position": 0, "color": "F2376B"}, {"position": 1, "color": "FFD166"}]}}"#,
+        r#"{"radial_gradient": {"stops": [
+            {"position": 0, "color": "FFFFFF"}, {"position": 1, "color": "F2376B"}]}}"#,
+    ];
+    let mut ops = Vec::new();
+    for ix in 0..200 {
+        let (col, row) = (ix % 20, ix / 20);
+        let (x, y) = (20 + col * 78, 20 + row * 86);
+        let rotation = if ix % 5 == 0 { 20 } else { 0 };
+        let fill = fills[ix % fills.len()];
+        let kind = match ix % 3 {
+            0 => format!(
+                r#""rectangle": {{"corner_radius": 8, "fill": {fill},
+                    "stroke": {{"width": 2, "dash": "dashed"}}}}"#
+            ),
+            1 => format!(r#""ellipse": {{"fill": {fill}, "stroke": {{"width": 2}}}}"#),
+            _ => r#""line": {"stroke": {"width": 3}, "end": "triangle"}"#.to_string(),
+        };
+        ops.push(format!(
+            r#"{{"op": "add_element", "slide": 1, "element": {{"id": {id},
+                "frame": {{"x": {x}, "y": {y}, "width": 64, "height": 64,
+                           "rotation": {rotation}}}, {kind}}}}}"#,
+            id = ix + 1,
+        ));
+    }
+    let json = format!("[{}]", ops.join(","));
+    let mut presentation = Presentation::new();
+    script::apply(&mut presentation, script::parse(&json).unwrap()).unwrap();
+    copy_slide(&mut presentation, 1);
+    presentation
+}
+
+#[gpui_kit::test]
+#[ignore = "benchmark: run with --features perf -- --ignored --nocapture"]
+fn bench_drag_shapes(cx: &mut TestAppContext) {
+    // Moving one shape repaints the others from the cached paths and images.
+    bench_move(cx, shape_scene(), "move, 200 shapes");
+}

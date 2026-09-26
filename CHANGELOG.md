@@ -56,10 +56,31 @@
   angle is the final angle, so the same operation gives the same result each
   time. `get_elements` and `find_elements` give the `bounds` of rotated
   elements.
+- Rectangles, ellipses and lines. Pick a tool and drag on the slide, or
+  click to add a shape of the default size. Hold Shift to draw a square, a
+  circle or a line at a multiple of 45°, and Alt to draw from the center.
+  Drag an end of a selected line to move it.
+- Shapes have a fill: a color, a linear or radial gradient with up to 10
+  colors, or an image. They have a stroke with a color, a width and a solid,
+  dashed or dotted style. Rectangles can have round corners, and lines can
+  have arrowheads in three sizes at each end.
+- Select several shapes to change their style together. The Design tab
+  shows "Mixed" for a value that differs.
+- Opacity for all elements, in the position section of the Design tab. The
+  opacity of a group applies to all its elements.
+- Images. Click the Image button, drop PNG or JPEG files on the slide, or
+  paste an image. The image goes into the presentation, so the presentation
+  opens on another computer with it. Choose Image as the fill of a shape to
+  show an image in it, and choose how it fits: cover, contain or stretch.
+- Agents can add shapes and images with `add_element`, `add_image`,
+  `set_shape_style` and `set_line_points`. See "Shapes" and "Images" in
+  `docs/agent-api.md`.
 
 ### Changed
 
 - The agent tool `get_selection` gives the selected elements as a list.
+- Text opacity is now the opacity of the element. Agents set it with the
+  `opacity` of `set_layer`, not with the text style.
 
 ### Fixed
 

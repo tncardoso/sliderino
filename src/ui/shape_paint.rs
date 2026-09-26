@@ -8,6 +8,7 @@
 //! renderer as cached images, drawn at a zoom rounded up to a power of √2
 //! so that a zoom gesture does not render them again at every frame.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::{
@@ -15,7 +16,7 @@ use gpui_kit::{
     linear_color_stop, linear_gradient, point, px, size,
 };
 
-use crate::document::{Element, ElementKind, Fill, Frame, Rgb};
+use crate::document::{Element, ElementId, ElementKind, Fill, Frame, Rgb};
 use crate::render::{self, Pixmap};
 use crate::shape::{self, Head, Seg};
 
@@ -69,48 +70,58 @@ struct RasterKey {
     image: usize,
 }
 
-enum Entry {
-    Paths(PathKey, Box<ShapePaths>),
-    /// The image and the area it covers, in slide units from the center of
-    /// the frame.
-    Raster(RasterKey, Arc<RenderImage>, Frame),
-}
+/// Where a cache entry lives: the element, the zoom it is drawn at and
+/// whether the image holds the whole shape, so that the canvas and the
+/// thumbnails keep their own entries.
+type Slot = (ElementId, u32, bool);
 
+/// Tessellations and rendered fills of shapes. A slot holds the last one
+/// made for it; its key tells whether it still fits the shape.
 #[derive(Default)]
 struct ShapeCache {
-    entries: Vec<(Entry, u64)>,
+    paths: HashMap<Slot, (PathKey, Box<ShapePaths>, u64)>,
+    /// The image and the area it covers, in slide units from the center of
+    /// the frame.
+    rasters: HashMap<Slot, (RasterKey, Arc<RenderImage>, Frame, u64)>,
+    /// Counts the calls to [`paint_shape`]; entries unused for
+    /// [`CACHE_KEEP`] calls go when a map grows past [`CACHE_ENTRIES`].
     clock: u64,
 }
 
-const CACHE_ENTRIES: usize = 512;
-const CACHE_KEEP: u64 = 4096;
+const CACHE_ENTRIES: usize = 2048;
+const CACHE_KEEP: u64 = 8192;
 
 thread_local! {
     static CACHE: std::cell::RefCell<ShapeCache> = std::cell::RefCell::default();
 }
 
 impl ShapeCache {
-    /// Makes room for one entry; returns the images that leave.
-    fn make_room(&mut self) -> Vec<Arc<RenderImage>> {
-        if self.entries.len() < CACHE_ENTRIES {
-            return Vec::new();
-        }
+    /// Drops old entries when a map is full; returns the images that leave.
+    fn trim(&mut self) -> Vec<Arc<RenderImage>> {
         let clock = self.clock;
-        let (kept, old): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entries)
-            .into_iter()
-            .partition(|(_, used)| clock - used < CACHE_KEEP);
-        self.entries = kept;
-        let mut evicted = old;
-        if self.entries.len() >= CACHE_ENTRIES {
-            evicted.append(&mut self.entries);
+        let recent = |used: u64| clock - used < CACHE_KEEP;
+        if self.paths.len() > CACHE_ENTRIES {
+            self.paths.retain(|_, (_, _, used)| recent(*used));
+            if self.paths.len() > CACHE_ENTRIES {
+                self.paths.clear();
+            }
+        }
+        let mut evicted = Vec::new();
+        if self.rasters.len() > CACHE_ENTRIES {
+            let old: Vec<Slot> = self
+                .rasters
+                .iter()
+                .filter(|(_, (_, _, _, used))| !recent(*used))
+                .map(|(slot, _)| *slot)
+                .collect();
+            for slot in old {
+                evicted.extend(self.rasters.remove(&slot).map(|entry| entry.1));
+            }
+            if self.rasters.len() > CACHE_ENTRIES {
+                evicted.extend(self.rasters.drain().map(|(_, entry)| entry.1));
+            }
         }
         evicted
-            .into_iter()
-            .filter_map(|(entry, _)| match entry {
-                Entry::Raster(_, image, _) => Some(image),
-                Entry::Paths(..) => None,
-            })
-            .collect()
     }
 }
 
@@ -275,14 +286,19 @@ const MAX_RASTER: f32 = 4096.;
 
 /// Renders the fill of a shape at a scale bucket, in slide units from the
 /// center of its frame.
-fn rasterize_fill(shape: &PaintShape, scale: f32) -> Option<(Arc<RenderImage>, Frame)> {
+/// Renders the fill of a shape, or with `whole` the whole shape, at
+/// `scale` device pixels per slide unit, in slide units from the center of
+/// its frame.
+fn rasterize(shape: &PaintShape, scale: f32, whole: bool) -> Option<(Arc<RenderImage>, Frame)> {
     let _span = crate::perf::span("rasterize_shape");
     let element = &shape.element;
     let mut fill_only = element.clone();
-    match &mut fill_only.kind {
-        ElementKind::Rectangle(shape) => shape.stroke = None,
-        ElementKind::Ellipse(shape) => shape.stroke = None,
-        _ => return None,
+    if !whole {
+        match &mut fill_only.kind {
+            ElementKind::Rectangle(shape) => shape.stroke = None,
+            ElementKind::Ellipse(shape) => shape.stroke = None,
+            _ => return None,
+        }
     }
     let bounds = fill_only.frame.bounds();
     let largest = bounds.width.max(bounds.height).max(1.);
@@ -302,13 +318,25 @@ fn rasterize_fill(shape: &PaintShape, scale: f32) -> Option<(Arc<RenderImage>, F
 }
 
 /// Paints one shape. `origin` is the window position of the slide's
-/// top-left corner.
-pub fn paint_shape(shape: &PaintShape, origin: Point<Pixels>, zoom: f32, window: &mut Window) {
+/// top-left corner. With `raster` (the thumbnails, which draw every slide
+/// at every frame), the whole shape is one cached image at the exact zoom:
+/// one image costs less to paint than its paths.
+pub fn paint_shape(
+    shape: &PaintShape,
+    origin: Point<Pixels>,
+    zoom: f32,
+    raster: bool,
+    window: &mut Window,
+) {
     let _span = crate::perf::span("paint_shape");
     let element = &shape.element;
     let frame = element.frame;
     let (cx, cy) = frame.center();
     let center = origin + point(px(cx * zoom), px(cy * zoom));
+    if raster {
+        paint_whole_raster(shape, center, zoom, window);
+        return;
+    }
     let fill = element.kind.fill();
     let native = fill.is_none_or(|fill| native_fill(fill, frame.rotation));
     let path_key = PathKey {
@@ -331,53 +359,39 @@ pub fn paint_shape(shape: &PaintShape, origin: Point<Pixels>, zoom: f32, window:
             .map_or(0, |image| Arc::as_ptr(image) as usize),
     });
 
+    let slot = (element.id, zoom.to_bits(), false);
     let mut evicted = Vec::new();
     let (paths, raster) = CACHE.with_borrow_mut(|cache| {
         cache.clock += 1;
         let clock = cache.clock;
-        let mut paths = None;
-        let found = cache
-            .entries
-            .iter_mut()
-            .find_map(|(entry, used)| match entry {
-                Entry::Paths(key, paths) if *key == path_key => {
-                    *used = clock;
-                    Some(paths)
-                }
-                _ => None,
-            });
-        if let Some(found) = found {
-            paths = Some(place_paths(found, center));
-        }
-        if paths.is_none() {
-            evicted.extend(cache.make_room());
-            let tessellated = Box::new(tessellate(element, zoom, native));
-            paths = Some(place_paths(&tessellated, center));
-            cache
-                .entries
-                .push((Entry::Paths(path_key.clone(), tessellated), clock));
-        }
-        let raster = raster_key.and_then(|raster_key| {
-            let found = cache
-                .entries
-                .iter_mut()
-                .find_map(|(entry, used)| match entry {
-                    Entry::Raster(key, image, area) if *key == raster_key => {
-                        *used = clock;
-                        Some((image.clone(), *area))
-                    }
-                    _ => None,
-                });
-            found.or_else(|| {
-                evicted.extend(cache.make_room());
-                let (image, area) = rasterize_fill(shape, raster_key.scale)?;
-                cache
-                    .entries
-                    .push((Entry::Raster(raster_key, image.clone(), area), clock));
+        let paths = match cache.paths.get_mut(&slot) {
+            Some((key, paths, used)) if *key == path_key => {
+                *used = clock;
+                place_paths(paths, center)
+            }
+            _ => {
+                let tessellated = Box::new(tessellate(element, zoom, native));
+                let placed = place_paths(&tessellated, center);
+                cache.paths.insert(slot, (path_key, tessellated, clock));
+                placed
+            }
+        };
+        let raster = raster_key.and_then(|raster_key| match cache.rasters.get_mut(&slot) {
+            Some((key, image, area, used)) if *key == raster_key => {
+                *used = clock;
+                Some((image.clone(), *area))
+            }
+            _ => {
+                let (image, area) = rasterize(shape, raster_key.scale, false)?;
+                let old = cache
+                    .rasters
+                    .insert(slot, (raster_key, image.clone(), area, clock));
+                evicted.extend(old.map(|entry| entry.1));
                 Some((image, area))
-            })
+            }
         });
-        (paths.unwrap_or_default(), raster)
+        evicted.extend(cache.trim());
+        (paths, raster)
     });
     for image in evicted {
         window.drop_image(image).ok();
@@ -392,6 +406,7 @@ pub fn paint_shape(shape: &PaintShape, origin: Point<Pixels>, zoom: f32, window:
             .paint_image(bounds, bounds, Default::default(), image, 0, false)
             .ok();
     }
+    let _span = crate::perf::span("paint_shape_paths");
     if let (Some(path), Some(fill)) = (paths.fill, fill)
         && let Some(background) = background(fill, frame.rotation, shape.opacity)
     {
@@ -408,7 +423,59 @@ pub fn paint_shape(shape: &PaintShape, origin: Point<Pixels>, zoom: f32, window:
     }
 }
 
+/// Paints a whole shape as one cached image; see [`paint_shape`].
+fn paint_whole_raster(shape: &PaintShape, center: Point<Pixels>, zoom: f32, window: &mut Window) {
+    let element = &shape.element;
+    let frame = element.frame;
+    let key = RasterKey {
+        kind: element.kind.clone(),
+        width: frame.width,
+        height: frame.height,
+        rotation: frame.rotation,
+        scale: zoom * window.scale_factor(),
+        opacity: shape.opacity,
+        image: shape
+            .image
+            .as_ref()
+            .map_or(0, |image| Arc::as_ptr(image) as usize),
+    };
+    let slot = (element.id, zoom.to_bits(), true);
+    let mut evicted = Vec::new();
+    let raster = CACHE.with_borrow_mut(|cache| {
+        cache.clock += 1;
+        let clock = cache.clock;
+        let raster = match cache.rasters.get_mut(&slot) {
+            Some((current, image, area, used)) if *current == key => {
+                *used = clock;
+                Some((image.clone(), *area))
+            }
+            _ => rasterize(shape, key.scale, true).map(|(image, area)| {
+                let old = cache
+                    .rasters
+                    .insert(slot, (key, image.clone(), area, clock));
+                evicted.extend(old.map(|entry| entry.1));
+                (image, area)
+            }),
+        };
+        evicted.extend(cache.trim());
+        raster
+    });
+    for image in evicted {
+        window.drop_image(image).ok();
+    }
+    if let Some((image, area)) = raster {
+        let bounds = gpui_kit::Bounds::new(
+            center + point(px(area.x * zoom), px(area.y * zoom)),
+            size(px(area.width * zoom), px(area.height * zoom)),
+        );
+        window
+            .paint_image(bounds, bounds, Default::default(), image, 0, false)
+            .ok();
+    }
+}
+
 fn place_paths(paths: &ShapePaths, center: Point<Pixels>) -> ShapePaths {
+    let _span = crate::perf::span("place_shape_paths");
     let place =
         |path: &Option<gpui_kit::Path<Pixels>>| path.as_ref().map(|path| translated(path, center));
     ShapePaths {
