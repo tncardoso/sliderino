@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tiny_skia::Pixmap;
@@ -788,12 +788,23 @@ enum SlotState {
     Ready,
 }
 
+/// What the `map_async` callback of a [`Slot`] found: still waiting,
+/// mapped and ready to read, or the mapping failed (for example, the
+/// device was lost). Kept in an atomic so the callback, which can run on
+/// another thread, can set it.
+const MAP_PENDING: u8 = 0;
+const MAP_READY: u8 = 1;
+const MAP_FAILED: u8 = 2;
+
 /// One readback buffer of the ring a [`ShaderPlayer`] submits into.
 struct Slot {
     buffer: wgpu::Buffer,
     state: SlotState,
-    /// Set by the `map_async` callback when the mapping is ready to read.
-    mapped: Arc<AtomicBool>,
+    /// One of [`MAP_PENDING`], [`MAP_READY`] or [`MAP_FAILED`]: a failed
+    /// mapping means `buffer` was never actually mapped, so it must be
+    /// freed without a call to `get_mapped_range` or `unmap`, both of which
+    /// would panic on it.
+    mapped: Arc<AtomicU8>,
     serial: u64,
     time: f32,
     width: u32,
@@ -879,6 +890,9 @@ impl ShaderPlayer {
             self.target = None;
             self.uniforms = None;
             self.ring = [const { None }; RING];
+            // Otherwise `latest` would keep handing out the old size until
+            // a frame of the new one actually maps.
+            self.last = None;
         }
         let Some(index) = self.ring.iter().position(|slot| {
             slot.as_ref()
@@ -905,11 +919,18 @@ impl ShaderPlayer {
             return false;
         };
         self.serial += 1;
-        let mapped = Arc::new(AtomicBool::new(false));
+        let mapped = Arc::new(AtomicU8::new(MAP_PENDING));
         let callback_mapped = mapped.clone();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |_| {
-            callback_mapped.store(true, Ordering::Release);
-        });
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let state = if result.is_ok() {
+                    MAP_READY
+                } else {
+                    MAP_FAILED
+                };
+                callback_mapped.store(state, Ordering::Release);
+            });
         self.ring[index] = Some(Slot {
             buffer,
             state: SlotState::Pending,
@@ -930,8 +951,16 @@ impl ShaderPlayer {
         let gpu = gpu()?;
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         for slot in self.ring.iter_mut().flatten() {
-            if slot.state == SlotState::Pending && slot.mapped.load(Ordering::Acquire) {
-                slot.state = SlotState::Ready;
+            if slot.state != SlotState::Pending {
+                continue;
+            }
+            match slot.mapped.load(Ordering::Acquire) {
+                MAP_READY => slot.state = SlotState::Ready,
+                // The mapping failed: `buffer` was never mapped, so it is
+                // freed here directly, without the read and the `unmap` a
+                // ready slot gets below.
+                MAP_FAILED => slot.state = SlotState::Free,
+                _ => {}
             }
         }
         let newest = self
@@ -1248,6 +1277,36 @@ mod tests {
         assert_eq!(player.skipped(), 0);
         assert!(!player.submit(DEFAULT_SOURCE, None, (8, 8), Inputs::at(0.)));
         assert_eq!(player.skipped(), 1);
+    }
+
+    #[test]
+    fn a_failed_map_frees_its_slot_without_reading_it() {
+        // A real device loss is not something this test can force. Instead
+        // it plants a slot whose `mapped` atomic already reads
+        // `MAP_FAILED`, without ever calling `map_async` on its buffer: had
+        // it, the real callback could fire on `latest`'s poll and overwrite
+        // the forced value. `latest` must free this slot without calling
+        // `get_mapped_range` or `unmap` on it: either would panic, since
+        // its buffer was never actually mapped.
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter: skipping");
+            return;
+        };
+        let mut player = ShaderPlayer::new(PixelFormat::Rgba);
+        player.ring[0] = Some(Slot {
+            buffer: gpu.make_uniforms(),
+            state: SlotState::Pending,
+            mapped: Arc::new(AtomicU8::new(MAP_FAILED)),
+            serial: 1,
+            time: 0.,
+            width: 8,
+            height: 8,
+            row: 32,
+        });
+        assert!(player.latest().is_none());
+        assert!(!player.pending());
+        // The slot is free again: a submit finds room for it.
+        assert!(player.submit(DEFAULT_SOURCE, None, (8, 8), Inputs::at(0.)));
     }
 
     #[test]

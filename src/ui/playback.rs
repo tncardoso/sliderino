@@ -197,7 +197,8 @@ impl Playback {
     /// Submits a render of the shader fill of `id` when its time or size
     /// changed since the last submit, and returns its newest frame. Recreates
     /// the player when it does not exist yet or `format` differs from the
-    /// one it renders (Q11: shows the still until the first new frame).
+    /// one it renders; the caller then has no frame until the new player
+    /// delivers its first one, so it shows the still picture until then.
     fn shader(
         &mut self,
         id: ElementId,
@@ -418,21 +419,16 @@ mod tests {
         let mut playback = Playback::default();
         let id = ElementId(1);
         assert!(playback.start(id, &fill, &presentation));
-        let start = Instant::now();
-        while playback
-            .shader_frame(id, &fill, &presentation, (8, 8))
-            .is_none()
-        {
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(5),
-                "no frame in time"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        // Asking for the other format (the CPU path, after the direct BGRA
-        // path) recreates the player: the still shows again until the first
-        // frame of the new player arrives.
-        assert!(playback.picture(id, &fill, &presentation, (8, 8)).is_none());
+        // One submit on the BGRA player (the presenter's direct path).
+        playback.shader_frame(id, &fill, &presentation, (8, 8));
+        assert_eq!(playback.delivered(), 1);
+        // Asking for the other format (the CPU path) recreates the player:
+        // its serial starts over at 1 for this first submit, instead of
+        // adding to what the old (BGRA) player already delivered. Waiting
+        // for the GPU to actually map either frame is not needed here: a
+        // reused player would already show in the submit count.
+        playback.picture(id, &fill, &presentation, (8, 8));
+        assert_eq!(playback.delivered(), 1);
     }
 
     #[test]
