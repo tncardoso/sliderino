@@ -4,11 +4,12 @@
 //! writer shows as a difference.
 
 use crate::document::{
-    Element, ElementKind, Fill, Frame, GradientStop, HeadKind, HeadSize, Presentation, Stroke,
+    Element, ElementKind, Fill, Frame, GradientStop, HAlign, HeadKind, HeadSize, Presentation,
+    Stroke, TextCase, TextElement, TextSizing, TextStyle, VAlign,
 };
 
 use super::inspect::{
-    Color, Deck, FillSummary, InspectError, LineSummary, ShapeKind, ShapeSummary,
+    Color, Deck, FillSummary, InspectError, LineSummary, RunSummary, ShapeKind, ShapeSummary,
 };
 
 /// Largest difference of a position or a size, in slide units.
@@ -35,7 +36,7 @@ pub fn compare(presentation: &Presentation, deck: &Deck) -> Result<Vec<String>, 
             out: &mut out,
             at: format!("slide {}", slide.id.0),
         };
-        check.elements(&slide.elements, &summary.shapes, 1.);
+        check.elements(presentation, &slide.elements, &summary.shapes, 1.);
     }
     Ok(out)
 }
@@ -50,7 +51,13 @@ impl Check<'_> {
         self.out.push(format!("{}: {message}", self.at));
     }
 
-    fn elements(&mut self, elements: &[Element], shapes: &[ShapeSummary], opacity: f32) {
+    fn elements(
+        &mut self,
+        presentation: &Presentation,
+        elements: &[Element],
+        shapes: &[ShapeSummary],
+        opacity: f32,
+    ) {
         let visible: Vec<&Element> = elements.iter().filter(|element| !element.hidden).collect();
         if visible.len() != shapes.len() {
             self.fail(format!(
@@ -62,12 +69,18 @@ impl Check<'_> {
         let at = self.at.clone();
         for (element, shape) in visible.into_iter().zip(shapes) {
             self.at = format!("{at} element {}", element.id.0);
-            self.element(element, shape, opacity * element.opacity);
+            self.element(presentation, element, shape, opacity * element.opacity);
         }
         self.at = at;
     }
 
-    fn element(&mut self, element: &Element, shape: &ShapeSummary, opacity: f32) {
+    fn element(
+        &mut self,
+        presentation: &Presentation,
+        element: &Element,
+        shape: &ShapeSummary,
+        opacity: f32,
+    ) {
         let expected_kind = match &element.kind {
             ElementKind::Group(_) => ShapeKind::Group,
             ElementKind::Line(_) => ShapeKind::Connector,
@@ -93,10 +106,16 @@ impl Check<'_> {
             },
             _ => element.frame,
         };
-        self.frame(&frame, &shape.frame);
+        if let ElementKind::Text(text) = &element.kind {
+            self.text(presentation, element, text, shape, opacity);
+        } else {
+            self.frame(&frame, &shape.frame);
+        }
 
         match &element.kind {
-            ElementKind::Group(group) => self.elements(&group.children, &shape.children, opacity),
+            ElementKind::Group(group) => {
+                self.elements(presentation, &group.children, &shape.children, opacity)
+            }
             ElementKind::Rectangle(rectangle) => {
                 let side = frame.width.min(frame.height);
                 let radius = rectangle.corner_radius.min(side / 2.);
@@ -137,6 +156,134 @@ impl Check<'_> {
             }
             ElementKind::Text(_) | ElementKind::Table(_) => {}
         }
+    }
+
+    /// A text box: moved so that the viewer baseline (a fifth of the font
+    /// size above the bottom of an exact line) is the Sliderino one, and
+    /// one line of the deck for each line of the layout.
+    fn text(
+        &mut self,
+        presentation: &Presentation,
+        element: &Element,
+        text: &TextElement,
+        shape: &ShapeSummary,
+        opacity: f32,
+    ) {
+        let Some(layout) = presentation
+            .fonts
+            .get(&text.style.font)
+            .and_then(|font| crate::text_layout::layout(text, &element.frame, font).ok())
+        else {
+            self.fail("has no layout");
+            return;
+        };
+        let first = &layout.lines[0];
+        let height = first.height;
+        let shift = (height - 0.2 * text.style.size) - (first.baseline - first.top);
+        let (dx, dy) = crate::document::rotate_vector(0., -shift, element.frame.rotation);
+        let moved = Frame {
+            x: element.frame.x + dx,
+            y: element.frame.y + dy,
+            ..element.frame
+        };
+        self.frame(&moved, &shape.frame);
+
+        let Some(body) = &shape.text else {
+            self.fail("has no text body");
+            return;
+        };
+        let justify = text.style.align == HAlign::Justify;
+        self.equal(
+            "wrap",
+            body.wrap.as_str(),
+            if justify { "square" } else { "none" },
+        );
+        let anchor = match (text.sizing, text.style.vertical_align) {
+            (TextSizing::Fixed, VAlign::Middle) => "ctr",
+            (TextSizing::Fixed, VAlign::Bottom) => "b",
+            _ => "t",
+        };
+        self.equal("anchor", body.anchor.as_str(), anchor);
+        self.equal("insets", body.insets, [0.; 4]);
+        self.equal("autofit", body.autofit, false);
+
+        let paragraphs: Vec<&str> = text.content.split('\n').collect();
+        if body.paragraphs.len() != paragraphs.len() {
+            self.fail(format!(
+                "{} paragraph(s), not {}",
+                body.paragraphs.len(),
+                paragraphs.len()
+            ));
+            return;
+        }
+        let mut lines = layout.lines.iter();
+        let align = match text.style.align {
+            HAlign::Left => "l",
+            HAlign::Center => "ctr",
+            HAlign::Right => "r",
+            HAlign::Justify => "just",
+        };
+        for (index, (paragraph, source)) in body.paragraphs.iter().zip(&paragraphs).enumerate() {
+            let last = index + 1 == paragraphs.len();
+            self.equal("align", paragraph.align.as_str(), align);
+            let near = |a: f32, b: f32| (a - b).abs() <= 0.02;
+            if !paragraph.line_height.is_some_and(|got| near(got, height)) {
+                self.fail(format!(
+                    "line height {:?}, not {height}",
+                    paragraph.line_height
+                ));
+            }
+            let after = if last {
+                0.
+            } else {
+                text.style.paragraph_spacing
+            };
+            if !near(paragraph.space_after, after) || paragraph.space_before != 0. {
+                self.fail(format!(
+                    "paragraph spacing {} before, {} after, not 0 and {after}",
+                    paragraph.space_before, paragraph.space_after
+                ));
+            }
+            let mut expected: Vec<String> = Vec::new();
+            for line in lines.by_ref() {
+                expected.push(
+                    text.content[line.range.clone()]
+                        .trim_end_matches([' ', '\t'])
+                        .to_string(),
+                );
+                if line.ends_paragraph {
+                    break;
+                }
+            }
+            if justify {
+                expected = vec![source.trim_end_matches([' ', '\t']).to_string()];
+            }
+            self.equal("lines", &paragraph.lines, &expected);
+            for run in &paragraph.runs {
+                self.run(run, &text.style, opacity);
+            }
+        }
+    }
+
+    fn run(&mut self, run: &RunSummary, style: &TextStyle, opacity: f32) {
+        let near = |a: f32, b: f32| (a - b).abs() <= 0.02;
+        if !near(run.size, style.size) {
+            self.fail(format!("font size {}, not {}", run.size, style.size));
+        }
+        if !near(run.spacing, style.size * style.letter_spacing / 100.) {
+            self.fail(format!("character spacing {}", run.spacing));
+        }
+        self.equal("bold", run.bold, style.font.weight >= 600);
+        self.equal("italic", run.italic, style.font.italic);
+        self.equal("underline", run.underline, style.underline);
+        self.equal("strike", run.strike, style.strikethrough);
+        self.equal("caps", run.caps, style.case == TextCase::Upper);
+        self.equal(
+            "typeface",
+            run.typeface.as_str(),
+            style.font.family.as_str(),
+        );
+        self.color("text", run.color.as_ref(), style.color.0, opacity);
     }
 
     fn equal<T: PartialEq + std::fmt::Debug>(&mut self, what: &str, got: T, expected: T) {

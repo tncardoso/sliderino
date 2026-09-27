@@ -8,7 +8,14 @@ use super::{Options, export, parity};
 use crate::document::Presentation;
 
 /// The scenes to check, from `debug/scenes`.
-const SCENES: &[&str] = &["shapes.json", "pptx/groups.json"];
+const SCENES: &[&str] = &[
+    "shapes.json",
+    "text.json",
+    "rotation.json",
+    "custom-font.json",
+    "system-font.json",
+    "pptx/groups.json",
+];
 
 fn scene_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -78,4 +85,23 @@ fn a_moved_child_is_a_difference() {
     let problems = parity::compare(&presentation, &deck).unwrap();
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(problems[0].contains("element 2: frame"), "{problems:?}");
+}
+
+#[test]
+fn a_changed_line_is_a_difference() {
+    let mut presentation = load("text.json");
+    let export = export(&presentation, &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    let crate::document::ElementKind::Text(text) = &mut presentation.slides[0].elements[1].kind
+    else {
+        panic!("not a text");
+    };
+    text.content = "Auto width grows with its texts".to_string();
+    let problems = parity::compare(&presentation, &deck).unwrap();
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("element 2: lines")),
+        "{problems:?}"
+    );
 }

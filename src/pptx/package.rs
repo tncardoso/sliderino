@@ -21,6 +21,7 @@ pub mod rel {
     pub const SLIDE_LAYOUT: &str = "slideLayout";
     pub const SLIDE: &str = "slide";
     pub const THEME: &str = "theme";
+    pub const FONT: &str = "font";
     pub const PRES_PROPS: &str = "presProps";
     pub const VIEW_PROPS: &str = "viewProps";
     pub const TABLE_STYLES: &str = "tableStyles";
@@ -51,8 +52,8 @@ pub mod content {
     pub const PNG: &str = "image/png";
     pub const JPEG: &str = "image/jpeg";
     pub const MP4: &str = "video/mp4";
-    pub const OBFUSCATED_FONT: &str =
-        "application/vnd.openxmlformats-officedocument.obfuscatedFont";
+    /// Embedded OpenType, as PowerPoint writes embedded fonts.
+    pub const FONT_DATA: &str = "application/x-fontdata";
 }
 
 /// The relationships of one part (or of the package).
@@ -191,7 +192,7 @@ impl Package {
                 "png" => content::PNG,
                 "jpeg" | "jpg" => content::JPEG,
                 "mp4" => content::MP4,
-                "fntdata" => content::OBFUSCATED_FONT,
+                "fntdata" => content::FONT_DATA,
                 _ => "application/octet-stream",
             };
             xml.empty(

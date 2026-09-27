@@ -144,6 +144,28 @@ pub fn difference(reference: &Pixmap, other: &Pixmap) -> Difference {
     }
 }
 
+/// The box around the pixels that are not near white inside `area`
+/// (left, top, right, bottom in pixels), as (left, top, right, bottom).
+pub fn ink_box(pixmap: &Pixmap, area: [i32; 4]) -> Option<[u32; 4]> {
+    let [left, top, right, bottom] = area;
+    let clamp_x = |x: i32| x.clamp(0, pixmap.width() as i32) as u32;
+    let clamp_y = |y: i32| y.clamp(0, pixmap.height() as i32) as u32;
+    let mut found: Option<[u32; 4]> = None;
+    for y in clamp_y(top)..clamp_y(bottom) {
+        for x in clamp_x(left)..clamp_x(right) {
+            let pixel = pixmap.pixel(x, y)?;
+            if pixel.red().min(pixel.green()).min(pixel.blue()) >= 200 {
+                continue;
+            }
+            found = Some(match found {
+                None => [x, y, x + 1, y + 1],
+                Some([l, t, r, b]) => [l.min(x), t.min(y), r.max(x + 1), b.max(y + 1)],
+            });
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +174,17 @@ mod tests {
         let mut pixmap = Pixmap::new(width, height).unwrap();
         pixmap.fill(color);
         pixmap
+    }
+
+    #[test]
+    fn the_ink_box_holds_the_dark_pixels() {
+        let mut image = filled(10, 10, tiny_skia::Color::WHITE);
+        let at = |x: usize, y: usize| (y * 10 + x) * 4;
+        for (x, y) in [(2, 3), (6, 7)] {
+            image.data_mut()[at(x, y)..at(x, y) + 3].fill(0);
+        }
+        assert_eq!(ink_box(&image, [0, 0, 10, 10]), Some([2, 3, 7, 8]));
+        assert_eq!(ink_box(&image, [7, 0, 10, 10]), None);
     }
 
     #[test]

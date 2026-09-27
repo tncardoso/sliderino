@@ -305,6 +305,34 @@ fn pptx_compare(
         difference.mean,
         difference.differing * 100.
     );
+    // Where the ink of each element lands in the two images.
+    let slide = presentation.slide(slide).ok_or("no slide")?;
+    for node in slide.visible_leaves() {
+        let bounds = node.element.frame.bounds();
+        let margin = 24.;
+        let area = [
+            ((bounds.x - margin) * scale).floor() as i32,
+            ((bounds.y - margin) * scale).floor() as i32,
+            ((bounds.x + bounds.width + margin) * scale).ceil() as i32,
+            ((bounds.y + bounds.height + margin) * scale).ceil() as i32,
+        ];
+        let expected = pptx::visual::ink_box(&reference, area);
+        let got = pptx::visual::ink_box(page, area);
+        match (expected, got) {
+            (Some(e), Some(g)) => println!(
+                "element {}: ink moves {:+} {:+}, size {:+} {:+} px",
+                node.element.id.0,
+                g[0] as i64 - e[0] as i64,
+                g[1] as i64 - e[1] as i64,
+                (g[2] - g[0]) as i64 - (e[2] - e[0]) as i64,
+                (g[3] - g[1]) as i64 - (e[3] - e[1]) as i64,
+            ),
+            (e, g) => println!(
+                "element {}: ink {:?} in the reference, {:?} in the deck",
+                node.element.id.0, e, g
+            ),
+        }
+    }
     match threshold {
         Some(limit) if difference.differing > limit => Err(format!(
             "{:.4}% of the pixels differ, more than {:.4}%",

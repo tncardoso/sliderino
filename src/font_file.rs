@@ -17,10 +17,13 @@ use ttf_parser::{PlatformId, RawFace, Tag};
 pub const ORIGINAL_FAMILY_ID: u16 = 32767;
 
 const FAMILY_ID: u16 = 1;
+const SUBFAMILY_ID: u16 = 2;
 const FULL_NAME_ID: u16 = 4;
 const POSTSCRIPT_ID: u16 = 6;
 const TYPOGRAPHIC_FAMILY_ID: u16 = 16;
+const TYPOGRAPHIC_SUBFAMILY_ID: u16 = 17;
 const WWS_FAMILY_ID: u16 = 21;
+const WWS_SUBFAMILY_ID: u16 = 22;
 
 const WINDOWS: u16 = 3;
 const UNICODE_BMP: u16 = 1;
@@ -92,21 +95,116 @@ pub fn rename(bytes: &[u8], index: u32, family: &str) -> Option<Vec<u8>> {
     ] {
         records.push(NameRecord::windows(id, &text));
     }
-    let name = name_table(records);
+    rebuild(bytes, index, &raw, records, |_, _| None)
+}
 
-    let tables: Vec<(Tag, &[u8])> = raw
-        .table_records
+/// A single-face copy of face `index` of `bytes` as the regular, bold,
+/// italic or bold italic member of `family`, as Windows links the styles
+/// of a family: the family and style names say so, the typographic names
+/// go, and the weight class is 400 or 700. PowerPoint finds an embedded
+/// font by these names, so a SemiBold face can be the bold of its family.
+/// `None` when the file cannot be read.
+pub fn style_member(
+    bytes: &[u8],
+    index: u32,
+    family: &str,
+    bold: bool,
+    italic: bool,
+) -> Option<Vec<u8>> {
+    let raw = RawFace::parse(bytes, index).ok()?;
+    let face = ttf_parser::Face::parse(bytes, index).ok()?;
+    let style = match (bold, italic) {
+        (false, false) => "Regular",
+        (true, false) => "Bold",
+        (false, true) => "Italic",
+        (true, true) => "Bold Italic",
+    };
+    let replaced = [
+        FAMILY_ID,
+        SUBFAMILY_ID,
+        FULL_NAME_ID,
+        POSTSCRIPT_ID,
+        TYPOGRAPHIC_FAMILY_ID,
+        TYPOGRAPHIC_SUBFAMILY_ID,
+        WWS_FAMILY_ID,
+        WWS_SUBFAMILY_ID,
+    ];
+    let mut records: Vec<NameRecord> = face
+        .names()
         .into_iter()
-        .filter_map(|record| {
-            if record.tag == Tag::from_bytes(b"name") {
-                return None;
-            }
-            let start = record.offset as usize;
-            let data = bytes.get(start..start.checked_add(record.length as usize)?)?;
-            Some((record.tag, data))
-        })
-        .chain(std::iter::once((Tag::from_bytes(b"name"), name.as_slice())))
+        .filter(|name| !replaced.contains(&name.name_id) && name.language_id < 0x8000)
+        .map(|name| NameRecord::copy(&name))
         .collect();
+    let postscript: String = format!("{family}-{style}")
+        .chars()
+        .filter(|ch| ch.is_ascii_graphic() && !"[](){}<>/%".contains(*ch))
+        .collect();
+    let full = if style == "Regular" {
+        family.to_string()
+    } else {
+        format!("{family} {style}")
+    };
+    for (id, text) in [
+        (FAMILY_ID, family.to_string()),
+        (SUBFAMILY_ID, style.to_string()),
+        (FULL_NAME_ID, full),
+        (POSTSCRIPT_ID, postscript),
+    ] {
+        records.push(NameRecord::windows(id, &text));
+    }
+    rebuild(bytes, index, &raw, records, |tag, table| {
+        let mut table = table.to_vec();
+        if tag == Tag::from_bytes(b"OS/2") && table.len() >= 64 {
+            let weight: u16 = if bold { 700 } else { 400 };
+            table[4..6].copy_from_slice(&weight.to_be_bytes());
+            // fsSelection: ITALIC is bit 0, BOLD bit 5, REGULAR bit 6.
+            let mut selection = u16::from_be_bytes([table[62], table[63]]) & !0b110_0001;
+            selection |= match (bold, italic) {
+                (false, false) => 1 << 6,
+                (true, false) => 1 << 5,
+                (false, true) => 1,
+                (true, true) => (1 << 5) | 1,
+            };
+            table[62..64].copy_from_slice(&selection.to_be_bytes());
+            return Some(table);
+        }
+        if tag == Tag::from_bytes(b"head") && table.len() >= 46 {
+            // macStyle: bold is bit 0, italic bit 1.
+            let mut style = u16::from_be_bytes([table[44], table[45]]) & !0b11;
+            style |= u16::from(bold) | (u16::from(italic) << 1);
+            table[44..46].copy_from_slice(&style.to_be_bytes());
+            return Some(table);
+        }
+        None
+    })
+}
+
+/// A single-face file of the tables of face `index`, with a new `name`
+/// table of `records`. `patch` gives a new copy of a table, or `None` to
+/// keep it.
+fn rebuild(
+    bytes: &[u8],
+    index: u32,
+    raw: &RawFace,
+    records: Vec<NameRecord>,
+    patch: impl Fn(Tag, &[u8]) -> Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let name = name_table(records);
+    let mut owned: Vec<(Tag, std::borrow::Cow<[u8]>)> = Vec::new();
+    for record in raw.table_records {
+        if record.tag == Tag::from_bytes(b"name") {
+            continue;
+        }
+        let start = record.offset as usize;
+        let data = bytes.get(start..start.checked_add(record.length as usize)?)?;
+        let table = match patch(record.tag, data) {
+            Some(table) => std::borrow::Cow::Owned(table),
+            None => std::borrow::Cow::Borrowed(data),
+        };
+        owned.push((record.tag, table));
+    }
+    owned.push((Tag::from_bytes(b"name"), std::borrow::Cow::Borrowed(&name)));
+    let tables: Vec<(Tag, &[u8])> = owned.iter().map(|(tag, data)| (*tag, &**data)).collect();
     Some(sfnt(sfnt_version(bytes, index)?, tables))
 }
 
@@ -312,6 +410,28 @@ mod tests {
             index: 0,
         };
         assert!(crate::text_layout::FontMetrics::read(&data).is_ok());
+    }
+
+    #[test]
+    fn a_semibold_face_becomes_the_bold_member_of_its_family() {
+        let member = style_member(&inter(), 0, "Inter", true, false).unwrap();
+        assert_eq!(checksum(&member), 0xB1B0_AFBA);
+        let face = ttf_parser::Face::parse(&member, 0).unwrap();
+        let name = |id: u16| {
+            face.names()
+                .into_iter()
+                .find(|n| n.name_id == id && n.is_unicode())
+                .and_then(|n| n.to_string())
+        };
+        assert_eq!(name(1).as_deref(), Some("Inter"));
+        assert_eq!(name(2).as_deref(), Some("Bold"));
+        assert_eq!(name(4).as_deref(), Some("Inter Bold"));
+        assert_eq!(name(6).as_deref(), Some("Inter-Bold"));
+        assert_eq!(name(16), None);
+        assert_eq!(face.weight(), ttf_parser::Weight::Bold);
+        assert!(face.is_bold());
+        assert!(!face.is_italic());
+        assert_eq!(families(&member)[0].0, "Inter");
     }
 
     #[test]

@@ -1,7 +1,11 @@
 //! One slide part: the shape tree with the elements of the slide, and the
 //! relationships to the layout and to the media the shapes use.
 
-use crate::document::{Arrowhead, Element, ElementKind, Frame, Presentation, Slide, turn_frame};
+use crate::document::{
+    Arrowhead, Dash, Element, ElementKind, Frame, HAlign, Presentation, Rgb, Slide, Stroke,
+    TextElement, TextSizing, VAlign, rotate_vector, turn_frame,
+};
+use crate::text_layout;
 
 use super::package::{Package, Rels, rel};
 use super::xml::Xml;
@@ -31,7 +35,9 @@ impl Media {
 
 /// The shapes of one slide, with the ids and relationships they need.
 pub struct SlideWriter<'a> {
+    pub presentation: &'a Presentation,
     pub slide: &'a Slide,
+    pub options: &'a Options,
     pub xml: Xml,
     pub rels: Rels,
     pub warnings: &'a mut Vec<Warning>,
@@ -137,9 +143,117 @@ impl SlideWriter<'_> {
                 );
                 self.xml.end().end();
             }
-            ElementKind::Text(_) | ElementKind::Table(_) => {
+            ElementKind::Text(text) => self.text(element, text, &frame, opacity),
+            ElementKind::Table(_) => {
                 self.warn(element, "not exported yet");
             }
+        }
+    }
+
+    /// A text box. The box moves by the baseline shift, so the viewer puts
+    /// the lines where Sliderino does.
+    fn text(&mut self, element: &Element, text: &TextElement, frame: &Frame, opacity: f32) {
+        let Some(font) = self.presentation.fonts.get(&text.style.font) else {
+            self.warn(element, "its font is not in the presentation");
+            return;
+        };
+        let Ok(layout) = text_layout::layout(text, &element.frame, font) else {
+            self.warn(element, "its font cannot be read");
+            return;
+        };
+        if layout.overflow() > 0. {
+            self.warn(element, "the text runs past the bottom of its box");
+        }
+        if layout.missing_glyphs > 0 {
+            self.warn(
+                element,
+                format!(
+                    "the font has no glyph for {} character(s)",
+                    layout.missing_glyphs
+                ),
+            );
+        }
+        let shift = super::text::baseline_shift(&text.style, font);
+        let (dx, dy) = rotate_vector(0., -shift, frame.rotation);
+        let moved = Frame {
+            x: frame.x + dx,
+            y: frame.y + dy,
+            ..*frame
+        };
+        let anchor = match text.sizing {
+            TextSizing::Fixed => text.style.vertical_align,
+            _ => VAlign::Top,
+        };
+        let justify = text.style.align == HAlign::Justify;
+
+        self.xml.start("p:sp").start("p:nvSpPr");
+        self.names(element, "Text");
+        self.xml
+            .empty("p:cNvSpPr", &[("txBox", &1)])
+            .empty("p:nvPr", &[])
+            .end()
+            .start("p:spPr");
+        shapes::transform(&mut self.xml, &moved);
+        shapes::geometry(&mut self.xml, "rect", None);
+        self.xml.empty("a:noFill", &[]).end().start("p:txBody");
+        super::text::body_properties(&mut self.xml, anchor, justify, [0.; 4]);
+        self.xml.empty("a:lstStyle", &[]);
+        super::text::paragraphs(
+            &mut self.xml,
+            &text.content,
+            &text.style,
+            &layout,
+            font,
+            opacity,
+        );
+        self.xml.end().end();
+
+        if self.options.guides {
+            self.guides(frame, &layout);
+        }
+    }
+
+    /// Thin lines on the frame and on the baselines of the layout, to see
+    /// where a viewer puts the text.
+    fn guides(&mut self, frame: &Frame, layout: &text_layout::TextLayout) {
+        let color = Rgb(0x00B7EB);
+        let stroke = Stroke {
+            color,
+            opacity: 1.,
+            width: 1.,
+            dash: Dash::Solid,
+        };
+        let edges = [
+            (0., 0., frame.width, 0.),
+            (0., frame.height, frame.width, frame.height),
+        ];
+        let baselines = layout
+            .lines
+            .iter()
+            .filter(|line| line.right > line.left)
+            .map(|line| (line.left, line.baseline, line.right, line.baseline));
+        for (left, y, right, _) in edges.into_iter().chain(baselines) {
+            let local = Frame {
+                x: frame.x + left,
+                y: frame.y + y,
+                width: right - left,
+                height: 0.,
+                rotation: 0.,
+            };
+            let line = turn_frame(&local, frame.center(), frame.rotation);
+            let id = self.shape_id();
+            self.xml
+                .start("p:cxnSp")
+                .start("p:nvCxnSpPr")
+                .empty("p:cNvPr", &[("id", &id), ("name", &format!("Guide {id}"))])
+                .empty("p:cNvCxnSpPr", &[])
+                .empty("p:nvPr", &[])
+                .end()
+                .start("p:spPr");
+            shapes::line_transform(&mut self.xml, &line);
+            shapes::geometry(&mut self.xml, "line", None);
+            shapes::outline(&mut self.xml, Some(&stroke), 1., [Arrowhead::NONE; 2]);
+            self.xml.end().end();
         }
     }
 
@@ -197,9 +311,11 @@ pub fn write(
         .empty("p:nvPr", &[])
         .end();
     skeleton::group_properties(&mut xml);
-    let _ = (presentation, options, media);
+    let _ = media;
     let mut writer = SlideWriter {
+        presentation,
         slide,
+        options,
         xml,
         rels,
         warnings,

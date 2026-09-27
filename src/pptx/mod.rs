@@ -4,10 +4,12 @@
 //! breaks of the Sliderino layout, so they wrap the same in PowerPoint.
 //! `docs/pptx-export.md` gives the mapping and its limits.
 
+mod fonts;
 mod package;
 mod shapes;
 mod skeleton;
 mod slide;
+mod text;
 pub mod units;
 pub mod xml;
 
@@ -98,6 +100,7 @@ pub fn export(presentation: &Presentation, options: &Options) -> Result<Export, 
     let mut presentation_rels = Rels::default();
     let master_rel = presentation_rels.add(rel::SLIDE_MASTER, "slideMasters/slideMaster1.xml");
     let mut slide_rels = Vec::new();
+    let font_plan = fonts::FontPlan::new(presentation, &mut warnings);
     let mut media = slide::Media::default();
     let mut slides = Vec::new();
     for (index, slide) in presentation.slides.iter().enumerate() {
@@ -108,6 +111,12 @@ pub fn export(presentation: &Presentation, options: &Options) -> Result<Export, 
         slides.push((name, written));
     }
     presentation_rels.add(rel::THEME, "theme/theme1.xml");
+    let embedded_fonts = font_plan.write(
+        presentation,
+        &mut package,
+        &mut presentation_rels,
+        &mut warnings,
+    );
     presentation_rels.add(rel::PRES_PROPS, "presProps.xml");
     presentation_rels.add(rel::VIEW_PROPS, "viewProps.xml");
     presentation_rels.add(rel::TABLE_STYLES, "tableStyles.xml");
@@ -115,7 +124,12 @@ pub fn export(presentation: &Presentation, options: &Options) -> Result<Export, 
     package.xml(
         "ppt/presentation.xml",
         content::PRESENTATION,
-        presentation_xml(presentation, &master_rel, &slide_rels),
+        presentation_xml(
+            presentation,
+            &master_rel,
+            &slide_rels,
+            embedded_fonts.as_deref(),
+        ),
     );
     package.rels("ppt/presentation.xml", &presentation_rels);
 
@@ -195,13 +209,14 @@ fn presentation_xml(
     presentation: &Presentation,
     master_rel: &str,
     slide_rels: &[String],
+    embedded_fonts: Option<&str>,
 ) -> String {
     let mut xml = xml::Xml::new();
     xml.start("p:presentation")
         .attr("xmlns:a", A_NS)
         .attr("xmlns:r", R_NS)
         .attr("xmlns:p", P_NS)
-        .attr("saveSubsetFonts", 1);
+        .attr_opt("embedTrueTypeFonts", embedded_fonts.map(|_| 1));
     xml.start("p:sldMasterIdLst")
         .empty(
             "p:sldMasterId",
@@ -220,6 +235,9 @@ fn presentation_xml(
     let height = units::emu(presentation.size.height as f32);
     xml.empty("p:sldSz", &[("cx", &width), ("cy", &height)])
         .empty("p:notesSz", &[("cx", &6_858_000), ("cy", &9_144_000)]);
+    if let Some(fonts) = embedded_fonts {
+        xml.start("p:embeddedFontLst").raw(fonts).end();
+    }
     xml.end();
     xml.finish()
 }

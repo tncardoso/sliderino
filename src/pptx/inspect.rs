@@ -504,6 +504,45 @@ pub struct LineSummary {
     pub tail: Option<(String, String, String)>,
 }
 
+/// The run properties of a text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunSummary {
+    /// Font size in slide units.
+    pub size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub caps: bool,
+    /// Character spacing in slide units.
+    pub spacing: f32,
+    pub color: Option<Color>,
+    pub typeface: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParagraphSummary {
+    pub align: String,
+    /// Exact line height in slide units.
+    pub line_height: Option<f32>,
+    pub space_before: f32,
+    pub space_after: f32,
+    /// The text of each line: runs between line breaks.
+    pub lines: Vec<String>,
+    /// The properties of each run and line break, and of the paragraph end.
+    pub runs: Vec<RunSummary>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextSummary {
+    pub wrap: String,
+    pub anchor: String,
+    /// Insets l, t, r, b in slide units.
+    pub insets: [f32; 4],
+    pub autofit: bool,
+    pub paragraphs: Vec<ParagraphSummary>,
+}
+
 /// One shape of a slide, with its frame in slide units and slide axes:
 /// the transforms of its groups are applied.
 #[derive(Clone, Debug, PartialEq)]
@@ -516,6 +555,7 @@ pub struct ShapeSummary {
     pub adjust: Option<i64>,
     pub fill: Option<FillSummary>,
     pub line: Option<LineSummary>,
+    pub text: Option<TextSummary>,
     pub children: Vec<ShapeSummary>,
 }
 
@@ -633,6 +673,7 @@ fn shape_of(node: Node, placement: &Placement, rels: &[Relationship]) -> Option<
         adjust: None,
         fill: None,
         line: None,
+        text: p(node, "txBody").map(text_of),
         children: Vec::new(),
     };
     if let Some(properties) = properties {
@@ -824,5 +865,110 @@ fn line_of(line: Node, rels: &[Relationship]) -> LineSummary {
         dash,
         head: end("headEnd"),
         tail: end("tailEnd"),
+    }
+}
+
+/// A text body: `p:txBody` or `a:txBody`.
+pub fn text_of(body: Node) -> TextSummary {
+    let u = super::units::units;
+    let properties = a(body, "bodyPr");
+    let attribute = |name: &str| {
+        properties
+            .and_then(|properties| properties.attribute(name))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let inset = |name: &str| {
+        properties
+            .and_then(|properties| properties.attribute(name))
+            .and_then(|value| value.parse::<i64>().ok())
+            .map_or(0., u)
+    };
+    TextSummary {
+        wrap: attribute("wrap"),
+        anchor: attribute("anchor"),
+        insets: [inset("lIns"), inset("tIns"), inset("rIns"), inset("bIns")],
+        autofit: properties.is_some_and(|properties| a(properties, "noAutofit").is_none()),
+        paragraphs: body
+            .children()
+            .filter(|child| child.has_tag_name((A_NS, "p")))
+            .map(paragraph_of)
+            .collect(),
+    }
+}
+
+fn points(node: Option<Node>) -> Option<f32> {
+    node.and_then(|node| a(node, "spcPts"))
+        .and_then(|points| points.attribute("val"))
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(super::units::from_centipoints)
+}
+
+fn paragraph_of(paragraph: Node) -> ParagraphSummary {
+    let properties = a(paragraph, "pPr");
+    let mut lines = vec![String::new()];
+    let mut runs = Vec::new();
+    for child in paragraph.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "r" => {
+                if let Some(text) = a(child, "t") {
+                    lines
+                        .last_mut()
+                        .expect("a line")
+                        .push_str(text.text().unwrap_or_default());
+                }
+                runs.push(run_of(a(child, "rPr")));
+            }
+            "br" => {
+                lines.push(String::new());
+                runs.push(run_of(a(child, "rPr")));
+            }
+            "endParaRPr" => runs.push(run_of(Some(child))),
+            _ => {}
+        }
+    }
+    ParagraphSummary {
+        align: properties
+            .and_then(|properties| properties.attribute("algn"))
+            .unwrap_or("l")
+            .to_string(),
+        line_height: points(properties.and_then(|properties| a(properties, "lnSpc"))),
+        space_before: points(properties.and_then(|properties| a(properties, "spcBef")))
+            .unwrap_or(0.),
+        space_after: points(properties.and_then(|properties| a(properties, "spcAft")))
+            .unwrap_or(0.),
+        lines,
+        runs,
+    }
+}
+
+fn run_of(properties: Option<Node>) -> RunSummary {
+    let Some(properties) = properties else {
+        return RunSummary::default();
+    };
+    let flag = |name: &str| matches!(properties.attribute(name), Some("1") | Some("true"));
+    let number = |name: &str| {
+        properties
+            .attribute(name)
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
+    RunSummary {
+        size: super::units::from_centipoints(number("sz")),
+        bold: flag("b"),
+        italic: flag("i"),
+        underline: properties
+            .attribute("u")
+            .is_some_and(|value| value != "none"),
+        strike: properties
+            .attribute("strike")
+            .is_some_and(|value| value != "noStrike"),
+        caps: properties.attribute("cap") == Some("all"),
+        spacing: super::units::from_centipoints(number("spc")),
+        color: a(properties, "solidFill").and_then(color_of),
+        typeface: a(properties, "latin")
+            .and_then(|latin| latin.attribute("typeface"))
+            .unwrap_or_default()
+            .to_string(),
     }
 }
