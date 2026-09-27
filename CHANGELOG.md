@@ -19,6 +19,7 @@
 - Present shows the slides on the full screen. Videos and shaders start when
   the slide shows or on a click, in layer order. Click a video or a shader
   to pause it. Use the arrow keys to go between slides and Esc to stop.
+  Press D to show the frames per second and the time of each step.
 - Agents can add videos with `add_video`, fill shapes with `video` and
   `shader`, show shaders at a time with the `time` of `get_screenshot`, and
   make the MP4 of a shader with `render_shader_video`

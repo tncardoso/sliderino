@@ -172,9 +172,113 @@ enum ShownLayer {
 struct Frame {
     image: Arc<RenderImage>,
     area: crate::document::Frame,
-    /// The address of the picture; 0 for none.
+    /// For a video drawn as it is: the box of the shape, which cuts the
+    /// image, and its corner radius, in slide units.
+    clip: Option<(crate::document::Frame, f32)>,
+    /// The address of the picture, or the serial of a video frame drawn as
+    /// it is; 0 for none.
     key: usize,
     scale: f32,
+}
+
+/// The fit and the corner radius of a video fill that the GPU can draw as
+/// it is: in a rectangle without rotation, stroke or transparency, whose
+/// corners cut the video as they cut the shape. Other fills go through the
+/// CPU renderer, which draws any shape.
+fn direct_video(element: &Element, opacity: f32) -> Option<(crate::document::ImageFit, f32)> {
+    let crate::document::ElementKind::Rectangle(rectangle) = &element.kind else {
+        return None;
+    };
+    let Fill::Video(video) = &rectangle.fill else {
+        return None;
+    };
+    let corners_cut =
+        rectangle.corner_radius == 0. || video.fit != crate::document::ImageFit::Contain;
+    (element.frame.rotation == 0.
+        && rectangle.stroke.is_none()
+        && opacity * video.opacity >= 1.
+        && corners_cut)
+        .then_some((video.fit, rectangle.corner_radius))
+}
+
+/// Flags the key of a video frame drawn as it is, apart from addresses.
+const SERIAL_KEY: usize = 1 << (usize::BITS - 1);
+
+/// Performance figures of the presentation, shown with D.
+#[derive(Default)]
+struct Stats {
+    shown: bool,
+    /// When the last renders ran, for the frames per second.
+    renders: VecDeque<std::time::Instant>,
+    /// When a fill got a new picture, for the pictures per second.
+    pictures: VecDeque<std::time::Instant>,
+    /// The frames the video players decoded, and when, for the decoded
+    /// frames per second.
+    decoded: VecDeque<(std::time::Instant, u64)>,
+    /// Milliseconds of each step of a new picture, averaged.
+    picture_ms: f32,
+    raster_ms: f32,
+    convert_ms: f32,
+    /// Milliseconds of the work of a render before its paint, and of the
+    /// paint, averaged.
+    render_ms: f32,
+    paint_ms: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Pixels of the last rasterized fill.
+    raster_size: (u32, u32),
+}
+
+/// The weight of a new measure in an average.
+const STATS_WEIGHT: f32 = 0.1;
+
+fn average(value: &mut f32, measure: std::time::Duration) {
+    let ms = measure.as_secs_f32() * 1000.;
+    *value = if *value == 0. {
+        ms
+    } else {
+        *value + (ms - *value) * STATS_WEIGHT
+    };
+}
+
+impl Stats {
+    /// Drops what is older than a second, and returns how many are left.
+    fn per_second<T>(times: &mut VecDeque<T>, at: impl Fn(&T) -> std::time::Instant) -> usize {
+        let now = std::time::Instant::now();
+        while times
+            .front()
+            .is_some_and(|first| now.duration_since(at(first)).as_secs_f32() > 1.)
+        {
+            times.pop_front();
+        }
+        times.len()
+    }
+
+    fn lines(&mut self) -> Vec<String> {
+        let fps = Self::per_second(&mut self.renders, |at| *at);
+        let pictures = Self::per_second(&mut self.pictures, |at| *at);
+        Self::per_second(&mut self.decoded, |(at, _)| *at);
+        let decoded = match (self.decoded.front(), self.decoded.back()) {
+            (Some((first, from)), Some((last, to))) if last > first => {
+                to.saturating_sub(*from) as f32 / last.duration_since(*first).as_secs_f32()
+            }
+            _ => 0.,
+        };
+        vec![
+            format!("{fps} fps · {pictures} new pictures/s · {decoded:.0} decoded frames/s"),
+            format!(
+                "picture {:.1} ms · raster {:.1} ms ({}×{}) · convert {:.1} ms",
+                self.picture_ms,
+                self.raster_ms,
+                self.raster_size.0,
+                self.raster_size.1,
+                self.convert_ms
+            ),
+            format!(
+                "render {:.1} ms · paint {:.1} ms",
+                self.render_ms,
+                self.paint_ms.get()
+            ),
+        ]
+    }
 }
 
 pub struct PresenterView {
@@ -188,6 +292,7 @@ pub struct PresenterView {
     frames: HashMap<ElementId, Frame>,
     /// Images to drop from the GPU on the next paint.
     stale: Vec<Arc<RenderImage>>,
+    stats: Stats,
 }
 
 impl PresenterView {
@@ -199,6 +304,7 @@ impl PresenterView {
             rendering: None,
             frames: HashMap::new(),
             stale: Vec::new(),
+            stats: Stats::default(),
         }
     }
 
@@ -296,7 +402,60 @@ impl PresenterView {
                 (element.frame.width * scale).round().max(1.) as u32,
                 (element.frame.height * scale).round().max(1.) as u32,
             );
+            if let Some((fit, radius)) = direct_video(&element, opacity) {
+                let started = std::time::Instant::now();
+                if let Some(video) = self.show.playback.video_frame(id) {
+                    let picture_time = started.elapsed();
+                    let key = SERIAL_KEY | video.serial as usize;
+                    if let Some(frame) = self.frames.remove(&id) {
+                        if frame.key == key {
+                            shown.insert(id, frame);
+                            continue;
+                        }
+                        self.stale.push(frame.image);
+                    }
+                    let stats = &mut self.stats;
+                    average(&mut stats.picture_ms, picture_time);
+                    stats.pictures.push_back(std::time::Instant::now());
+                    stats.raster_ms = 0.;
+                    stats.raster_size = (video.width, video.height);
+                    let started = std::time::Instant::now();
+                    let image =
+                        image::RgbaImage::from_raw(video.width, video.height, video.bgra.to_vec())
+                            .map(|buffer| RenderImage::new(vec![image::Frame::new(buffer)]));
+                    average(&mut stats.convert_ms, started.elapsed());
+                    let Some(image) = image else {
+                        continue;
+                    };
+                    let box_ = element.frame;
+                    let (x, y, width, height) = crate::shape::fit_rect(
+                        fit,
+                        box_.width,
+                        box_.height,
+                        (video.width, video.height),
+                    );
+                    shown.insert(
+                        id,
+                        Frame {
+                            image: Arc::new(image),
+                            area: crate::document::Frame {
+                                x: box_.x + x,
+                                y: box_.y + y,
+                                width,
+                                height,
+                                rotation: 0.,
+                            },
+                            clip: Some((box_, radius)),
+                            key,
+                            scale,
+                        },
+                    );
+                    continue;
+                }
+            }
+            let started = std::time::Instant::now();
             let live = self.show.playback.picture(id, fill, presentation, device);
+            let picture_time = started.elapsed();
             let picture = live.or_else(|| {
                 // Not started, or no frame yet: the still picture.
                 let still = crate::pictures::Picture::of(fill, &element.frame)?;
@@ -315,17 +474,27 @@ impl PresenterView {
                 }
                 self.stale.push(frame.image);
             }
+            let stats = &mut self.stats;
+            average(&mut stats.picture_ms, picture_time);
+            stats.pictures.push_back(std::time::Instant::now());
             let pixels = |_: &Fill, _| picture.clone();
+            let started = std::time::Instant::now();
             let Some((pixmap, area)) = render::render_shape_box(&element, opacity, scale, &pixels)
             else {
                 continue;
             };
-            if let Some(image) = render_image(&pixmap) {
+            average(&mut stats.raster_ms, started.elapsed());
+            stats.raster_size = (pixmap.width(), pixmap.height());
+            let started = std::time::Instant::now();
+            let image = render_image(&pixmap);
+            average(&mut stats.convert_ms, started.elapsed());
+            if let Some(image) = image {
                 shown.insert(
                     id,
                     Frame {
                         image: Arc::new(image),
                         area,
+                        clip: None,
                         key,
                         scale,
                     },
@@ -346,6 +515,7 @@ impl PresenterView {
             "left" | "up" | "pageup" | "backspace" => {
                 self.show.back();
             }
+            "d" => self.stats.shown = !self.stats.shown,
             "escape" => {
                 self.show.playback.clear();
                 window.remove_window();
@@ -382,8 +552,31 @@ impl Render for PresenterView {
         let scale_factor = window.scale_factor();
         // Rendered at device pixels, so that the slide is sharp.
         let device_scale = scale * scale_factor;
+        let started = std::time::Instant::now();
         self.want_layers(device_scale, cx);
         self.render_frames(device_scale);
+        average(&mut self.stats.render_ms, started.elapsed());
+        let now = std::time::Instant::now();
+        self.stats.renders.push_back(now);
+        self.stats
+            .decoded
+            .push_back((now, self.show.playback.delivered()));
+        let hud = self.stats.shown.then(|| {
+            div()
+                .absolute()
+                .top(px(12.))
+                .left(px(12.))
+                .p(px(8.))
+                .rounded(px(6.))
+                .bg(gpui_kit::hsla(0., 0., 0., 0.7))
+                .text_color(gpui_kit::white())
+                .text_size(px(13.))
+                .font_family("monospace")
+                .flex()
+                .flex_col()
+                .children(self.stats.lines())
+        });
+        let paint_ms = self.stats.paint_ms.clone();
         if self.show.playback.animating() {
             window.request_animation_frame();
         }
@@ -421,6 +614,7 @@ impl Render for PresenterView {
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
+                        let started = std::time::Instant::now();
                         for image in stale {
                             window.drop_image(image).ok();
                         }
@@ -444,18 +638,29 @@ impl Render for PresenterView {
                                         .ok();
                                 }
                                 ShownLayer::Apart(id) => {
-                                    let Some(Frame { image, area, .. }) = frames.get(id) else {
+                                    let Some(Frame {
+                                        image, area, clip, ..
+                                    }) = frames.get(id)
+                                    else {
                                         continue;
                                     };
-                                    let area_bounds = Bounds::new(
-                                        origin + point(px(area.x * scale), px(area.y * scale)),
-                                        size(px(area.width * scale), px(area.height * scale)),
-                                    );
+                                    let place = |frame: &crate::document::Frame| {
+                                        Bounds::new(
+                                            origin
+                                                + point(px(frame.x * scale), px(frame.y * scale)),
+                                            size(px(frame.width * scale), px(frame.height * scale)),
+                                        )
+                                    };
+                                    let area_bounds = place(area);
+                                    let (bounds, radius) = match clip {
+                                        Some((shape, radius)) => (place(shape), *radius * scale),
+                                        None => (area_bounds, 0.),
+                                    };
                                     window
                                         .paint_image(
+                                            bounds,
                                             area_bounds,
-                                            area_bounds,
-                                            Default::default(),
+                                            gpui_kit::Corners::all(px(radius)),
                                             image.clone(),
                                             0,
                                             false,
@@ -464,10 +669,14 @@ impl Render for PresenterView {
                                 }
                             }
                         }
+                        let mut ms = paint_ms.get();
+                        average(&mut ms, started.elapsed());
+                        paint_ms.set(ms);
                     },
                 )
                 .size_full(),
             )
+            .children(hud)
     }
 }
 

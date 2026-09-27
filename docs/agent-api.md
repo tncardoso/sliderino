@@ -385,6 +385,9 @@ the slide that the editor shows:
   fills started, the same keys go to the next slide.
 - A click on a video or a shader that started pauses it or plays it again.
 - ← and Page Up go to the previous slide. Esc stops the presentation.
+- D shows or hides the performance figures: the frames per second of the
+  screen, the new pictures and the decoded video frames per second, and the
+  time of each step of a frame.
 
 ## Rotation
 

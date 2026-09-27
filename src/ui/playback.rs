@@ -154,6 +154,25 @@ impl Playback {
         }
     }
 
+    /// The newest frame of a started video fill as GStreamer gives it.
+    pub fn video_frame(&mut self, id: ElementId) -> Option<crate::videos::VideoFrame> {
+        match self.live.get_mut(&id)? {
+            Live::Video(player) => player.video_frame(),
+            Live::Shader { .. } => None,
+        }
+    }
+
+    /// Frames the video players decoded since they started, in total.
+    pub fn delivered(&self) -> u64 {
+        self.live
+            .values()
+            .map(|live| match live {
+                Live::Video(player) => player.delivered(),
+                Live::Shader { .. } => 0,
+            })
+            .sum()
+    }
+
     /// Whether a fill plays, so that the view needs a new frame soon.
     pub fn animating(&self) -> bool {
         self.live.values().any(|live| match live {

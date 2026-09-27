@@ -691,7 +691,7 @@ fn playbin(
     let sink = gst_app::AppSink::builder()
         .caps(
             &gst::Caps::builder("video/x-raw")
-                .field("format", "RGBA")
+                .field("format", "BGRA")
                 .field("width", width as i32)
                 .field("height", height as i32)
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
@@ -714,35 +714,57 @@ fn playbin(
     Ok((playbin, sink))
 }
 
-/// The frame of a sample as premultiplied pixels.
-fn sample_pixels(sample: &gst::Sample) -> Option<Pixmap> {
+/// A decoded frame as the app sink gives it: packed rows of BGRA with
+/// straight alpha, the layout GPUI draws without a conversion.
+#[derive(Clone)]
+pub struct VideoFrame {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Arc<[u8]>,
+    /// Counts the frames of a player, so that a view knows a new one.
+    pub serial: u64,
+}
+
+impl VideoFrame {
+    /// The frame as premultiplied RGBA pixels, for the CPU renderer.
+    pub fn pixmap(&self) -> Option<Pixmap> {
+        let mut pixmap = Pixmap::new(self.width, self.height)?;
+        for (pixel, bgra) in pixmap
+            .pixels_mut()
+            .iter_mut()
+            .zip(self.bgra.as_chunks::<4>().0)
+        {
+            let [b, g, r, a] = *bgra;
+            *pixel = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+        }
+        Some(pixmap)
+    }
+}
+
+/// The frame of a sample, one copy of each row.
+fn sample_frame(sample: &gst::Sample, serial: u64) -> Option<VideoFrame> {
     let caps = sample.caps()?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer()?;
     let map = buffer.map_readable().ok()?;
     let (width, height) = (info.width(), info.height());
     let stride = info.stride()[0] as usize;
-    let mut pixmap = Pixmap::new(width, height)?;
     let line = width as usize * 4;
-    let data = pixmap.data_mut();
-    let mut opaque = true;
+    let mut bgra = Vec::with_capacity(line * height as usize);
     for y in 0..height as usize {
-        let row = &map[y * stride..y * stride + line];
-        data[y * line..(y + 1) * line].copy_from_slice(row);
-        opaque &= row.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255);
+        bgra.extend_from_slice(map.get(y * stride..y * stride + line)?);
     }
-    if !opaque {
-        for pixel in pixmap.pixels_mut() {
-            let straight = tiny_skia::ColorU8::from_rgba(
-                pixel.red(),
-                pixel.green(),
-                pixel.blue(),
-                pixel.alpha(),
-            );
-            *pixel = straight.premultiply();
-        }
-    }
-    Some(pixmap)
+    Some(VideoFrame {
+        width,
+        height,
+        bgra: Arc::from(bgra),
+        serial,
+    })
+}
+
+/// The frame of a sample as premultiplied pixels.
+fn sample_pixels(sample: &gst::Sample) -> Option<Pixmap> {
+    sample_frame(sample, 0)?.pixmap()
 }
 
 /// Decodes the first frame of a video.
@@ -813,8 +835,11 @@ pub struct Player {
     playbin: gst::Element,
     newest: Newest,
     looped: bool,
-    /// The last frame pulled from the sink.
-    frame: Option<Arc<Pixmap>>,
+    /// The last frame pulled from the sink, and its pixels once a CPU
+    /// render asked for them.
+    current: Option<VideoFrame>,
+    pixels: Option<Arc<Pixmap>>,
+    serial: u64,
     finished: bool,
     /// Whether it was asked to play: GStreamer changes state in the
     /// background, so its own state lags behind.
@@ -828,7 +853,15 @@ pub struct Player {
 }
 
 /// The newest sample of an app sink, put there by its streaming thread.
-type Newest = Arc<Mutex<Option<gst::Sample>>>;
+type Newest = Arc<Mutex<Slot>>;
+
+/// What the streaming thread of an app sink hands over.
+#[derive(Default)]
+struct Slot {
+    sample: Option<gst::Sample>,
+    /// Frames the sink got since the pipeline started.
+    delivered: u64,
+}
 
 /// A paused playbin at the start of the video whose frames go to `newest`.
 fn player_pipeline(
@@ -837,10 +870,11 @@ fn player_pipeline(
     sound: bool,
 ) -> Result<(gst::Element, Newest), VideoError> {
     let (playbin, sink) = playbin(data, max_side)?;
-    let newest = Arc::new(Mutex::new(None));
+    let newest: Newest = Arc::default();
     let keep = |newest: &Newest, sample| {
         if let Ok(mut newest) = newest.lock() {
-            *newest = Some(sample);
+            newest.sample = Some(sample);
+            newest.delivered += 1;
         }
         Ok(gst::FlowSuccess::Ok)
     };
@@ -891,7 +925,9 @@ impl Player {
             playbin,
             newest,
             looped,
-            frame: None,
+            current: None,
+            pixels: None,
+            serial: 0,
             finished: false,
             wants_play: false,
             data: data.clone(),
@@ -949,9 +985,9 @@ impl Player {
         self.finished
     }
 
-    /// Handles the end of the video and returns the newest frame. Call it
-    /// on each animation frame.
-    pub fn frame(&mut self) -> Option<Arc<Pixmap>> {
+    /// Handles the end of the video and takes the newest frame. Call it on
+    /// each animation frame.
+    fn poll(&mut self) {
         if let Some(bus) = self.playbin.bus() {
             while let Some(message) =
                 bus.pop_filtered(&[gst::MessageType::Eos, gst::MessageType::Error])
@@ -962,14 +998,48 @@ impl Player {
                 }
             }
         }
-        let sample = self.newest.lock().ok().and_then(|mut newest| newest.take());
-        if let Some(pixels) = sample.as_ref().and_then(sample_pixels) {
-            self.frame = Some(Arc::new(pixels));
+        let sample = self
+            .newest
+            .lock()
+            .ok()
+            .and_then(|mut newest| newest.sample.take());
+        if let Some(frame) = sample
+            .as_ref()
+            .and_then(|sample| sample_frame(sample, self.serial + 1))
+        {
+            self.serial += 1;
+            self.current = Some(frame);
+            self.pixels = None;
         }
-        if self.frame.is_none() && self.sound && self.started.elapsed() > FIRST_FRAME_WAIT {
+        if self.current.is_none() && self.sound && self.started.elapsed() > FIRST_FRAME_WAIT {
             self.drop_sound();
         }
-        self.frame.clone()
+    }
+
+    /// The newest frame as GStreamer gave it, for a view that draws it on
+    /// the GPU as it is.
+    pub fn video_frame(&mut self) -> Option<VideoFrame> {
+        self.poll();
+        self.current.clone()
+    }
+
+    /// The newest frame as premultiplied pixels, for the CPU renderer.
+    pub fn frame(&mut self) -> Option<Arc<Pixmap>> {
+        self.poll();
+        if self.pixels.is_none() {
+            self.pixels = self
+                .current
+                .as_ref()
+                .and_then(VideoFrame::pixmap)
+                .map(Arc::new);
+        }
+        self.pixels.clone()
+    }
+
+    /// Frames GStreamer decoded and handed over since the player started,
+    /// whether they were shown or not.
+    pub fn delivered(&self) -> u64 {
+        self.newest.lock().map_or(0, |newest| newest.delivered)
     }
 
     /// Seconds from the start of the video.
