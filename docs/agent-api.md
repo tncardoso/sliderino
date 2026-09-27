@@ -258,6 +258,98 @@ Use `set_shape_style` to change the style. Give only the fields to change:
 - A field that the shape does not have makes the operation fail. For
   example, a line has no `fill`.
 
+## Tables
+
+A table is a grid of text cells. Add it with `add_element`:
+
+```json
+[
+  {"op": "add_element", "slide": 1, "element": {"id": "$sales",
+    "frame": {"x": 100, "y": 100},
+    "table": {"cells": [["Fruit", "Qty"], ["Apples", "3"], ["Pears", "12"]],
+      "text": {"size": 28}, "fill": {"solid": {"color": "F4F6FA"}}}}},
+  {"op": "set_cell_style", "id": "$sales", "rows": {"start": 0, "end": 1},
+    "fill": {"solid": {"color": "1F4BFF"}}, "text": {"color": "FFFFFF"}},
+  {"op": "set_borders", "id": "$sales", "rows": {"start": 0, "end": 1},
+    "sides": "bottom", "stroke": {"width": 3, "opacity": 1}}
+]
+```
+
+Size:
+
+- The text in a cell does not wrap. `\n` starts a new line.
+- Each column is as wide as its widest cell, and each row is as tall as its
+  tallest cell, plus `padding` (default 12) on each side. A column is at
+  least 2 font sizes wide.
+- `width` and `height` are `"auto"` (the default) or `{"fixed": 400}`. A
+  fixed axis is at least that size: the extra space goes to all columns (or
+  rows) in equal parts. The table is larger when its content needs more.
+- `set_frame` with a new width or height fixes that axis. A size that is
+  not larger than the content sets the axis back to `"auto"`.
+  `set_table_sizing` sets `width` and `height` directly.
+- When a group changes size, a table in it gets the new size as a fixed
+  size. The font size does not change.
+
+Cells:
+
+- A cell is a text, or an object: `{"content": "3", "fill": {..}, "text":
+  {"align": "right"}, "span": {"rows": 1, "columns": 2}}`.
+- `text` of the table is a style patch over the table text style: Inter 24,
+  `vertical_align` `middle`. `text` of a cell is a style patch over the
+  table text style.
+- `fill` of the table is the fill of each cell. The default is `"none"`. The
+  `fill` of a cell replaces it. Cells cannot show videos or shaders.
+- Rows and columns count from 0. A range is `{"start": 0, "end": 2}`; `end`
+  is not in the range. `rows` or `columns` that you do not give mean all
+  rows or all columns.
+
+Merged cells:
+
+- The top-left cell of a merge (the anchor) has a `span` and holds the text.
+  The other cells of the merge are empty and are not drawn.
+- `merge_cells` merges a range. The texts that are not empty become the
+  lines of the anchor. `split_cell` splits the merge that holds a cell. The
+  text stays in the anchor.
+- A range always grows to hold complete merges.
+- Inserted rows or columns in a merge make the merge larger. Removed rows or
+  columns make it smaller. An operation that cuts a merge in two fails
+  (`move_rows` and `move_columns`).
+
+Borders:
+
+- `stroke` of the table is the stroke of each edge. The default is
+  `{"color": "111111", "opacity": 0.4, "width": 2}`. `"stroke": null` draws
+  no grid.
+- `set_borders` sets the edges of a range that `sides` gives: `all`,
+  `outside`, `inside`, `inside_horizontal`, `inside_vertical`, `top`,
+  `bottom`, `left` or `right`. `stroke` is a stroke (only the fields that
+  change from the table stroke), `null` (no line) or `"inherit"` (the table
+  stroke again).
+- Two neighbor cells share one edge.
+
+Operations:
+
+| `op` | Fields |
+| --- | --- |
+| `set_cell_text` | `id`, `row`, `column`, `text`, `range` (optional; bytes of the text to replace) |
+| `set_cells` | `id`, `row` (default 0), `column` (default 0), `values` (rows of texts). The table grows when the values do not fit. |
+| `insert_rows`, `insert_columns` | `id`, `index` (the new rows go before it), `count` (default 1). They copy the style of the row or column before them. |
+| `remove_rows`, `remove_columns` | `id`, `index`, `count` (default 1). A table keeps at least one row and one column. |
+| `move_rows`, `move_columns` | `id`, `index`, `count` (default 1), `to` (the rows go before this row) |
+| `merge_cells` | `id`, `rows`, `columns` |
+| `split_cell` | `id`, `row`, `column` |
+| `set_table_style` | `id`, `text`, `fill`, `stroke`, `padding` (all optional) |
+| `set_cell_style` | `id`, `rows`, `columns`, `fill` (`null`: the table fill), `text`, `reset_text` (removes the text overrides first) |
+| `set_borders` | `id`, `rows`, `columns`, `sides`, `stroke` |
+| `set_table_sizing` | `id`, `width`, `height` |
+
+- The operations in one `batch` see the changes of the operations before
+  them.
+- `get_elements` adds `layout` to a table: `columns` and `rows` (their
+  sizes) and `missing_glyphs`.
+- `find_elements` finds the text of table cells. A match in a table adds
+  `cell` (`{"row": 1, "column": 0}`).
+
 ## Fonts
 
 A presentation holds its fonts. The editor embeds an installed face when an
@@ -485,6 +577,8 @@ change and selects the changed element.
 | `unknown_slide`, `unknown_element` | The id does not exist. |
 | `render_failed` | The editor cannot render the slide or the shader video. |
 | `operation_failed` | An operation cannot apply. `data.op` gives its index. |
+| `operation_failed` with "no cell at row R, column C" | The cell is not in the table, or a merge covers it. |
+| `operation_failed` with "the edit would cut a merged cell" | Move the complete merge, or split it first. |
 | `stale_revision` | The document changed after `base_revision`. |
 | `no_presentation` | The window shows the Home screen. Call `new_presentation` or `open_presentation`. |
 | `unsaved_changes` | The open presentation has unsaved changes and the call gives no `discard: true`. |

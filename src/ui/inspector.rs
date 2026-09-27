@@ -289,8 +289,15 @@ impl EditorView {
             .map_or(1., |element| element.opacity)
     }
 
+    /// The id, frame, style and sizing a text shows in the inspector. A
+    /// table shows the style of its text or of its first selected cell, and
+    /// sizes like a fixed box.
     fn text_parts(&self, id: ElementId) -> Option<(ElementId, Frame, TextStyle, TextSizing)> {
         let element = self.presentation.element(id)?;
+        if element.as_table().is_some() {
+            let style = self.table_text_style(id)?;
+            return Some((id, element.frame, style, TextSizing::Fixed));
+        }
         let text = element.as_text()?;
         Some((id, element.frame, text.style.clone(), text.sizing))
     }
@@ -442,6 +449,7 @@ impl EditorView {
             return;
         }
         if let Some((label, operation)) = field_edit(field, &typed, id, &frame, &style, sizing) {
+            let operation = self.route_table_styles(operation);
             let selection = self.selection.clone();
             self.commit(label, operation, vec![id]);
             self.selection = selection;
@@ -584,7 +592,9 @@ impl EditorView {
     pub fn set_style(&mut self, patch: TextStylePatch) {
         if let Some((id, ..)) = self.selected_text() {
             let label = patch.label();
-            self.commit(label, Operation::SetTextStyle { id, patch }, vec![id]);
+            if let Some(operation) = self.text_style_operation(id, patch) {
+                self.commit(label, operation, vec![id]);
+            }
         }
     }
 
@@ -592,6 +602,7 @@ impl EditorView {
     pub fn set_sizing(&mut self, sizing: TextSizing) {
         if let Some((id, _, _, current)) = self.selected_text()
             && current != sizing
+            && self.selected_table().is_none()
         {
             self.commit(
                 "Resizing",
@@ -651,7 +662,8 @@ impl EditorView {
                 ..Default::default()
             },
         });
-        self.commit("Font", Operation::Batch(operations), vec![id]);
+        let operation = self.route_table_styles(Operation::Batch(operations));
+        self.commit("Font", operation, vec![id]);
     }
 
     /// Uses another family for the selected text, keeping the face closest

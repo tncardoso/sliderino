@@ -400,10 +400,15 @@ impl ShapeInspector {
 }
 
 impl EditorView {
-    /// The selected elements when every one is a shape.
+    /// The selected elements when every one is a shape, or the selected
+    /// table: the fill and stroke inspector edits it through a stand-in
+    /// rectangle (see [`Self::table_proxy`]).
     pub fn selected_shapes(&self) -> Option<Vec<ElementId>> {
         if self.selection.is_empty() {
             return None;
+        }
+        if let Some((id, _)) = self.selected_table() {
+            return Some(vec![id]);
         }
         self.selection
             .iter()
@@ -417,8 +422,13 @@ impl EditorView {
 
     fn shape_kinds(&self, ids: &[ElementId]) -> Vec<ElementKind> {
         ids.iter()
-            .filter_map(|id| self.presentation.element(*id))
-            .map(|element| element.kind.clone())
+            .filter_map(|id| {
+                let element = self.presentation.element(*id)?;
+                match element.as_table() {
+                    Some(_) => self.table_proxy(*id),
+                    None => Some(element.kind.clone()),
+                }
+            })
             .collect()
     }
 
@@ -543,8 +553,12 @@ impl EditorView {
             .iter()
             .filter_map(|id| {
                 let element = self.presentation.element(*id)?;
-                let patch = patch(&element.kind)?;
-                Some(Operation::SetShapeStyle { id: *id, patch })
+                let kind = match element.as_table() {
+                    Some(_) => self.table_proxy(*id)?,
+                    None => element.kind.clone(),
+                };
+                let patch = patch(&kind)?;
+                self.style_operation(*id, patch)
             })
             .collect();
         if operations.is_empty() {

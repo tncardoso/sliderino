@@ -109,18 +109,15 @@ pub fn render_slide_at(
     }
     let pixels = presentation_pixels(presentation, time);
     for (element, opacity, layout) in &leaves {
-        let transform = turned(transform, &element.frame);
-        match layout {
-            Some(layout) => paint_text(
-                &mut pixmap,
-                presentation,
-                element,
-                *opacity,
-                layout,
-                transform,
-            ),
-            None => paint_shape(&mut pixmap, element, *opacity, transform, &pixels),
-        }
+        paint_element(
+            &mut pixmap,
+            presentation,
+            element,
+            *opacity,
+            layout.as_ref(),
+            transform,
+            &pixels,
+        );
     }
     if overlay {
         for (element, layout) in texts() {
@@ -177,24 +174,58 @@ pub fn render_layers(
             layers.push(Layer::Apart(element.id));
             continue;
         }
-        let turned = turned(transform, &element.frame);
-        match presentation.text_layout(element.id) {
-            Some(layout) => paint_text(
-                &mut current,
-                presentation,
-                element,
-                node.opacity,
-                &layout,
-                turned,
-            ),
-            None => paint_shape(&mut current, element, node.opacity, turned, &pixels),
-        }
+        let layout = presentation.text_layout(element.id);
+        paint_element(
+            &mut current,
+            presentation,
+            element,
+            node.opacity,
+            layout.as_ref(),
+            transform,
+            &pixels,
+        );
         drawn = true;
     }
     if drawn {
         layers.push(Layer::Still(current));
     }
     Ok(layers)
+}
+
+/// Paints a text with its layout, a table, or a shape. `transform` maps
+/// slide units to pixels, without the rotation of the element.
+fn paint_element(
+    pixmap: &mut Pixmap,
+    presentation: &Presentation,
+    element: &Element,
+    opacity: f32,
+    layout: Option<&TextLayout>,
+    transform: Transform,
+    pixels: Pixels,
+) {
+    if let Some(layout) = layout {
+        let turned = turned(transform, &element.frame);
+        paint_text(pixmap, presentation, element, opacity, layout, turned);
+        return;
+    }
+    if let Some(table) = element.as_table() {
+        let Some(layout) = presentation.table_layout(element.id) else {
+            return;
+        };
+        for part in crate::table::parts(element.id, &element.frame, table, &layout) {
+            let part_element = part.element();
+            let turned = turned(transform, &part_element.frame);
+            match &part {
+                crate::table::Part::Text { layout, .. } => {
+                    paint_text(pixmap, presentation, part_element, opacity, layout, turned)
+                }
+                _ => paint_shape(pixmap, part_element, opacity, turned, pixels),
+            }
+        }
+        return;
+    }
+    let turned = turned(transform, &element.frame);
+    paint_shape(pixmap, element, opacity, turned, pixels);
 }
 
 /// `transform` with the rotation of `frame` around its center applied first.
@@ -744,8 +775,10 @@ fn paint_overlay_over(
     }
 }
 
-/// What a debug run prints about one text box.
+/// What a debug run prints about one text box or one table.
 pub struct TextReport {
+    /// "text" or "table".
+    pub kind: &'static str,
     pub id: ElementId,
     pub frame: Frame,
     pub lines: usize,
@@ -758,7 +791,8 @@ impl std::fmt::Display for TextReport {
         let frame = &self.frame;
         write!(
             f,
-            "text {}: frame {:.1},{:.1} {:.1}×{:.1}{}, {} line{}, overflow {:.1} px, missing glyphs {}",
+            "{} {}: frame {:.1},{:.1} {:.1}×{:.1}{}, {} line{}, overflow {:.1} px, missing glyphs {}",
+            self.kind,
             self.id.0,
             frame.x,
             frame.y,
@@ -777,16 +811,34 @@ impl std::fmt::Display for TextReport {
     }
 }
 
-/// Reports every visible text box of a slide, in paint order.
+/// Reports every visible text box and table of a slide, in paint order. A
+/// table never overflows: it grows with its text.
 pub fn report(presentation: &Presentation, slide: SlideId) -> Vec<TextReport> {
     let Some(slide) = presentation.slide(slide) else {
         return Vec::new();
     };
     slide
-        .visible_texts()
-        .filter_map(|(element, _)| {
+        .visible_leaves()
+        .filter_map(|node| {
+            let element = node.element;
+            if element.as_table().is_some() {
+                let layout = presentation.table_layout(element.id)?;
+                return Some(TextReport {
+                    kind: "table",
+                    id: element.id,
+                    frame: element.frame,
+                    lines: layout
+                        .cells
+                        .iter()
+                        .map(|cell| cell.layout.lines.len())
+                        .sum(),
+                    overflow: 0.,
+                    missing_glyphs: layout.missing_glyphs,
+                });
+            }
             let layout = presentation.text_layout(element.id)?;
             Some(TextReport {
+                kind: "text",
                 id: element.id,
                 frame: element.frame,
                 lines: layout.lines.len(),

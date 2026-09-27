@@ -36,9 +36,9 @@ cargo run --bin sliderino-debug -- scene --ops debug/scenes/text.json -o shot.pn
 The capture needs an X11 display, `xdotool` and `import` (ImageMagick).
 Each operation of the scene is one step in the History tab.
 
-Both commands write one line for each text box of the slide: the frame, the
-number of lines, the overflow and the number of characters that the font
-does not have.
+Both commands write one line for each text box and each table of the
+slide: the frame, the number of lines, the overflow and the number of
+characters that the font does not have.
 
 ## Scene files
 
@@ -80,6 +80,7 @@ the same format (see `agent-api.md`).
 | `remove_image` | `id` |
 | `add_video` | `id` (optional), `path` (from the folder of the scene) or `data` (base64). Other formats than MP4 with H.264 change to it. |
 | `remove_video` | `id` |
+| `set_cell_text`, `set_cells`, `insert_rows`, `remove_rows`, `move_rows`, `insert_columns`, `remove_columns`, `move_columns`, `merge_cells`, `split_cell`, `set_table_style`, `set_cell_style`, `set_borders`, `set_table_sizing` | See "Tables" in `agent-api.md` |
 | `batch` | `ops` (a list of operations; all apply or none apply) |
 
 Rules:
@@ -96,8 +97,9 @@ Rules:
 - `add_font` with `path` adds the faces of a TTF, OTF or TTC file. See
   `debug/scenes/custom-font.json` and "Fonts" in `agent-api.md`.
 - `sizing` is `auto_width`, `auto_height` or `fixed`.
-- An element has a `text`, a `group`, a `rectangle`, an `ellipse` or a
-  `line`. A group has `children`, a list of elements. The last child is on
+- An element has a `text`, a `group`, a `rectangle`, an `ellipse`, a
+  `line` or a `table`. See `debug/scenes/tables.json` and "Tables" in
+  `agent-api.md`. A group has `children`, a list of elements. The last child is on
   top. Frames of children are in slide units, as all frames.
 - Shapes have the same fields as in the agent API. See "Shapes" in
   `agent-api.md`.

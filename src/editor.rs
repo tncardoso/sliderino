@@ -24,7 +24,8 @@ use gpui_kit::{
 use crate::camera::Camera;
 use crate::document::{
     ApplyError, Element, ElementId, ElementKind, EllipseElement, Fill, Frame, LineElement,
-    Operation, Presentation, RectangleElement, Slide, SlideId, TextElement, TextSizing, TextStyle,
+    Operation, Presentation, RectangleElement, Slide, SlideId, TableElement, TextElement,
+    TextSizing, TextStyle,
 };
 use crate::fonts::FontRegistry;
 use crate::history::{History, Selection};
@@ -50,17 +51,34 @@ pub enum Tool {
     Rectangle,
     Ellipse,
     Line,
+    Table,
     Image,
     Component,
+}
+
+gpui_kit::actions!(editor, [NextCell, PreviousCell]);
+
+/// The key context of the editor; its bindings win over those of the
+/// window root, such as Tab moving the focus.
+const KEY_CONTEXT: &str = "SliderinoEditor";
+
+/// Binds Tab and Shift-Tab to the cells of a table while one is edited.
+pub fn bind_keys(cx: &mut gpui_kit::App) {
+    cx.bind_keys([
+        gpui_kit::KeyBinding::new("tab", NextCell, Some(KEY_CONTEXT)),
+        gpui_kit::KeyBinding::new("shift-tab", PreviousCell, Some(KEY_CONTEXT)),
+    ]);
 }
 
 /// A point on the slide, in slide units.
 pub type SlidePoint = Point<f32>;
 
-/// A text box being edited in place.
+/// A text box, or the text of a table cell, being edited in place.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextEdit {
     pub id: ElementId,
+    /// The row and column of the cell when `id` is a table.
+    pub cell: Option<(usize, usize)>,
     /// Byte index of the caret in the content.
     pub caret: usize,
     /// Other end of the selection; equal to `caret` when nothing is selected.
@@ -80,6 +98,30 @@ impl TextEdit {
         self.caret = index;
         self.anchor = index;
         self.goal_x = None;
+    }
+}
+
+/// Cells of a table selected on the canvas: from `anchor` to `focus`, grown
+/// to hold whole merges. The table itself is the selected element.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableEdit {
+    pub id: ElementId,
+    pub anchor: (usize, usize),
+    pub focus: (usize, usize),
+}
+
+impl TableEdit {
+    pub fn cell(id: ElementId, row: usize, column: usize) -> Self {
+        Self {
+            id,
+            anchor: (row, column),
+            focus: (row, column),
+        }
+    }
+
+    /// The selected range of `table`.
+    pub fn range(&self, table: &TableElement) -> crate::table::CellRange {
+        table.expand(&crate::table::CellRange::between(self.anchor, self.focus))
     }
 }
 
@@ -155,6 +197,27 @@ pub enum Drag {
     },
     /// Extending the text selection of the box being edited.
     SelectText { id: ElementId },
+    /// Drawing a new table with the table tool: every [`DRAW_STEP`] of the
+    /// drag adds a column or a row.
+    ///
+    /// [`DRAW_STEP`]: crate::table::DRAW_STEP
+    DrawTable {
+        start: SlidePoint,
+        current: SlidePoint,
+    },
+    /// Extending the cell selection of a table from `anchor`.
+    SelectCells {
+        id: ElementId,
+        anchor: (usize, usize),
+    },
+    /// Moving whole rows (`rows`) or columns of a table: `range` goes
+    /// before line `to`.
+    MoveCells {
+        id: ElementId,
+        rows: bool,
+        range: Range<usize>,
+        to: usize,
+    },
     /// Turning the selection around `pivot`, the center of its box `origin`.
     /// `origin_rotation` is the angle of a single element, 0 for several;
     /// `delta` is the turn so far. The document keeps the frames until the
@@ -332,6 +395,73 @@ impl LayoutCache {
     }
 }
 
+/// Layouts of the tables of the presentation. The text of each drawn cell
+/// is shared as an `Arc`, so the canvas caches keyed by layout keep their
+/// entries from frame to frame.
+#[derive(Default)]
+pub struct TableLayoutCache {
+    entries: HashMap<ElementId, Vec<TableView>>,
+}
+
+/// A table laid out, with the text layout of each drawn cell, in the order
+/// of [`TableLayout::cells`](crate::table::TableLayout::cells).
+#[derive(Clone)]
+pub struct TableView {
+    pub table: TableElement,
+    pub layout: Arc<crate::table::TableLayout>,
+    pub texts: Vec<Arc<TextLayout>>,
+}
+
+impl TableView {
+    /// The text layout of the anchor (`row`, `column`).
+    pub fn text(&self, row: usize, column: usize) -> Option<&Arc<TextLayout>> {
+        let index = self
+            .layout
+            .cells
+            .iter()
+            .position(|cell| cell.row == row && cell.column == column)?;
+        self.texts.get(index)
+    }
+}
+
+impl TableLayoutCache {
+    /// The layout of a table of the document.
+    pub fn get(&mut self, presentation: &Presentation, id: ElementId) -> Option<TableView> {
+        let table = presentation.element(id)?.as_table()?;
+        self.get_for(presentation, id, table)
+    }
+
+    /// The layout of `table`, a version of the table `id` such as the
+    /// preview of a resize.
+    pub fn get_for(
+        &mut self,
+        presentation: &Presentation,
+        id: ElementId,
+        table: &TableElement,
+    ) -> Option<TableView> {
+        let cached = self.entries.entry(id).or_default();
+        if let Some(position) = cached.iter().position(|view| view.table == *table) {
+            let hit = cached.remove(position);
+            cached.insert(0, hit.clone());
+            return Some(hit);
+        }
+        let _span = crate::perf::span("table_layout_cache_miss");
+        let layout = crate::table::layout(table, &presentation.fonts).ok()?;
+        let view = TableView {
+            table: table.clone(),
+            texts: layout
+                .cells
+                .iter()
+                .map(|cell| Arc::new(cell.layout.clone()))
+                .collect(),
+            layout: Arc::new(layout),
+        };
+        cached.insert(0, view.clone());
+        cached.truncate(LAYOUTS_PER_ELEMENT);
+        Some(view)
+    }
+}
+
 pub struct EditorView {
     /// Slide shown on the canvas.
     pub current_slide: SlideId,
@@ -353,6 +483,17 @@ pub struct EditorView {
     /// Selected elements, always on the current slide, in selection order.
     pub selection: Vec<ElementId>,
     pub text_edit: Option<TextEdit>,
+    /// Cells selected in the selected table.
+    pub table_edit: Option<TableEdit>,
+    /// The last cells copied, with the text they put on the clipboard: a
+    /// paste of that text brings their styles and merges back.
+    pub table_clip: Option<(String, crate::table::Clip)>,
+    /// Where a click inserts a row (`true`) or a column of the selected
+    /// table, shown as a "+" button while the pointer is near.
+    pub table_insert: Option<(bool, usize)>,
+    /// The edges of the selected cells that the stroke of the properties
+    /// panel sets.
+    pub border_sides: crate::table::Sides,
     pub drag: Option<Drag>,
     /// Layer under the pointer in the hierarchy, outlined on the canvas.
     pub hovered_layer: Option<ElementId>,
@@ -369,9 +510,11 @@ pub struct EditorView {
     /// The pointer is in a rotation zone of the selection, outside a corner.
     pub hover_rotate: bool,
     pub layouts: LayoutCache,
+    pub tables: TableLayoutCache,
     pub fonts: FontRegistry,
     pub inspector: Inspector,
     pub shape_inspector: ShapeInspector,
+    pub table_inspector: crate::ui::table_edit::TableInspector,
     pub shortcuts: Shortcuts,
     /// None until the canvas is first measured; then it is fitted.
     pub camera: Option<Camera>,
@@ -450,6 +593,10 @@ impl EditorView {
             history,
             selection: Vec::new(),
             text_edit: None,
+            table_edit: None,
+            table_clip: None,
+            table_insert: None,
+            border_sides: crate::table::Sides::All,
             drag: None,
             hovered_layer: None,
             collapsed: HashSet::new(),
@@ -459,9 +606,11 @@ impl EditorView {
             guides: Vec::new(),
             hover_rotate: false,
             layouts: LayoutCache::default(),
+            tables: TableLayoutCache::default(),
             fonts: FontRegistry::default(),
             inspector: Inspector::new(window, cx),
             shape_inspector: ShapeInspector::new(window, cx),
+            table_inspector: crate::ui::table_edit::TableInspector::new(window, cx),
             shortcuts: Shortcuts::default(),
             camera: None,
             viewport: Bounds::default(),
@@ -712,6 +861,8 @@ impl EditorView {
                     | Drag::LineEnd { .. }
                     | Drag::Marquee { .. }
                     | Drag::Rotate { .. }
+                    | Drag::DrawTable { .. }
+                    | Drag::MoveCells { .. }
             )
         })
     }
@@ -863,12 +1014,10 @@ impl EditorView {
             .into_iter()
             .filter(|id| on_slide(self, *id))
             .collect();
+        self.repair_table_edit();
+        let edited = self.edit_content().map(str::to_string);
         if let Some(edit) = &mut self.text_edit {
-            let content = self
-                .presentation
-                .element(edit.id)
-                .and_then(Element::as_text)
-                .map(|text| text.content.as_str());
+            let content = edited.as_deref();
             match content {
                 Some(content) if self.selection == [edit.id] => {
                     let clamp = |index: usize| floor_boundary(content, index.min(content.len()));
@@ -1277,13 +1426,19 @@ impl EditorView {
 
     /// Enters text editing with the given selection.
     pub fn begin_text_edit(&mut self, id: ElementId, anchor: usize, caret: usize) {
-        if self.text_edit.as_ref().is_some_and(|edit| edit.id != id) {
+        if self
+            .text_edit
+            .as_ref()
+            .is_some_and(|edit| edit.id != id || edit.cell.is_some())
+        {
             self.end_text_edit();
         }
         self.history.close_burst();
         self.selection = vec![id];
+        self.table_edit = None;
         self.text_edit = Some(TextEdit {
             id,
+            cell: None,
             caret,
             anchor,
             marked: None,
@@ -1291,12 +1446,39 @@ impl EditorView {
         });
     }
 
-    /// Leaves text editing. A box left empty is deleted.
+    /// Enters editing of the text of a table cell, which becomes the cell
+    /// selection.
+    pub fn begin_cell_edit(
+        &mut self,
+        id: ElementId,
+        (row, column): (usize, usize),
+        anchor: usize,
+        caret: usize,
+    ) {
+        self.end_text_edit();
+        self.history.close_burst();
+        self.selection = vec![id];
+        self.table_edit = Some(TableEdit::cell(id, row, column));
+        self.text_edit = Some(TextEdit {
+            id,
+            cell: Some((row, column)),
+            caret,
+            anchor,
+            marked: None,
+            goal_x: None,
+        });
+    }
+
+    /// Leaves text editing. A box left empty is deleted; a table cell keeps
+    /// its cell selected.
     pub fn end_text_edit(&mut self) {
         let Some(edit) = self.text_edit.take() else {
             return;
         };
         self.history.close_burst();
+        if edit.cell.is_some() {
+            return;
+        }
         let empty = self
             .presentation
             .element(edit.id)
@@ -1314,8 +1496,36 @@ impl EditorView {
     /// Content of the text being edited.
     pub fn edit_content(&self) -> Option<&str> {
         let edit = self.text_edit.as_ref()?;
-        let text = self.presentation.element(edit.id)?.as_text()?;
-        Some(&text.content)
+        let element = self.presentation.element(edit.id)?;
+        match edit.cell {
+            Some((row, column)) => Some(&element.as_table()?.cell(row, column)?.content),
+            None => Some(&element.as_text()?.content),
+        }
+    }
+
+    /// The layout of the text being edited and the frame of its box on the
+    /// slide: the text element, or the inside of the table cell.
+    pub fn edit_box(&mut self) -> Option<(Arc<TextLayout>, Frame)> {
+        let edit = self.text_edit.clone()?;
+        match edit.cell {
+            Some((row, column)) => self.cell_box(edit.id, row, column),
+            None => Some((self.layout_of(edit.id)?, self.frame_of(edit.id)?)),
+        }
+    }
+
+    /// The layout of the text of a table cell and the frame of its box on
+    /// the slide.
+    pub fn cell_box(
+        &mut self,
+        id: ElementId,
+        row: usize,
+        column: usize,
+    ) -> Option<(Arc<TextLayout>, Frame)> {
+        let frame = self.presentation.element(id)?.frame;
+        let view = self.tables.get(&self.presentation, id)?;
+        let cell = view.layout.cell(row, column)?;
+        let layout = view.text(row, column)?.clone();
+        Some((layout, crate::table::place(&frame, &cell.inner)))
     }
 
     /// Replaces `range` of the edited text, as typing: the change joins the
@@ -1325,10 +1535,19 @@ impl EditorView {
             return;
         };
         let id = edit.id;
-        let operation = Operation::ReplaceText {
-            id,
-            range: range.clone(),
-            text: text.into(),
+        let operation = match edit.cell {
+            Some((row, column)) => Operation::ReplaceCellText {
+                id,
+                row,
+                column,
+                range: range.clone(),
+                text: text.into(),
+            },
+            None => Operation::ReplaceText {
+                id,
+                range: range.clone(),
+                text: text.into(),
+            },
         };
         match self.presentation.apply(operation) {
             Ok(inverse) => {
@@ -1401,6 +1620,9 @@ impl EditorView {
 
         match keystroke.key.as_str() {
             "escape" => self.end_text_edit(),
+            "tab" if edit.cell.is_some() && !modifiers.control && !modifiers.alt => {
+                self.tab_cell(shift);
+            }
             "enter" => self.type_text(selection, "\n"),
             "backspace" | "delete" => {
                 let range = if !selection.is_empty() {
@@ -1478,7 +1700,7 @@ impl EditorView {
         let Some(edit) = self.text_edit.clone() else {
             return;
         };
-        let Some(layout) = self.layout_of(edit.id) else {
+        let Some((layout, _)) = self.edit_box() else {
             return;
         };
         let line = layout.line_of(edit.caret);
@@ -1503,7 +1725,7 @@ impl EditorView {
         let Some(edit) = self.text_edit.clone() else {
             return 0;
         };
-        let Some(layout) = self.layout_of(edit.id) else {
+        let Some((layout, _)) = self.edit_box() else {
             return edit.caret;
         };
         let line = &layout.lines[layout.line_of(edit.caret)];
@@ -1539,6 +1761,8 @@ impl EditorView {
                         | Drag::Create { .. }
                         | Drag::Draw { .. }
                         | Drag::LineEnd { .. }
+                        | Drag::DrawTable { .. }
+                        | Drag::MoveCells { .. }
                 )
             )
         {
@@ -1560,6 +1784,11 @@ impl EditorView {
             }
             return;
         }
+        if focused && self.table_edit.is_some() && self.on_table_key(keystroke, cx) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if focused && self.on_editor_key(keystroke) {
             cx.stop_propagation();
             cx.notify();
@@ -1569,7 +1798,7 @@ impl EditorView {
             && keystroke.key == "v"
             && keystroke.modifiers.secondary()
             && !keystroke.modifiers.shift
-            && self.paste_image(window, cx)
+            && (self.paste_image(window, cx) || self.paste_table(cx))
         {
             cx.stop_propagation();
             cx.notify();
@@ -1596,6 +1825,17 @@ impl EditorView {
             return;
         }
         cx.stop_propagation();
+    }
+
+    /// Tab and Shift-Tab: the next or previous cell while table cells are
+    /// selected or edited; otherwise the key moves the focus as usual.
+    fn on_tab_action(&mut self, back: bool, cx: &mut Context<Self>) {
+        if self.table_edit.is_some() {
+            self.tab_cell(back);
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
     }
 
     /// Undo, redo and the keys that act on the selection.
@@ -1706,6 +1946,11 @@ impl EditorView {
         };
         if let Some(group) = element.as_group() {
             self.selection = group.children.iter().map(|child| child.id).collect();
+            return true;
+        }
+        if let Some(table) = element.as_table() {
+            let len = table.cell(0, 0).map_or(0, |cell| cell.content.len());
+            self.begin_cell_edit(id, (0, 0), 0, len);
             return true;
         }
         match element.as_text().map(|text| text.content.len()) {
@@ -1938,6 +2183,7 @@ impl Render for EditorView {
         let _span = crate::perf::span("render");
         self.sync_inspector(window, cx);
         self.sync_shape_inspector(window, cx);
+        self.sync_table_inspector(window, cx);
         self.sync_preview();
         let scene = self.canvas_scene(cx);
         if self.preview.borrow().animating() {
@@ -1946,7 +2192,10 @@ impl Render for EditorView {
         let problems = crate::ui::properties_panel::diagnostics(self);
         let root = v_flex()
             .id("editor")
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &NextCell, _, cx| this.on_tab_action(false, cx)))
+            .on_action(cx.listener(|this, _: &PreviousCell, _, cx| this.on_tab_action(true, cx)))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .size_full()

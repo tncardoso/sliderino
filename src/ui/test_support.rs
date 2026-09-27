@@ -22,6 +22,7 @@ pub fn open_with(
 ) -> WindowHandle<EditorView> {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        crate::editor::bind_keys(cx);
         crate::theme::apply(cx);
         cx.text_system()
             .add_fonts(crate::assets::fonts())

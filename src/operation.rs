@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::document::{
     Arrowhead, Element, ElementId, ElementKind, Fill, FontData, FontFace, Frame, HAlign, ImageData,
-    ImageId, LineHeight, Rgb, Slide, SlideId, Stroke, TextCase, TextSizing, TextStyle, VAlign,
-    VideoData, VideoId,
+    ImageId, LineHeight, Rgb, Slide, SlideId, Stroke, TableElement, TextCase, TextSizing,
+    TextStyle, VAlign, VideoData, VideoId,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +90,20 @@ pub enum Operation {
         id: ElementId,
         range: Range<usize>,
         text: String,
+    },
+    /// Replaces a byte range of the text of a table cell. The cell must be
+    /// drawn: not covered by a merge.
+    ReplaceCellText {
+        id: ElementId,
+        row: usize,
+        column: usize,
+        range: Range<usize>,
+        text: String,
+    },
+    /// Replaces a whole table: its cells, styles, borders and sizing.
+    SetTable {
+        id: ElementId,
+        table: Box<TableElement>,
     },
     /// Embeds a font face in the presentation.
     AddFont {
@@ -187,17 +201,47 @@ impl LayerPatch {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TextStylePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub font: Option<FontFace>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line_height: Option<LineHeight>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub letter_spacing: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub align: Option<HAlign>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vertical_align: Option<VAlign>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub underline: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub strikethrough: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub case: Option<TextCase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<Rgb>,
+}
+
+impl From<TextStyle> for TextStylePatch {
+    /// A patch that sets every field.
+    fn from(style: TextStyle) -> Self {
+        Self {
+            font: Some(style.font),
+            size: Some(style.size),
+            line_height: Some(style.line_height),
+            letter_spacing: Some(style.letter_spacing),
+            align: Some(style.align),
+            vertical_align: Some(style.vertical_align),
+            paragraph_spacing: Some(style.paragraph_spacing),
+            underline: Some(style.underline),
+            strikethrough: Some(style.strikethrough),
+            case: Some(style.case),
+            color: Some(style.color),
+        }
+    }
 }
 
 impl TextStylePatch {
@@ -242,6 +286,47 @@ impl TextStylePatch {
             strikethrough: swap(self.strikethrough, &mut style.strikethrough),
             case: swap(self.case, &mut style.case),
             color: swap(self.color, &mut style.color),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Adds the fields `other` sets, replacing those already set.
+    pub fn merge(&mut self, other: TextStylePatch) {
+        if other.font.is_some() {
+            self.font = other.font;
+        }
+        if other.size.is_some() {
+            self.size = other.size;
+        }
+        if other.line_height.is_some() {
+            self.line_height = other.line_height;
+        }
+        if other.letter_spacing.is_some() {
+            self.letter_spacing = other.letter_spacing;
+        }
+        if other.align.is_some() {
+            self.align = other.align;
+        }
+        if other.vertical_align.is_some() {
+            self.vertical_align = other.vertical_align;
+        }
+        if other.paragraph_spacing.is_some() {
+            self.paragraph_spacing = other.paragraph_spacing;
+        }
+        if other.underline.is_some() {
+            self.underline = other.underline;
+        }
+        if other.strikethrough.is_some() {
+            self.strikethrough = other.strikethrough;
+        }
+        if other.case.is_some() {
+            self.case = other.case;
+        }
+        if other.color.is_some() {
+            self.color = other.color;
         }
     }
 
@@ -349,7 +434,7 @@ impl ShapeStylePatch {
                 None,
                 Some((&mut line.start, &mut line.end)),
             ),
-            ElementKind::Text(_) | ElementKind::Group(_) => {
+            ElementKind::Text(_) | ElementKind::Group(_) | ElementKind::Table(_) => {
                 return Err(ApplyError::NotShape(id));
             }
         };
@@ -437,6 +522,16 @@ pub enum ApplyError {
     DuplicateVideo(VideoId),
     /// A fill uses the video.
     VideoInUse(VideoId),
+    NotTable(ElementId),
+    /// No such cell, or the cell is covered by a merge.
+    InvalidCell {
+        row: usize,
+        column: usize,
+    },
+    /// The table breaks a rule, given as the message.
+    InvalidTable(&'static str),
+    /// The edit would cut a merged cell in two.
+    CutsMerge,
 }
 
 impl std::fmt::Display for ApplyError {
@@ -478,6 +573,12 @@ impl std::fmt::Display for ApplyError {
             ApplyError::MissingVideo(id) => write!(f, "video {} is not embedded", id.0),
             ApplyError::DuplicateVideo(id) => write!(f, "video {} is already embedded", id.0),
             ApplyError::VideoInUse(id) => write!(f, "video {} is in use", id.0),
+            ApplyError::NotTable(id) => write!(f, "element {} is not a table", id.0),
+            ApplyError::InvalidCell { row, column } => {
+                write!(f, "no cell at row {row}, column {column}")
+            }
+            ApplyError::InvalidTable(reason) => write!(f, "invalid table: {reason}"),
+            ApplyError::CutsMerge => write!(f, "the edit would cut a merged cell"),
         }
     }
 }

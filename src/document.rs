@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::table;
 use crate::text_layout;
 
 /// Size of every slide in the presentation, in slide units.
@@ -436,6 +437,20 @@ impl Element {
         }
     }
 
+    pub fn as_table(&self) -> Option<&TableElement> {
+        match &self.kind {
+            ElementKind::Table(table) => Some(table),
+            _ => None,
+        }
+    }
+
+    fn as_table_mut(&mut self) -> Option<&mut TableElement> {
+        match &mut self.kind {
+            ElementKind::Table(table) => Some(table),
+            _ => None,
+        }
+    }
+
     pub fn as_group(&self) -> Option<&GroupElement> {
         match &self.kind {
             ElementKind::Group(group) => Some(group),
@@ -605,6 +620,7 @@ pub enum ElementKind {
     Rectangle(RectangleElement),
     Ellipse(EllipseElement),
     Line(LineElement),
+    Table(Box<TableElement>),
 }
 
 impl ElementKind {
@@ -635,8 +651,20 @@ impl ElementKind {
         }
     }
 
-    /// Checks the style values of a shape; other kinds pass.
+    /// Every fill of the element: the fill of a rectangle or an ellipse, or
+    /// the fills of a table.
+    pub fn fills(&self) -> Vec<&Fill> {
+        match self {
+            ElementKind::Table(table) => table.fills().collect(),
+            kind => kind.fill().into_iter().collect(),
+        }
+    }
+
+    /// Checks the style values of a shape or a table; other kinds pass.
     pub fn validate(&self) -> Result<(), ApplyError> {
+        if let ElementKind::Table(table) = self {
+            return table.validate();
+        }
         if let Some(fill) = self.fill() {
             fill.validate()?;
         }
@@ -934,6 +962,14 @@ impl FontLibrary {
     pub fn iter(&self) -> impl Iterator<Item = (&FontFace, &FontData)> {
         self.faces.iter()
     }
+
+    /// A copy with one more face, to measure text before its face is
+    /// embedded.
+    pub fn with(&self, face: FontFace, data: FontData) -> FontLibrary {
+        let mut faces = self.faces.clone();
+        faces.insert(face, data);
+        FontLibrary { faces }
+    }
 }
 
 /// The ids a presentation gives to the next slide, element, image and
@@ -1151,7 +1187,7 @@ impl Presentation {
             slide
                 .walk()
                 .iter()
-                .any(|node| node.element.kind.fill().is_some_and(&uses))
+                .any(|node| node.element.kind.fills().into_iter().any(&uses))
         })
     }
 
@@ -1368,10 +1404,74 @@ impl Presentation {
         text_layout::layout(text, &element.frame, font).ok()
     }
 
+    /// Lays out a table element with its embedded fonts.
+    pub fn table_layout(&self, id: ElementId) -> Option<table::TableLayout> {
+        let table = self.element(id)?.as_table()?;
+        table::layout(table, &self.fonts).ok()
+    }
+
+    fn table_layout_of(&self, table: &TableElement) -> Result<table::TableLayout, ApplyError> {
+        self.check_table(table)?;
+        table::layout(table, &self.fonts).map_err(|_| ApplyError::BadFont(table.text.font.clone()))
+    }
+
+    /// Checks that the faces of a table are embedded and that its fills are
+    /// ones a table cell can show.
+    fn check_table(&self, table: &TableElement) -> Result<(), ApplyError> {
+        for face in table.faces() {
+            self.check_font(&face)?;
+        }
+        for fill in table.fills() {
+            if fill.is_animated() {
+                return Err(ApplyError::InvalidTable(
+                    "table cells cannot show videos or shaders",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets the frame of a table. A new width or height becomes the fixed
+    /// size of that axis, or goes back to automatic when it is not larger
+    /// than the content. Returns the table before the change when its
+    /// sizing changed.
+    fn set_table_frame(
+        &mut self,
+        id: ElementId,
+        frame: Frame,
+    ) -> Result<Option<TableElement>, ApplyError> {
+        let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
+        let old = element.frame;
+        let before = element.as_table().ok_or(ApplyError::NotTable(id))?.clone();
+        self.check_table(&before)?;
+        let after = table::resized(&before, &self.fonts, &old, &frame)
+            .map_err(|_| ApplyError::BadFont(before.text.font.clone()))?;
+        let element = self.element_mut(id)?;
+        element.frame = frame;
+        *element.as_table_mut().expect("checked above") = after.clone();
+        self.fit(id)?;
+        Ok((after != before).then_some(before))
+    }
+
     /// Updates the frame of an auto-sized text box to fit its content.
     fn fit(&mut self, id: ElementId) -> Result<(), ApplyError> {
         let _span = crate::perf::span("fit");
         let element = self.element(id).ok_or(ApplyError::UnknownElement(id))?;
+        if let Some(table) = element.as_table() {
+            let layout = self.table_layout_of(table)?;
+            let (width, height) = (layout.width(), layout.height());
+            let frame = &mut self.element_mut(id)?.frame;
+            let before = *frame;
+            frame.width = width;
+            frame.height = height;
+            if frame.rotation != 0.
+                && (frame.width != before.width || frame.height != before.height)
+            {
+                let (x, y) = before.to_slide(0., 0.);
+                *frame = frame.with_top_left_at(x, y);
+            }
+            return Ok(());
+        }
         let Some(text) = element.as_text() else {
             return Ok(());
         };
@@ -1490,7 +1590,10 @@ impl Presentation {
                     check_frame(&node.frame)?;
                     check_opacity(node.opacity)?;
                     node.kind.validate()?;
-                    if let Some(fill) = node.kind.fill() {
+                    if let Some(table) = node.as_table() {
+                        self.check_table(table)?;
+                    }
+                    for fill in node.kind.fills() {
                         self.check_fill(fill)?;
                     }
                 }
@@ -1557,6 +1660,21 @@ impl Presentation {
                 let old = element.frame;
                 if element.as_group().is_some() {
                     return self.set_group_frame(id, old, frame);
+                }
+                if element.as_table().is_some() {
+                    let inverse = Operation::SetFrame { id, frame: old };
+                    return Ok(match self.set_table_frame(id, frame)? {
+                        // The old table fits the old size back before the
+                        // frame returns.
+                        Some(table) => Operation::Batch(vec![
+                            Operation::SetTable {
+                                id,
+                                table: Box::new(table),
+                            },
+                            inverse,
+                        ]),
+                        None => inverse,
+                    });
                 }
                 element.frame = frame;
                 // A frame is always fitted to its text, so a move alone
@@ -1663,6 +1781,58 @@ impl Presentation {
                     text: old,
                 })
             }
+            Operation::ReplaceCellText {
+                id,
+                row,
+                column,
+                range,
+                text,
+            } => {
+                self.check_unlocked(id)?;
+                let element = self.element_mut(id)?;
+                let table = element.as_table_mut().ok_or(ApplyError::NotTable(id))?;
+                if table.cell(row, column).is_none()
+                    || table.anchor_of(row, column) != (row, column)
+                {
+                    return Err(ApplyError::InvalidCell { row, column });
+                }
+                let content = &mut table.cell_mut(row, column).expect("checked").content;
+                if range.start > range.end
+                    || range.end > content.len()
+                    || !content.is_char_boundary(range.start)
+                    || !content.is_char_boundary(range.end)
+                {
+                    return Err(ApplyError::InvalidRange(range));
+                }
+                let old = content[range.clone()].to_string();
+                content.replace_range(range.clone(), &text);
+                let inverse = range.start..range.start + text.len();
+                self.fit(id)?;
+                Ok(Operation::ReplaceCellText {
+                    id,
+                    row,
+                    column,
+                    range: inverse,
+                    text: old,
+                })
+            }
+            Operation::SetTable { id, mut table } => {
+                self.check_unlocked(id)?;
+                table.normalize();
+                table.validate()?;
+                self.check_table(&table)?;
+                for fill in table.fills() {
+                    self.check_fill(fill)?;
+                }
+                let element = self.element_mut(id)?;
+                let current = element.as_table_mut().ok_or(ApplyError::NotTable(id))?;
+                let old = std::mem::replace(current, *table);
+                self.fit(id)?;
+                Ok(Operation::SetTable {
+                    id,
+                    table: Box::new(old),
+                })
+            }
             Operation::AddFont { face, data } => {
                 if self.fonts.contains(&face) {
                     return Err(ApplyError::DuplicateFont(face));
@@ -1675,11 +1845,15 @@ impl Presentation {
             }
             Operation::RemoveFont { face } => {
                 let in_use = self.slides.iter().any(|slide| {
-                    slide
-                        .walk()
-                        .iter()
-                        .filter_map(|node| node.element.as_text())
-                        .any(|text| text.style.font == face)
+                    slide.walk().iter().any(|node| {
+                        node.element
+                            .as_text()
+                            .is_some_and(|text| text.style.font == face)
+                            || node
+                                .element
+                                .as_table()
+                                .is_some_and(|table| table.faces().contains(&face))
+                    })
                 });
                 if in_use {
                     return Err(ApplyError::FontInUse(face));
@@ -1779,8 +1953,19 @@ impl Presentation {
         });
         let turn = frame.rotation - old.rotation;
         let mut restore = Vec::with_capacity(nodes.len() + 1);
+        let mut tables = Vec::new();
         for (node, before, mode, group) in nodes {
             restore.push((node, before));
+            if self.element(node).and_then(Element::as_table).is_some() {
+                let target = map_frame(&before, &old, &frame, mode);
+                if let Some(table) = self.set_table_frame(node, target)? {
+                    tables.push(Operation::SetTable {
+                        id: node,
+                        table: Box::new(table),
+                    });
+                }
+                continue;
+            }
             let target = &mut self.element_mut(node)?.frame;
             if group {
                 // Its box follows its children when the groups are fitted.
@@ -1792,10 +1977,16 @@ impl Presentation {
         }
         restore.push((id, old));
         self.element_mut(id)?.frame.rotation = frame.rotation;
-        Ok(Operation::SetGroupFrames {
+        let inverse = Operation::SetGroupFrames {
             id,
             frames: restore,
-        })
+        };
+        if tables.is_empty() {
+            return Ok(inverse);
+        }
+        // The old tables fit their old sizes back before the frames return.
+        tables.push(inverse);
+        Ok(Operation::Batch(tables))
     }
 
     /// Checks that the image or the video of a fill is embedded.
@@ -1828,6 +2019,9 @@ impl Presentation {
 /// and the frames of lines to a height of 0.
 fn normalize_frames(element: &mut Element) {
     element.frame.rotation = normalize_degrees(element.frame.rotation);
+    if let Some(table) = element.as_table_mut() {
+        table.normalize();
+    }
     if element.is_line() {
         element.frame = normalize_line(element.frame);
     }
@@ -1869,6 +2063,7 @@ pub use crate::style::{
     Arrowhead, Dash, Fill, GradientStop, HeadKind, HeadSize, ImageFill, ImageFit, ImageId,
     LinearGradient, RadialGradient, ShaderFill, SolidFill, Start, Stroke, Vec2, VideoFill, VideoId,
 };
+pub use crate::table::TableElement;
 pub use crate::videos::{VideoData, VideoLibrary};
 
 #[cfg(test)]
@@ -3379,5 +3574,203 @@ pub(crate) mod tests {
             Err(ApplyError::ImageInUse(image))
         );
         add_shape(&mut presentation, Frame::default(), shader(None));
+    }
+
+    fn table_of(presentation: &Presentation, id: ElementId) -> TableElement {
+        presentation
+            .element(id)
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .clone()
+    }
+
+    fn add_table(presentation: &mut Presentation, table: TableElement) -> ElementId {
+        add_shape(
+            presentation,
+            Frame {
+                x: 100.,
+                y: 100.,
+                ..Frame::default()
+            },
+            ElementKind::Table(Box::new(table)),
+        )
+    }
+
+    #[test]
+    fn a_table_frame_follows_its_content() {
+        let mut presentation = with_inter();
+        let id = add_table(&mut presentation, TableElement::new(2, 2));
+        let frame = presentation.element(id).unwrap().frame;
+        let layout = presentation.table_layout(id).unwrap();
+        assert_eq!(
+            (frame.width, frame.height),
+            (layout.width(), layout.height())
+        );
+        let inverse = presentation
+            .apply(Operation::ReplaceCellText {
+                id,
+                row: 0,
+                column: 1,
+                range: 0..0,
+                text: "a longer text".into(),
+            })
+            .unwrap();
+        let wider = presentation.element(id).unwrap().frame;
+        assert!(wider.width > frame.width);
+        assert_eq!(wider.height, frame.height);
+        presentation.apply(inverse).unwrap();
+        assert_eq!(presentation.element(id).unwrap().frame, frame);
+    }
+
+    #[test]
+    fn a_covered_cell_takes_no_text() {
+        let mut presentation = with_inter();
+        let mut table = TableElement::new(2, 2);
+        table.merge(&table::CellRange::new(0..1, 0..2)).unwrap();
+        let id = add_table(&mut presentation, table);
+        assert_eq!(
+            presentation.apply(Operation::ReplaceCellText {
+                id,
+                row: 0,
+                column: 1,
+                range: 0..0,
+                text: "x".into(),
+            }),
+            Err(ApplyError::InvalidCell { row: 0, column: 1 })
+        );
+    }
+
+    #[test]
+    fn set_table_undoes_to_the_exact_table_and_frame() {
+        let mut presentation = with_inter();
+        let id = add_table(&mut presentation, TableElement::new(2, 2));
+        let before = presentation.element(id).unwrap().clone();
+        let mut table = table_of(&presentation, id);
+        table.insert_rows(2, 3, 1).unwrap();
+        table.rows[4][0].content = "new".into();
+        let inverse = presentation
+            .apply(Operation::SetTable {
+                id,
+                table: Box::new(table),
+            })
+            .unwrap();
+        assert!(presentation.element(id).unwrap().frame.height > before.frame.height);
+        presentation.apply(inverse).unwrap();
+        assert_eq!(presentation.element(id).unwrap(), &before);
+    }
+
+    #[test]
+    fn resizing_a_table_fixes_the_axis_and_undo_restores_it() {
+        let mut presentation = with_inter();
+        let id = add_table(&mut presentation, TableElement::new(2, 2));
+        let before = presentation.element(id).unwrap().clone();
+        let wider = Frame {
+            width: before.frame.width + 200.,
+            ..before.frame
+        };
+        let inverse = presentation
+            .apply(Operation::SetFrame { id, frame: wider })
+            .unwrap();
+        let table = table_of(&presentation, id);
+        assert_eq!(table.width, table::TableSizing::Fixed(wider.width));
+        assert_eq!(table.height, table::TableSizing::Auto);
+        assert_eq!(presentation.element(id).unwrap().frame, wider);
+        presentation.apply(inverse).unwrap();
+        assert_eq!(presentation.element(id).unwrap(), &before);
+        // Smaller than the content goes back to automatic.
+        let narrow = Frame {
+            width: 10.,
+            ..before.frame
+        };
+        presentation
+            .apply(Operation::SetFrame { id, frame: wider })
+            .unwrap();
+        presentation
+            .apply(Operation::SetFrame { id, frame: narrow })
+            .unwrap();
+        assert_eq!(table_of(&presentation, id).width, table::TableSizing::Auto);
+        assert_eq!(presentation.element(id).unwrap().frame, before.frame);
+    }
+
+    #[test]
+    fn a_group_resize_gives_a_table_room_and_undo_takes_it_back() {
+        let mut presentation = with_inter();
+        let table = add_table(&mut presentation, TableElement::new(1, 1));
+        let other = add_shape(
+            &mut presentation,
+            Frame {
+                x: 400.,
+                y: 400.,
+                width: 100.,
+                height: 100.,
+                rotation: 0.,
+            },
+            ElementKind::Rectangle(RectangleElement::default()),
+        );
+        let group = presentation.new_element_id();
+        let operations = presentation
+            .group_operations(group, &[table, other])
+            .unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let before = presentation.slides[0].clone();
+        let frame = presentation.element(group).unwrap().frame;
+        let inverse = presentation
+            .apply(Operation::SetFrame {
+                id: group,
+                frame: Frame {
+                    width: frame.width * 2.,
+                    height: frame.height * 2.,
+                    ..frame
+                },
+            })
+            .unwrap();
+        let grown = table_of(&presentation, table);
+        assert!(matches!(grown.width, table::TableSizing::Fixed(_)));
+        presentation.apply(inverse).unwrap();
+        assert_eq!(presentation.slides[0], before);
+    }
+
+    #[test]
+    fn a_font_used_by_a_cell_override_stays_embedded() {
+        let mut presentation = with_inter();
+        let bold = FontFace::new("Inter", 700, false);
+        presentation
+            .apply(Operation::AddFont {
+                face: bold.clone(),
+                data: inter_regular(),
+            })
+            .unwrap();
+        let mut table = TableElement::new(1, 1);
+        table.rows[0][0].text.font = Some(bold.clone());
+        add_table(&mut presentation, table);
+        assert_eq!(
+            presentation.apply(Operation::RemoveFont { face: bold.clone() }),
+            Err(ApplyError::FontInUse(bold))
+        );
+    }
+
+    #[test]
+    fn a_table_needs_its_fonts_and_refuses_videos() {
+        let mut presentation = Presentation::new();
+        let id = presentation.new_element_id();
+        let slide = presentation.slides[0].id;
+        let add = |table: TableElement| Operation::AddElement {
+            slide,
+            parent: None,
+            index: 0,
+            element: Element::new(id, Frame::default(), ElementKind::Table(Box::new(table))),
+        };
+        assert!(matches!(
+            presentation.apply(add(TableElement::new(1, 1))),
+            Err(ApplyError::MissingFont(_))
+        ));
+        let mut presentation = with_inter();
+        let mut table = TableElement::new(1, 1);
+        table.fill = Fill::Video(VideoFill::new(VideoId(1)));
+        assert!(matches!(
+            presentation.apply(add(table)),
+            Err(ApplyError::InvalidTable(_))
+        ));
     }
 }

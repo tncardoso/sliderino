@@ -1,0 +1,5 @@
+- save/load functionality
+- home screen
+- girar 90° pelo teclado e "Reset rotation" no menu de contexto
+- fontes variáveis: expor as instâncias nomeadas (fvar) como faces
+- aceitar fontes WOFF/WOFF2 no upload

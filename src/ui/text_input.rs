@@ -34,8 +34,12 @@ fn range_to_utf8(text: &str, range: &Range<usize>) -> Range<usize> {
 
 impl EditorView {
     /// The range a platform edit replaces: the given one, else the text being
-    /// composed, else the selection.
-    fn input_range(&self, range_utf16: Option<Range<usize>>) -> Option<Range<usize>> {
+    /// composed, else the selection. Typing over selected table cells starts
+    /// editing the first one, its text selected.
+    fn input_range(&mut self, range_utf16: Option<Range<usize>>) -> Option<Range<usize>> {
+        if !self.type_over_cell() {
+            return None;
+        }
         let content = self.edit_content()?;
         let edit = self.text_edit.as_ref()?;
         Some(
@@ -133,13 +137,12 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let id = self.text_edit.as_ref()?.id;
         let range = range_to_utf8(self.edit_content()?, &range_utf16);
-        let layout = self.layout_of(id)?;
-        let frame = self.presentation.element(id)?.frame;
+        let (layout, frame) = self.edit_box()?;
         let caret = layout.caret(range.start);
         let zoom = self.camera?.zoom;
-        let origin = self.to_window(frame.x + caret.left, frame.y + caret.top)?;
+        let (x, y) = frame.to_slide(caret.left, caret.top);
+        let origin = self.to_window(x, y)?;
         Some(Bounds {
             origin,
             size: gpui_kit::size(px(1.), px((caret.bottom - caret.top) * zoom)),
@@ -152,11 +155,10 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        let id = self.text_edit.as_ref()?.id;
-        let layout = self.layout_of(id)?;
-        let frame = self.presentation.element(id)?.frame;
+        let (layout, frame) = self.edit_box()?;
         let at = self.to_slide(position)?;
-        let index = layout.index_at(at.x - frame.x, at.y - frame.y);
+        let (x, y) = frame.to_local(at.x, at.y);
+        let index = layout.index_at(x, y);
         Some(to_utf16(self.edit_content()?, index))
     }
 }

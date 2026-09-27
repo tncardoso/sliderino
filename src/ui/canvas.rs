@@ -21,9 +21,11 @@ use gpui_kit::{
 use crate::camera::Camera;
 use crate::document::{
     Element, ElementId, ElementKind, EllipseElement, FontData, Frame, LineElement, Operation,
-    RectangleElement, SlideId, SlideSize, TextElement, TextSizing, TextStyle, normalize_degrees,
+    Presentation, RectangleElement, SlideId, SlideSize, TableElement, TextElement, TextSizing,
+    TextStyle, normalize_degrees,
 };
-use crate::editor::{Drag, EditorView, Preview, SlidePoint, Tool};
+use crate::editor::{Drag, EditorView, Preview, SlidePoint, TableLayoutCache, TableView, Tool};
+use crate::fonts::FontRegistry;
 use crate::shortcuts::WheelAction;
 use crate::snap::{Guide, Handle, ResizeMode, Targets, resize_rotated, snap_move, snap_resize};
 use crate::text_layout::{BoxRect, TextLayout};
@@ -69,6 +71,8 @@ const ROTATE_SNAP: f32 = 2.;
 #[derive(Clone)]
 pub struct PaintText {
     pub id: ElementId,
+    /// The cell, for the text of a table cell.
+    pub cell: Option<(usize, usize)>,
     pub frame: Frame,
     pub layout: Arc<TextLayout>,
     /// None when GPUI cannot load the embedded face: the text is drawn from
@@ -116,6 +120,18 @@ pub struct CanvasScene {
     /// Size label, "216 × 148", and the area it sits under.
     badge: Option<(Frame, String)>,
     editing: bool,
+    /// The cell whose text is edited, for a table.
+    edit_cell: Option<(usize, usize)>,
+    /// The frame of the table whose cells are selected, the box of the
+    /// selected cells in it and whether to fill that box.
+    cells: Option<(Frame, BoxRect, bool)>,
+    /// The ghost grid of the table tool: its frame, rows and columns.
+    table_ghost: Option<(Frame, usize, usize)>,
+    /// The "+" button of the selected table: its center, and the line it
+    /// inserts, on the slide.
+    table_plus: Option<[(f32, f32); 3]>,
+    /// Where dragged rows or columns go.
+    move_line: Option<((f32, f32), (f32, f32))>,
 }
 
 impl EditorView {
@@ -134,6 +150,57 @@ impl EditorView {
         let mut items = Vec::new();
         for node in slide.visible_leaves() {
             let element = node.element;
+            if let Some(table) = element.as_table() {
+                let (frame, _) = dragged.apply(element);
+                let Some((view, frame)) = shown_table(
+                    &self.presentation,
+                    &mut self.tables,
+                    element.id,
+                    table,
+                    &element.frame,
+                    frame,
+                ) else {
+                    continue;
+                };
+                for part in crate::table::parts(element.id, &frame, &view.table, &view.layout) {
+                    match part {
+                        crate::table::Part::Fill(part) | crate::table::Part::Border(part) => {
+                            let picture = part
+                                .kind
+                                .fill()
+                                .and_then(|fill| self.fill_picture(fill, &part.frame));
+                            items.push(PaintItem::Shape(PaintShape {
+                                element: part,
+                                opacity: node.opacity,
+                                picture,
+                            }));
+                        }
+                        crate::table::Part::Text {
+                            element: part,
+                            row,
+                            column,
+                            ..
+                        } => {
+                            let (Some(text), Some(layout)) =
+                                (part.as_text(), view.text(row, column))
+                            else {
+                                continue;
+                            };
+                            items.push(PaintItem::Text(text_item(
+                                &self.presentation,
+                                &mut self.fonts,
+                                (element.id, Some((row, column))),
+                                part.frame,
+                                &text.style,
+                                layout.clone(),
+                                node.opacity,
+                                cx,
+                            )));
+                        }
+                    }
+                }
+                continue;
+            }
             let Some(text) = element.as_text() else {
                 if element.kind.is_shape() {
                     let (frame, _) = dragged.apply(element);
@@ -163,23 +230,33 @@ impl EditorView {
             else {
                 continue;
             };
-            let style = &text.style;
-            let font = self.presentation.fonts.get(&style.font);
-            let font_id = font.and_then(|data| self.fonts.font_id(&style.font, data, cx));
-            let font = font.filter(|_| outlined(frame.rotation, font_id)).cloned();
-            let color: Hsla = gpui_kit::rgb(style.color.0).into();
-            items.push(PaintItem::Text(PaintText {
-                id: element.id,
+            items.push(PaintItem::Text(text_item(
+                &self.presentation,
+                &mut self.fonts,
+                (element.id, None),
                 frame,
+                &text.style,
                 layout,
-                font_id,
-                font,
-                color: color.opacity(node.opacity),
-                underline: style.underline,
-                strikethrough: style.strikethrough,
-            }));
+                node.opacity,
+                cx,
+            )));
         }
         items
+    }
+
+    /// The table shown in `frame`: the document's table, or the preview of
+    /// a resize to the size of `frame`, and the frame it takes.
+    pub fn shown_table(&mut self, id: ElementId, frame: Frame) -> Option<(TableView, Frame)> {
+        let element = self.presentation.element(id)?;
+        let table = element.as_table()?;
+        shown_table(
+            &self.presentation,
+            &mut self.tables,
+            id,
+            table,
+            &element.frame,
+            frame,
+        )
     }
 
     pub fn canvas_scene(&mut self, cx: &App) -> CanvasScene {
@@ -200,8 +277,14 @@ impl EditorView {
             marquee: None,
             guides: self.guides.clone(),
             badge: None,
-            editing: self.text_edit.is_some(),
+            editing: self.text_edit.is_some() || self.table_edit.is_some(),
+            edit_cell: None,
+            cells: None,
+            table_ghost: None,
+            table_plus: None,
+            move_line: None,
         };
+        self.repair_table_edit();
         if let Some(frame) = self.selection_box() {
             let text = self.single_selection().filter(|id| {
                 self.presentation
@@ -210,7 +293,8 @@ impl EditorView {
             });
             let layout = text.and_then(|id| self.shown_layout(id));
             let overflow = layout.as_ref().is_some_and(|layout| layout.overflow() > 0.);
-            let handles = self.text_edit.is_none() && !self.selection_locked();
+            let handles =
+                self.text_edit.is_none() && self.table_edit.is_none() && !self.selection_locked();
             let line = self.selected_line();
             scene.selection = Some((frame, handles && line.is_none(), overflow));
             if handles && line.is_some() {
@@ -223,7 +307,7 @@ impl EditorView {
                     .filter_map(|id| self.shown_frame(id))
                     .collect();
             }
-            if self.text_edit.is_none() {
+            if self.text_edit.is_none() && self.table_edit.is_none() {
                 // Below the text that overflows the box, so it stays readable.
                 let bottom = layout.map_or(0., |layout| {
                     layout
@@ -262,11 +346,12 @@ impl EditorView {
         {
             scene.outlines.push(frame);
         }
+        self.table_scene(&mut scene);
         if let Some(edit) = self.text_edit.clone()
-            && let Some(layout) = self.layout_of(edit.id)
-            && let Some(frame) = self.frame_of(edit.id)
+            && let Some((layout, frame)) = self.edit_box()
         {
             scene.edit_id = Some(edit.id);
+            scene.edit_cell = edit.cell;
             scene.edit_frame = frame;
             scene.highlight = layout.selection_rects(edit.selection());
             if let Some(marked) = &edit.marked {
@@ -280,6 +365,18 @@ impl EditorView {
             }
             Some(Drag::Marquee { start, current, .. }) => {
                 scene.marquee = Some(normalized(*start, *current));
+            }
+            Some(Drag::DrawTable { start, current }) => {
+                let (rows, columns) = EditorView::drawn_table_size(*start, *current);
+                let frame = Frame {
+                    x: start.x.min(current.x),
+                    y: start.y.min(current.y),
+                    width: columns as f32 * crate::table::DRAW_STEP.0,
+                    height: rows as f32 * crate::table::DRAW_STEP.1,
+                    rotation: 0.,
+                };
+                scene.table_ghost = Some((frame, rows, columns));
+                scene.badge = Some((frame, format!("{columns} × {rows}")));
             }
             Some(Drag::Draw {
                 tool,
@@ -319,6 +416,60 @@ impl EditorView {
 
     pub fn frame_of(&self, id: ElementId) -> Option<Frame> {
         self.presentation.element(id).map(|element| element.frame)
+    }
+
+    /// The cell selection, the "+" button and the move indicator of the
+    /// selected table.
+    fn table_scene(&mut self, scene: &mut CanvasScene) {
+        let zoom = self.camera.map_or(1., |camera| camera.zoom);
+        let Some((id, _)) = self.selected_table() else {
+            return;
+        };
+        let Some(frame) = self.frame_of(id) else {
+            return;
+        };
+        let Some(view) = self.tables.get(&self.presentation, id) else {
+            return;
+        };
+        if let Some(edit) = self.table_edit.clone().filter(|edit| edit.id == id) {
+            let range = edit.range(&view.table);
+            let rect = view.layout.range_rect(&range);
+            let rect = BoxRect {
+                left: rect.x,
+                top: rect.y,
+                right: rect.x + rect.width,
+                bottom: rect.y + rect.height,
+            };
+            scene.cells = Some((frame, rect, self.text_edit.is_none()));
+        }
+        if let Some((rows, line)) = self.table_insert {
+            let offset = crate::ui::table_edit::INSERT_OFFSET / zoom;
+            let (center, start, end) = if rows {
+                let y = view.layout.row_edges()[line];
+                ((-offset, y), (0., y), (frame.width, y))
+            } else {
+                let x = view.layout.column_edges()[line];
+                ((x, -offset), (x, 0.), (x, frame.height))
+            };
+            scene.table_plus = Some([
+                frame.to_slide(center.0, center.1),
+                frame.to_slide(start.0, start.1),
+                frame.to_slide(end.0, end.1),
+            ]);
+        }
+        if let Some(Drag::MoveCells { rows, to, .. }) = &self.drag {
+            let (start, end) = if *rows {
+                let y = view.layout.row_edges()[*to];
+                ((0., y), (frame.width, y))
+            } else {
+                let x = view.layout.column_edges()[*to];
+                ((x, 0.), (x, frame.height))
+            };
+            scene.move_line = Some((
+                frame.to_slide(start.0, start.1),
+                frame.to_slide(end.0, end.1),
+            ));
+        }
     }
 
     /// Topmost visible, unlocked leaf of the current slide under a slide
@@ -588,6 +739,20 @@ impl EditorView {
     }
 
     fn press_with_move_tool(&mut self, at: SlidePoint, event: &MouseDownEvent) {
+        if let Some((rows, line)) = self.table_insert.take()
+            && let Some((id, _)) = self.selected_table()
+        {
+            self.insert_line(id, rows, line);
+            return;
+        }
+        if let Some(id) = self.table_edit.as_ref().map(|edit| edit.id) {
+            if self.leaf_at(at) == Some(id) {
+                self.press_table(id, at, event);
+                return;
+            }
+            self.end_text_edit();
+            self.table_edit = None;
+        }
         if let Some(edit) = &self.text_edit {
             let id = edit.id;
             if self.leaf_at(at) == Some(id) {
@@ -677,6 +842,14 @@ impl EditorView {
             } else if is_text(self, target) {
                 self.selection = vec![target];
                 self.press_text(target, at, event);
+            } else if self
+                .presentation
+                .element(target)
+                .is_some_and(|element| element.as_table().is_some())
+                && !self.presentation.is_locked(target)
+            {
+                self.selection = vec![target];
+                self.press_table(target, at, event);
             } else {
                 self.selection = vec![target];
                 self.start_move(at, None);
@@ -729,6 +902,23 @@ impl EditorView {
                     if !self.selection.contains(&target) {
                         self.selection = vec![target];
                     }
+                    // A table: the menu acts on the cells under the pointer.
+                    let table = self
+                        .presentation
+                        .element(target)
+                        .is_some_and(|element| element.as_table().is_some());
+                    if table
+                        && self.selection == [target]
+                        && let Some(cell) = self.table_cell_at(target, at)
+                    {
+                        let keep = self.selected_cells().is_some_and(|(id, _, range)| {
+                            id == target && range.contains(cell.0, cell.1)
+                        });
+                        if !keep {
+                            self.table_edit =
+                                Some(crate::editor::TableEdit::cell(target, cell.0, cell.1));
+                        }
+                    }
                 }
                 None => self.selection.clear(),
             }
@@ -771,6 +961,15 @@ impl EditorView {
                     from_center: event.modifiers.alt,
                 });
             }
+            Tool::Table => {
+                self.end_text_edit();
+                self.table_edit = None;
+                self.selection.clear();
+                self.drag = Some(Drag::DrawTable {
+                    start: at,
+                    current: at,
+                });
+            }
             Tool::Move => self.press_with_move_tool(at, event),
             _ => return,
         }
@@ -792,6 +991,11 @@ impl EditorView {
             let hover = self.rotation_zone_at(event.position);
             if hover != self.hover_rotate {
                 self.hover_rotate = hover;
+                cx.notify();
+            }
+            let insert = self.table_insert_at(event.position);
+            if insert != self.table_insert {
+                self.table_insert = insert;
                 cx.notify();
             }
             return;
@@ -963,11 +1167,31 @@ impl EditorView {
                     current: frame,
                 });
             }
-            Drag::SelectText { id } => {
-                if let (Some(layout), Some(frame)) = (self.layout_of(id), self.frame_of(id)) {
+            Drag::SelectText { .. } => {
+                if let Some((layout, frame)) = self.edit_box() {
                     let (x, y) = frame.to_local(at.x, at.y);
                     let index = layout.index_at(x, y);
                     self.move_caret(index, true);
+                }
+            }
+            Drag::DrawTable { start, .. } => {
+                self.drag = Some(Drag::DrawTable { start, current: at });
+            }
+            Drag::SelectCells { id, anchor } => {
+                if let Some(focus) = self.table_cell_at(id, at) {
+                    self.table_edit = Some(crate::editor::TableEdit { id, anchor, focus });
+                }
+            }
+            Drag::MoveCells {
+                id, rows, range, ..
+            } => {
+                if let Some(to) = self.table_line_at(id, rows, at) {
+                    self.drag = Some(Drag::MoveCells {
+                        id,
+                        rows,
+                        range,
+                        to,
+                    });
                 }
             }
             Drag::Rotate {
@@ -1116,7 +1340,27 @@ impl EditorView {
                     self.commit_pruning("Rotate", operations, selection);
                 }
             }
-            Drag::Move { .. } | Drag::SelectText { .. } | Drag::Marquee { .. } => {}
+            Drag::DrawTable { start, current } => {
+                let zoom = self.camera.map_or(1., |camera| camera.zoom);
+                let dragged = (current.x - start.x).hypot(current.y - start.y) * zoom >= DRAG_START;
+                let (rows, columns) = if dragged {
+                    EditorView::drawn_table_size(start, current)
+                } else {
+                    (3, 3)
+                };
+                let corner = point(start.x.min(current.x), start.y.min(current.y));
+                self.create_table(corner, rows, columns);
+            }
+            Drag::MoveCells {
+                id,
+                rows,
+                range,
+                to,
+            } => self.move_lines_to(id, rows, range, to),
+            Drag::Move { .. }
+            | Drag::SelectText { .. }
+            | Drag::Marquee { .. }
+            | Drag::SelectCells { .. } => {}
         }
         cx.notify();
     }
@@ -1260,7 +1504,12 @@ pub fn canvas(
         (false, _, Some(Drag::Rotate { .. })) => CursorStyle::Crosshair,
         (false, Tool::Move, None) if editor.hover_rotate => CursorStyle::Crosshair,
         (false, Tool::Text, _) | (false, _, Some(Drag::SelectText { .. })) => CursorStyle::IBeam,
-        (false, Tool::Rectangle | Tool::Ellipse | Tool::Line, _) => CursorStyle::Crosshair,
+        (false, Tool::Rectangle | Tool::Ellipse | Tool::Line | Tool::Table, _) => {
+            CursorStyle::Crosshair
+        }
+        (false, _, Some(Drag::MoveCells { rows: true, .. })) => CursorStyle::ResizeUpDown,
+        (false, _, Some(Drag::MoveCells { rows: false, .. })) => CursorStyle::ResizeLeftRight,
+        (false, Tool::Move, None) if editor.table_insert.is_some() => CursorStyle::PointingHand,
         _ => CursorStyle::Arrow,
     };
 
@@ -1397,6 +1646,60 @@ fn viewport_tracker(cx: &mut Context<EditorView>) -> impl IntoElement {
 /// not loaded.
 pub fn outlined(rotation: f32, font_id: Option<FontId>) -> bool {
     rotation != 0. || font_id.is_none()
+}
+
+/// A text ready to paint. `id` is the element and, for a table, the cell.
+#[allow(clippy::too_many_arguments)]
+fn text_item(
+    presentation: &Presentation,
+    fonts: &mut FontRegistry,
+    (id, cell): (ElementId, Option<(usize, usize)>),
+    frame: Frame,
+    style: &TextStyle,
+    layout: Arc<TextLayout>,
+    opacity: f32,
+    cx: &App,
+) -> PaintText {
+    let font = presentation.fonts.get(&style.font);
+    let font_id = font.and_then(|data| fonts.font_id(&style.font, data, cx));
+    let font = font.filter(|_| outlined(frame.rotation, font_id)).cloned();
+    let color: Hsla = gpui_kit::rgb(style.color.0).into();
+    PaintText {
+        id,
+        cell,
+        frame,
+        layout,
+        font_id,
+        font,
+        color: color.opacity(opacity),
+        underline: style.underline,
+        strikethrough: style.strikethrough,
+    }
+}
+
+/// The table `id` shown in `frame`; see [`EditorView::shown_table`].
+fn shown_table(
+    presentation: &Presentation,
+    tables: &mut TableLayoutCache,
+    id: ElementId,
+    table: &TableElement,
+    document: &Frame,
+    frame: Frame,
+) -> Option<(TableView, Frame)> {
+    let view = if frame.width != document.width || frame.height != document.height {
+        let resized = crate::table::resized(table, &presentation.fonts, document, &frame).ok()?;
+        tables.get_for(presentation, id, &resized)?
+    } else {
+        tables.get_for(presentation, id, table)?
+    };
+    let (x, y) = frame.to_slide(0., 0.);
+    let placed = Frame {
+        width: view.layout.width(),
+        height: view.layout.height(),
+        ..frame
+    }
+    .with_top_left_at(x, y);
+    Some((view, placed))
 }
 
 /// Paints elements with the slide's top-left corner at `origin`, scaled by
@@ -1908,6 +2211,7 @@ fn content_layer(
                 // Under the edited text, above what is under it.
                 if let PaintItem::Text(text) = item
                     && Some(text.id) == scene.edit_id
+                    && text.cell == scene.edit_cell
                 {
                     for highlight in &scene.highlight {
                         let color = theme::accent().opacity(0.22);
@@ -2024,6 +2328,88 @@ fn content_layer(
                     ));
                 }
             }
+            if let Some((frame, cells, filled)) = &scene.cells {
+                if *filled {
+                    let color = theme::accent().opacity(0.15);
+                    fill_turned(window, frame, cells, slide.origin, zoom, color);
+                }
+                let box_frame = crate::table::place(
+                    frame,
+                    &Frame {
+                        x: cells.left,
+                        y: cells.top,
+                        width: cells.right - cells.left,
+                        height: cells.bottom - cells.top,
+                        rotation: 0.,
+                    },
+                );
+                outline_turned(window, &box_frame, slide.origin, zoom, theme::accent());
+            }
+            if let Some((frame, rows, columns)) = scene.table_ghost {
+                outline_turned(window, &frame, slide.origin, zoom, theme::accent());
+                let color = theme::accent().opacity(0.6);
+                for column in 1..columns {
+                    let x = frame.x + frame.width * column as f32 / columns as f32;
+                    window.paint_quad(fill(
+                        rect(x, frame.y, x, frame.y + frame.height).dilate(px(0.5)),
+                        color,
+                    ));
+                }
+                for row in 1..rows {
+                    let y = frame.y + frame.height * row as f32 / rows as f32;
+                    window.paint_quad(fill(
+                        rect(frame.x, y, frame.x + frame.width, y).dilate(px(0.5)),
+                        color,
+                    ));
+                }
+            }
+            if let Some((start, end)) = scene.move_line {
+                paint_segment(
+                    window,
+                    at(start.0, start.1),
+                    at(end.0, end.1),
+                    px(2.),
+                    theme::accent(),
+                );
+            }
+            if let Some([center, start, end]) = scene.table_plus {
+                paint_segment(
+                    window,
+                    at(start.0, start.1),
+                    at(end.0, end.1),
+                    px(1.),
+                    theme::accent(),
+                );
+                let center = at(center.0, center.1);
+                let radius = px(8.);
+                window.paint_quad(gpui_kit::quad(
+                    gpui_kit::Bounds::from_corners(
+                        center - point(radius, radius),
+                        center + point(radius, radius),
+                    ),
+                    radius,
+                    theme::accent(),
+                    px(0.),
+                    theme::accent(),
+                    BorderStyle::Solid,
+                ));
+                let arm = px(4.);
+                let white = gpui_kit::white();
+                window.paint_quad(fill(
+                    gpui_kit::Bounds::from_corners(
+                        center - point(arm, px(0.75)),
+                        center + point(arm, px(0.75)),
+                    ),
+                    white,
+                ));
+                window.paint_quad(fill(
+                    gpui_kit::Bounds::from_corners(
+                        center - point(px(0.75), arm),
+                        center + point(px(0.75), arm),
+                    ),
+                    white,
+                ));
+            }
             if let Some(frame) = scene.preview {
                 let bounds = rect(
                     frame.x,
@@ -2053,6 +2439,32 @@ fn content_layer(
     )
     .absolute()
     .size_full()
+}
+
+/// A straight line of `width` between two window points, turned as needed.
+fn paint_segment(
+    window: &mut Window,
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+    width: Pixels,
+    color: Hsla,
+) {
+    let (dx, dy) = (f32::from(to.x - from.x), f32::from(to.y - from.y));
+    let length = dx.hypot(dy);
+    if length < 0.01 {
+        return;
+    }
+    let half = f32::from(width) / 2.;
+    let (nx, ny) = (-dy / length * half, dx / length * half);
+    let mut builder = gpui_kit::PathBuilder::fill();
+    builder.move_to(point(from.x + px(nx), from.y + px(ny)));
+    builder.line_to(point(to.x + px(nx), to.y + px(ny)));
+    builder.line_to(point(to.x - px(nx), to.y - px(ny)));
+    builder.line_to(point(from.x - px(nx), from.y - px(ny)));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// The "W × H" label centered under the selection.
@@ -2244,6 +2656,7 @@ impl Tool {
             Tool::Rectangle,
             Tool::Ellipse,
             Tool::Line,
+            Tool::Table,
             Tool::Image,
         ],
         &[Tool::Component],
@@ -2257,6 +2670,7 @@ impl Tool {
             Tool::Rectangle => "tool-rectangle",
             Tool::Ellipse => "tool-ellipse",
             Tool::Line => "tool-line",
+            Tool::Table => "tool-table",
             Tool::Image => "tool-image",
             Tool::Component => "tool-component",
         }
@@ -2270,6 +2684,7 @@ impl Tool {
             Tool::Rectangle => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
+            Tool::Table => "Table",
             Tool::Image => "Image",
             Tool::Component => "Insert component",
         }
@@ -2283,6 +2698,7 @@ impl Tool {
             Tool::Rectangle => IconName::Square,
             Tool::Ellipse => IconName::Circle,
             Tool::Line => IconName::Slash,
+            Tool::Table => IconName::Table,
             Tool::Image => IconName::Image,
             Tool::Component => IconName::Component,
         }

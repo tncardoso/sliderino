@@ -38,6 +38,7 @@ use crate::document::{
     VideoFill, VideoId,
 };
 use crate::fonts;
+use crate::table::{Cell, CellRange, Edge, Sides, Span, TableElement, TableSizing};
 
 fn end() -> usize {
     usize::MAX
@@ -110,6 +111,55 @@ pub enum NewKind {
     Rectangle(NewRectangle),
     Ellipse(NewEllipse),
     Line(NewLine),
+    Table(NewTable),
+}
+
+/// A new table. `text` changes fields of the default table text style
+/// (Inter 24, vertically centered).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewTable {
+    /// Rows of cells; short rows get empty cells.
+    pub cells: Vec<Vec<NewCell>>,
+    #[serde(default)]
+    pub text: TextStylePatch,
+    #[serde(default)]
+    pub fill: Option<NewFill>,
+    /// Fields of the grid stroke to change; `null` draws no grid.
+    #[serde(default, deserialize_with = "present")]
+    pub stroke: Option<Option<StrokePatch>>,
+    #[serde(default)]
+    pub padding: Option<f32>,
+    #[serde(default)]
+    pub width: TableSizing,
+    #[serde(default)]
+    pub height: TableSizing,
+}
+
+/// A cell of a new table: its text, or an object.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum NewCell {
+    Text(String),
+    Cell(NewCellObject),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NewCellObject {
+    pub content: String,
+    pub fill: Option<NewFill>,
+    pub text: TextStylePatch,
+    pub span: Option<Span>,
+}
+
+/// The stroke of `set_borders`: fields of a stroke, or `"inherit"` for the
+/// table stroke.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum BorderStroke {
+    Keyword(String),
+    Stroke(StrokePatch),
 }
 
 /// A new [`RectangleElement`] whose fill can name its image by reference.
@@ -430,9 +480,131 @@ pub enum Op {
     RemoveVideo {
         id: IdRef,
     },
+    /// Replaces the text of a cell, or the byte `range` of it.
+    SetCellText {
+        id: IdRef,
+        row: usize,
+        column: usize,
+        text: String,
+        #[serde(default)]
+        range: Option<Range<usize>>,
+    },
+    /// Writes rows of texts with the first one at (`row`, `column`); the
+    /// table grows when they do not fit.
+    SetCells {
+        id: IdRef,
+        #[serde(default)]
+        row: usize,
+        #[serde(default)]
+        column: usize,
+        values: Vec<Vec<String>>,
+    },
+    /// Inserts `count` rows before row `index`; they copy the style of the
+    /// row above (of row 0 at the top).
+    InsertRows {
+        id: IdRef,
+        index: usize,
+        #[serde(default = "one_count")]
+        count: usize,
+    },
+    RemoveRows {
+        id: IdRef,
+        index: usize,
+        #[serde(default = "one_count")]
+        count: usize,
+    },
+    /// Moves `count` rows from `index` to before row `to`.
+    MoveRows {
+        id: IdRef,
+        index: usize,
+        #[serde(default = "one_count")]
+        count: usize,
+        to: usize,
+    },
+    InsertColumns {
+        id: IdRef,
+        index: usize,
+        #[serde(default = "one_count")]
+        count: usize,
+    },
+    RemoveColumns {
+        id: IdRef,
+        index: usize,
+        #[serde(default = "one_count")]
+        count: usize,
+    },
+    MoveColumns {
+        id: IdRef,
+        index: usize,
+        #[serde(default = "one_count")]
+        count: usize,
+        to: usize,
+    },
+    MergeCells {
+        id: IdRef,
+        rows: Range<usize>,
+        columns: Range<usize>,
+    },
+    SplitCell {
+        id: IdRef,
+        row: usize,
+        column: usize,
+    },
+    /// Changes the style of the whole table. `stroke: null` removes the
+    /// grid.
+    SetTableStyle {
+        id: IdRef,
+        #[serde(default)]
+        text: Option<TextStylePatch>,
+        #[serde(default)]
+        fill: Option<NewFill>,
+        #[serde(default, deserialize_with = "present")]
+        stroke: Option<Option<StrokePatch>>,
+        #[serde(default)]
+        padding: Option<f32>,
+    },
+    /// Changes the overrides of cells; every cell when `rows` and `columns`
+    /// are omitted. `fill: null` goes back to the table fill; `reset_text`
+    /// removes the text overrides first.
+    SetCellStyle {
+        id: IdRef,
+        #[serde(default)]
+        rows: Option<Range<usize>>,
+        #[serde(default)]
+        columns: Option<Range<usize>>,
+        #[serde(default, deserialize_with = "present")]
+        fill: Option<Option<NewFill>>,
+        #[serde(default)]
+        text: Option<TextStylePatch>,
+        #[serde(default)]
+        reset_text: bool,
+    },
+    /// Sets the edges of cells that `sides` names: to a stroke, to no line
+    /// (`null`) or back to the table stroke (`"inherit"`).
+    SetBorders {
+        id: IdRef,
+        #[serde(default)]
+        rows: Option<Range<usize>>,
+        #[serde(default)]
+        columns: Option<Range<usize>>,
+        sides: Sides,
+        #[serde(default, deserialize_with = "present")]
+        stroke: Option<Option<BorderStroke>>,
+    },
+    SetTableSizing {
+        id: IdRef,
+        #[serde(default)]
+        width: Option<TableSizing>,
+        #[serde(default)]
+        height: Option<TableSizing>,
+    },
     Batch {
         ops: Vec<Op>,
     },
+}
+
+fn one_count() -> usize {
+    1
 }
 
 impl Op {
@@ -449,6 +621,7 @@ impl Op {
                 NewKind::Rectangle(_) => "Create rectangle",
                 NewKind::Ellipse(_) => "Create ellipse",
                 NewKind::Line(_) => "Create line",
+                NewKind::Table(_) => "Create table",
             },
             Op::RemoveElement { .. } => "Delete",
             Op::MoveElement { .. } => "Move layer",
@@ -467,9 +640,35 @@ impl Op {
             Op::RemoveImage { .. } => "Remove image",
             Op::AddVideo { .. } => "Add video",
             Op::RemoveVideo { .. } => "Remove video",
+            Op::SetCellText { .. } => "Edit cell",
+            Op::SetCells { .. } => "Edit cells",
+            Op::InsertRows { .. } => "Insert rows",
+            Op::RemoveRows { .. } => "Delete rows",
+            Op::MoveRows { .. } => "Move rows",
+            Op::InsertColumns { .. } => "Insert columns",
+            Op::RemoveColumns { .. } => "Delete columns",
+            Op::MoveColumns { .. } => "Move columns",
+            Op::MergeCells { .. } => "Merge cells",
+            Op::SplitCell { .. } => "Split cell",
+            Op::SetTableStyle { .. } => "Table style",
+            Op::SetCellStyle { .. } => "Cell style",
+            Op::SetBorders { .. } => "Borders",
+            Op::SetTableSizing { .. } => "Table size",
             Op::Batch { .. } => "Batch",
         }
     }
+}
+
+/// The cells `rows` and `columns` name; all rows or columns when omitted.
+fn cell_range(
+    table: &TableElement,
+    rows: Option<Range<usize>>,
+    columns: Option<Range<usize>>,
+) -> CellRange {
+    CellRange::new(
+        rows.unwrap_or(0..table.row_count()),
+        columns.unwrap_or(0..table.column_count()),
+    )
 }
 
 pub fn parse(text: &str) -> Result<Vec<Op>, serde_json::Error> {
@@ -666,6 +865,7 @@ pub fn apply(
         options,
         refs: BTreeMap::new(),
         applied: Applied::default(),
+        tables: BTreeMap::new(),
     };
     for (index, op) in ops.into_iter().enumerate() {
         if let Err(kind) = compiler.apply(presentation, op) {
@@ -711,6 +911,9 @@ struct Compiler {
     options: Options,
     refs: BTreeMap<String, Made>,
     applied: Applied,
+    /// Tables as the ops compiled so far leave them, before they apply: the
+    /// ops of one batch see the changes of the ops before them.
+    tables: BTreeMap<ElementId, TableElement>,
 }
 
 impl Compiler {
@@ -739,6 +942,7 @@ impl Compiler {
             }
             op => op.label(),
         };
+        self.tables.clear();
         let mut operations = Vec::new();
         self.compile(presentation, op, &mut operations)?;
         let operation = match operations.len() {
@@ -967,6 +1171,215 @@ impl Compiler {
             Op::RemoveVideo { id } => Operation::RemoveVideo {
                 id: self.video(&id)?,
             },
+            Op::SetCellText {
+                id,
+                row,
+                column,
+                text,
+                range,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                if table.anchor_of(row, column) != (row, column)
+                    || table.cell(row, column).is_none()
+                {
+                    return Err(OpErrorKind::Apply(ApplyError::InvalidCell { row, column }));
+                }
+                let content = &mut table.cell_mut(row, column).expect("checked").content;
+                match range {
+                    Some(range) => {
+                        if range.start > range.end
+                            || range.end > content.len()
+                            || !content.is_char_boundary(range.start)
+                            || !content.is_char_boundary(range.end)
+                        {
+                            return Err(OpErrorKind::Apply(ApplyError::InvalidRange(range)));
+                        }
+                        content.replace_range(range, &text);
+                    }
+                    None => *content = text,
+                }
+                self.set_table(id, table)
+            }
+            Op::SetCells {
+                id,
+                row,
+                column,
+                values,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                let columns = values.iter().map(Vec::len).max().unwrap_or(0);
+                let cells = values
+                    .iter()
+                    .map(|values| {
+                        let mut row: Vec<Cell> =
+                            values.iter().map(|text| Cell::text(text)).collect();
+                        row.resize_with(columns, Cell::default);
+                        row
+                    })
+                    .collect();
+                let clip = crate::table::Clip {
+                    cells,
+                    styled: false,
+                };
+                table
+                    .paste(row, column, &clip)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::InsertRows { id, index, count } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                let like = index.saturating_sub(1).min(table.row_count() - 1);
+                table
+                    .insert_rows(index, count, like)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::RemoveRows { id, index, count } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                table
+                    .remove_rows(index..index + count)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::MoveRows {
+                id,
+                index,
+                count,
+                to,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                table
+                    .move_rows(index..index + count, to)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::InsertColumns { id, index, count } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                let like = index.saturating_sub(1).min(table.column_count() - 1);
+                table
+                    .insert_columns(index, count, like)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::RemoveColumns { id, index, count } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                table
+                    .remove_columns(index..index + count)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::MoveColumns {
+                id,
+                index,
+                count,
+                to,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                table
+                    .move_columns(index..index + count, to)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::MergeCells { id, rows, columns } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                table
+                    .merge(&CellRange::new(rows, columns))
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::SplitCell { id, row, column } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                table.split(row, column).map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::SetTableStyle {
+                id,
+                text,
+                fill,
+                stroke,
+                padding,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                if let Some(text) = text {
+                    if let Some(face) = &text.font {
+                        self.ensure_font(presentation, face, out)?;
+                    }
+                    text.validate().map_err(OpErrorKind::Apply)?;
+                    text.apply_to(&mut table.text);
+                }
+                if let Some(fill) = fill {
+                    table.fill = self.fill(fill)?;
+                }
+                if let Some(stroke) = stroke {
+                    table.stroke =
+                        stroke.map(|patch| patch.merge(table.stroke.unwrap_or_default()));
+                }
+                if let Some(padding) = padding {
+                    table.padding = padding;
+                }
+                self.set_table(id, table)
+            }
+            Op::SetCellStyle {
+                id,
+                rows,
+                columns,
+                fill,
+                text,
+                reset_text,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                let range = cell_range(&table, rows, columns);
+                let fill = match fill {
+                    Some(Some(fill)) => Some(Some(self.fill(fill)?)),
+                    Some(None) => Some(None),
+                    None => None,
+                };
+                let text = text.unwrap_or_default();
+                if let Some(face) = &text.font {
+                    self.ensure_font(presentation, face, out)?;
+                }
+                table
+                    .set_cell_styles(&range, fill, &text, reset_text)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::SetBorders {
+                id,
+                rows,
+                columns,
+                sides,
+                stroke,
+            } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                let range = cell_range(&table, rows, columns);
+                let edge = match stroke {
+                    None => return Err(OpErrorKind::Invalid("set_borders needs stroke")),
+                    Some(None) => Edge::None,
+                    Some(Some(BorderStroke::Keyword(word))) if word == "inherit" => Edge::Inherit,
+                    Some(Some(BorderStroke::Keyword(_))) => {
+                        return Err(OpErrorKind::Invalid(
+                            "set_borders.stroke is a stroke, null or \"inherit\"",
+                        ));
+                    }
+                    Some(Some(BorderStroke::Stroke(patch))) => {
+                        Edge::Stroke(patch.merge(table.stroke.unwrap_or_default()))
+                    }
+                };
+                table
+                    .set_borders(&range, sides, edge)
+                    .map_err(OpErrorKind::Apply)?;
+                self.set_table(id, table)
+            }
+            Op::SetTableSizing { id, width, height } => {
+                let (id, mut table) = self.table(presentation, &id)?;
+                if let Some(width) = width {
+                    table.width = width;
+                }
+                if let Some(height) = height {
+                    table.height = height;
+                }
+                self.set_table(id, table)
+            }
             Op::Batch { ops } => {
                 let mut inner = Vec::with_capacity(ops.len());
                 for op in ops {
@@ -1032,6 +1445,14 @@ impl Compiler {
                     .unwrap_or_default(),
                 stroke: shape.stroke,
             }),
+            NewKind::Table(new) => {
+                let table = self.new_table(new)?;
+                for face in table.faces() {
+                    self.ensure_font(presentation, &face, out)?;
+                }
+                self.tables.insert(id, table.clone());
+                ElementKind::Table(Box::new(table))
+            }
             NewKind::Line(line) => {
                 match (line.from, line.to, frame) {
                     (None, None, _) => {}
@@ -1241,6 +1662,66 @@ impl Compiler {
             None => presentation.new_image_id(),
         };
         Ok(Some(Operation::AddImage { id, data }))
+    }
+
+    /// A table to change: as earlier ops of the batch left it, or as it is
+    /// in the presentation.
+    fn table(
+        &mut self,
+        presentation: &Presentation,
+        id: &IdRef,
+    ) -> Result<(ElementId, TableElement), OpErrorKind> {
+        let id = self.touch(presentation, id)?;
+        if let Some(table) = self.tables.get(&id) {
+            return Ok((id, table.clone()));
+        }
+        let element = presentation
+            .element(id)
+            .ok_or(OpErrorKind::Apply(ApplyError::UnknownElement(id)))?;
+        let table = element
+            .as_table()
+            .ok_or(OpErrorKind::Apply(ApplyError::NotTable(id)))?;
+        Ok((id, table.clone()))
+    }
+
+    fn set_table(&mut self, id: ElementId, table: TableElement) -> Operation {
+        self.tables.insert(id, table.clone());
+        Operation::SetTable {
+            id,
+            table: Box::new(table),
+        }
+    }
+
+    fn new_table(&self, new: NewTable) -> Result<TableElement, OpErrorKind> {
+        let rows = new.cells.len().max(1);
+        let columns = new.cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        let mut table = TableElement::new(rows, columns);
+        for (row, cells) in new.cells.into_iter().enumerate() {
+            for (column, cell) in cells.into_iter().enumerate() {
+                table.rows[row][column] = match cell {
+                    NewCell::Text(content) => Cell::text(&content),
+                    NewCell::Cell(cell) => Cell {
+                        content: cell.content,
+                        fill: cell.fill.map(|fill| self.fill(fill)).transpose()?,
+                        text: cell.text,
+                        span: cell.span,
+                    },
+                };
+            }
+        }
+        new.text.apply_to(&mut table.text);
+        if let Some(fill) = new.fill {
+            table.fill = self.fill(fill)?;
+        }
+        if let Some(stroke) = new.stroke {
+            table.stroke = stroke.map(|patch| patch.merge(table.stroke.unwrap_or_default()));
+        }
+        if let Some(padding) = new.padding {
+            table.padding = padding;
+        }
+        table.width = new.width;
+        table.height = new.height;
+        Ok(table)
     }
 
     /// Resolves an element the op changes and records it as the last one.

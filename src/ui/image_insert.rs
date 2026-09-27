@@ -212,16 +212,23 @@ impl EditorView {
         let (image, add) = self.embed(data);
         let mut operations: Vec<Operation> = add.into_iter().collect();
         for id in ids {
-            let Some(fill) = self.presentation.element(id).and_then(|e| e.kind.fill()) else {
+            let Some(element) = self.presentation.element(id) else {
+                continue;
+            };
+            let kind = match element.as_table() {
+                Some(_) => self.table_proxy(id),
+                None => Some(element.kind.clone()),
+            };
+            let Some(fill) = kind.as_ref().and_then(ElementKind::fill) else {
                 continue;
             };
             let (fit, opacity) = match fill {
                 Fill::Image(current) => (current.fit, current.opacity),
                 _ => (ImageFit::Cover, 1.),
             };
-            operations.push(Operation::SetShapeStyle {
+            operations.extend(self.style_operation(
                 id,
-                patch: ShapeStylePatch {
+                ShapeStylePatch {
                     fill: Some(Fill::Image(ImageFill {
                         id: image,
                         fit,
@@ -229,7 +236,7 @@ impl EditorView {
                     })),
                     ..ShapeStylePatch::default()
                 },
-            });
+            ));
         }
         let selection = self.selection.clone();
         self.commit(

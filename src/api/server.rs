@@ -365,6 +365,10 @@ impl EditorView {
                 .element(*id)
                 .is_none_or(|element| element.frame != *origin),
             Some(Drag::SelectText { id }) => self.presentation.element(*id).is_none(),
+            Some(Drag::DrawTable { .. }) => self.presentation.slide(self.current_slide).is_none(),
+            Some(Drag::SelectCells { id, .. } | Drag::MoveCells { id, .. }) => {
+                self.presentation.element(*id).is_none()
+            }
             None => false,
         };
         if stale_drag {

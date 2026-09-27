@@ -70,6 +70,10 @@ icon_assets!(
         Volume2,
         VolumeX,
         Timer,
+        Table,
+        TableCellsMerge,
+        TableCellsSplit,
+        Scan,
     ]
 );
 

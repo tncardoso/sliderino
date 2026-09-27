@@ -24,6 +24,7 @@ pub mod shape;
 pub mod shortcuts;
 pub mod snap;
 pub mod style;
+pub mod table;
 pub mod text_layout;
 pub mod theme;
 pub mod ui;

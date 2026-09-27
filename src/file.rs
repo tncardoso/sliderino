@@ -441,6 +441,33 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_table_loads_the_same() {
+        let mut presentation = with_inter();
+        let mut table = crate::table::TableElement::new(2, 3);
+        table.rows[0][0].content = "Name".into();
+        table.rows[1][2].fill = Some(crate::document::Fill::None);
+        table.width = crate::table::TableSizing::Fixed(500.);
+        table
+            .merge(&crate::table::CellRange::new(0..1, 1..3))
+            .unwrap();
+        table
+            .set_borders(
+                &table.all(),
+                crate::table::Sides::Outside,
+                crate::table::Edge::None,
+            )
+            .unwrap();
+        crate::document::tests::add_shape(
+            &mut presentation,
+            Frame::default(),
+            crate::document::ElementKind::Table(Box::new(table)),
+        );
+        let path = temp_path("table.sldr");
+        save(&presentation, &path).unwrap();
+        assert_eq!(load(&path).unwrap(), presentation);
+    }
+
+    #[test]
     fn ids_are_not_reused_after_a_load() {
         let mut presentation = sample();
         // Removed ids stay used.

@@ -60,7 +60,7 @@ const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - add_slide {slide?: {id?, elements?}, index?}
 - remove_slide {id}; move_slide {id, index}
 - duplicate_slide {id, index?, ref?}: copies the slide and its elements with new ids, right after it by default; ref (\"$copy\") names the copy
-- add_element {slide, parent?, element, index?}. element: {id?, name?, hidden?, locked?, opacity?, frame: {x, y, width, height, rotation}} plus one kind key: text: {content, sizing, style} | group: {children: [element]} | rectangle: {fill?, stroke?, corner_radius?} | ellipse: {fill?, stroke?} | line: {stroke?, start?, end?, from?, to?}
+- add_element {slide, parent?, element, index?}. element: {id?, name?, hidden?, locked?, opacity?, frame: {x, y, width, height, rotation}} plus one kind key: text: {content, sizing, style} | group: {children: [element]} | rectangle: {fill?, stroke?, corner_radius?} | ellipse: {fill?, stroke?} | line: {stroke?, start?, end?, from?, to?} | table: {cells: [[cell]], text?, fill?, stroke?, padding?, width?, height?}
 - remove_element {id}; set_frame {id, frame}; set_text_sizing {id, sizing}
 - set_text_style {id, patch}; replace_text {id, range: {start, end} (bytes), text}
 - set_shape_style {id, patch: {fill?, stroke?, corner_radius?, start?, end?}}: stroke holds only the fields to change, or null to remove the stroke of a rectangle or ellipse
@@ -70,9 +70,11 @@ const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - set_layer {id, patch: {name?, hidden?, locked?, opacity?}}; \"name\": null clears the name
 - add_font {face} embeds an installed face. add_font {path | data, face?} embeds the faces of a TTF, OTF or TTC file (face picks one); path is read by the client, data is base64. A family name already in use by other fonts becomes \"Name (2)\"; the result lists the embedded faces in fonts. remove_font {face} removes an unused face; remove_font {family} removes all faces of the family and changes its texts to Inter. batch {ops}
 - add_image {id?, path | data}: embeds a PNG or JPEG; path is read by the client (relative to its working folder), data is base64. The same bytes are not added twice: the reference names the embedded image. remove_image {id}: removes an image no fill uses.
+- Tables: set_cell_text {id, row, column, text, range?} | set_cells {id, row?, column?, values: [[text]]} (grows the table) | insert_rows {id, index, count?} | remove_rows {id, index, count?} | move_rows {id, index, count?, to} | insert_columns, remove_columns, move_columns (same fields) | merge_cells {id, rows: {start, end}, columns: {start, end}} | split_cell {id, row, column} | set_table_style {id, text?, fill?, stroke?, padding?} | set_cell_style {id, rows?, columns?, fill?, text?, reset_text?} | set_borders {id, rows?, columns?, sides, stroke} | set_table_sizing {id, width?, height?}.
 - add_video {id?, path | data}: embeds a video. An MP4 with H.264 and AAC is kept as it is; other formats are converted to it first, which can take long. remove_video {id}: removes a video no fill uses.
 Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too. frame.rotation is the final angle in degrees, clockwise around the frame center, kept in (-180, 180]; x, y, width and height are the frame before it turns. get_elements and find_elements add bounds {x, y, width, height}, the unrotated box around a rotated element. The frame of a group is the box around its children in the axes of the group rotation. set_frame on a group moves it, resizes it by scaling the positions and boxes of its children (not their fonts, stroke widths or corner radii), or turns it and its children to the given angle; a new group has rotation 0, and the rotation of an added group only sets the axes of its box. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. opacity (0-1, default 1) applies to the whole element; a group multiplies the opacity of its children. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
 Shapes: a line has a frame of height 0; it goes from the left end to the right end of the frame, turned by the rotation. A frame with a height becomes its horizontal center axis. Give a new line from and to instead of a frame to place it by its ends; get_elements adds points {from, to} for lines. fill: \"none\" | {\"solid\": {color, opacity?}} | {\"linear_gradient\": {angle (degrees clockwise, 0 = left to right, turns with the shape), stops}} | {\"radial_gradient\": {center?: {x, y}, radius?: {x, y} (fractions of the box, default 0.5), stops}} | {\"image\": {id (or \"$name\" of add_image), fit?: cover | contain | stretch, opacity?}} | {\"video\": {id (or \"$name\" of add_video), fit?, opacity?, start?: auto | on_click, loop? (default true), muted?}} | {\"shader\": {source? (GLSL as on Shadertoy: void mainImage(out vec4 fragColor, in vec2 fragCoord) with iResolution, iTime, iTimeDelta, iFrame, iFrameRate, iChannel0, iChannelResolution; default: the Shadertoy default shader), channel0? (image id or \"$name\"), opacity?, start?, loop?, duration? (seconds 1-60, default 10: the loop of the video PPTX gets)}}. In a presentation, start auto plays when the slide shows; on_click fills start one per click, in layer order, before the next slide. Screenshots and PDF show the first video frame and the shader at time 0. get_basic_info lists the images with their upright pixel size, and the videos. stops: 2 to 10 of {position 0-1 in increasing order, color, opacity?}. A new rectangle or ellipse has a light gray fill and no stroke. stroke: {color?, opacity?, width? (default 4), dash?: solid | dashed | dotted}; the stroke is centered on the outline. corner_radius (rectangles) is in slide units. start and end (lines): none | triangle | arrow | diamond | circle, or {kind, size: small | medium | large}.
+Tables: rows and columns count from 0; a range {start, end} excludes end; rows and columns omitted mean the whole table. A cell is a text or {content, fill?, text?, span?: {rows, columns}}; text is a style patch over the table text style (Inter 24, vertical_align middle) and fill (\"none\" included) replaces the table fill. Text never wraps: \\n breaks a line. Every column is as wide as its widest cell and every row as tall as its tallest cell, plus padding (default 12) on each side; width and height are \"auto\" or {\"fixed\": units}: a fixed axis is at least that size and shares the extra space equally. set_frame with a new width or height fixes that axis (a size under the content goes back to auto). The default grid stroke is 111111 at opacity 0.4, width 2; stroke null draws none. Merged cells: the anchor (top-left) holds the text; merge_cells joins the texts as lines; ranges grow to hold whole merges; a move that cuts a merge fails. set_borders sides: all | outside | inside | inside_horizontal | inside_vertical | top | bottom | left | right; stroke: fields of a stroke (over the table stroke), null for no line, or \"inherit\". Inserted rows and columns copy the style of the one before them. Cells show no videos or shaders. get_elements adds layout {columns, rows} (sizes) for tables.
 Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. Slides are 1600x900 units. Colors are hex strings like \"1A1A1A\". sizing: auto_width | auto_height | fixed. style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color. Fonts are embedded automatically from the bundled and system fonts.";
 
 fn empty_schema() -> Value {
@@ -166,7 +168,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_slide",
-            description: "Elements of a slide in paint order (last on top), with frame and the content and style of each kind: text, group, rectangle, ellipse or line.",
+            description: "Elements of a slide in paint order (last on top), with frame and the content and style of each kind: text, group, rectangle, ellipse, line or table.",
             schema: json!({
                 "type": "object",
                 "properties": {"slide": slide_arg()},
@@ -189,7 +191,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "find_elements",
-            description: "Find text elements whose content contains a string (case-insensitive), on all slides or on one.",
+            description: "Find text elements and table cells whose content contains a string (case-insensitive), on all slides or on one. A table cell match adds cell {row, column}.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -600,6 +602,13 @@ fn get_elements(host: &dyn Host, args: ElementsArgs) -> Result<ToolOutput, ApiEr
                 "to": {"x": to.0, "y": to.1},
             });
         }
+        if let Some(layout) = presentation.table_layout(id) {
+            value["layout"] = json!({
+                "columns": layout.columns,
+                "rows": layout.rows,
+                "missing_glyphs": layout.missing_glyphs,
+            });
+        }
         if let Some(layout) = presentation.text_layout(id) {
             value["layout"] = json!({
                 "lines": layout.lines.len(),
@@ -637,20 +646,37 @@ fn find_elements(host: &dyn Host, args: FindArgs) -> Result<ToolOutput, ApiError
                 .into_iter()
                 .map(move |node| (slide.id, node.element))
         })
-        .filter_map(|(slide, element)| {
-            let text = element.as_text()?;
-            text.content.to_lowercase().contains(&needle).then(|| {
+        .flat_map(|(slide, element)| {
+            let found = |content: &str, cell: Option<(usize, usize)>| {
                 let mut value = json!({
                     "id": element.id,
                     "slide": slide,
-                    "content": text.content,
+                    "content": content,
                     "frame": element.frame,
                 });
+                if let Some((row, column)) = cell {
+                    value["cell"] = json!({"row": row, "column": column});
+                }
                 if element.frame.rotation != 0. {
                     value["bounds"] = bounds_json(&element.frame);
                 }
                 value
-            })
+            };
+            let mut values = Vec::new();
+            if let Some(text) = element.as_text()
+                && text.content.to_lowercase().contains(&needle)
+            {
+                values.push(found(&text.content, None));
+            }
+            if let Some(table) = element.as_table() {
+                for (row, column) in table.anchors() {
+                    let content = &table.rows[row][column].content;
+                    if content.to_lowercase().contains(&needle) {
+                        values.push(found(content, Some((row, column))));
+                    }
+                }
+            }
+            values
         })
         .collect();
     Ok(json!({"revision": presentation.revision(), "elements": found}).into())
@@ -1041,6 +1067,77 @@ pub(crate) mod tests {
         assert_eq!(error.data["op"], 1);
         assert!(host.presentation.slides[0].elements.is_empty());
         assert_eq!(host.history.done().count(), 0);
+    }
+
+    #[test]
+    fn agents_build_and_edit_tables() {
+        let mut host = TestHost::default();
+        let applied = call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [
+                {"op": "add_element", "slide": 1, "element": {"id": "$t", "frame": {"x": 10, "y": 20},
+                    "table": {"cells": [["Name", "Qty"], ["Apples", {"content": "3", "text": {"align": "right"}}]],
+                              "text": {"size": 30}}}},
+                {"op": "set_cells", "id": "$t", "row": 2, "column": 1, "values": [["x", "y"]]},
+                {"op": "set_borders", "id": "$t", "rows": {"start": 0, "end": 1}, "sides": "bottom",
+                    "stroke": {"width": 6}},
+                {"op": "merge_cells", "id": "$t", "rows": {"start": 0, "end": 1}, "columns": {"start": 0, "end": 2}}
+            ]}),
+        )
+        .unwrap();
+        let id = applied["refs"]["$t"].as_u64().unwrap();
+        let table = host
+            .presentation
+            .element(ElementId(id))
+            .unwrap()
+            .as_table()
+            .unwrap();
+        assert_eq!((table.row_count(), table.column_count()), (3, 3));
+        assert_eq!(table.rows[2][2].content, "y");
+        assert_eq!(table.rows[0][0].content, "Name\nQty");
+        assert_eq!(table.text.size, 30.);
+        assert!(
+            matches!(table.horizontal[1][0], crate::table::Edge::Stroke(stroke) if stroke.width == 6.)
+        );
+
+        let elements = call(&mut host, "get_elements", json!({"ids": [id]})).unwrap();
+        assert_eq!(
+            elements["elements"][0]["layout"]["columns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let found = call(&mut host, "find_elements", json!({"text": "apples"})).unwrap();
+        assert_eq!(found["elements"][0]["cell"], json!({"row": 1, "column": 0}));
+
+        let error = call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "move_columns", "id": id, "index": 1, "to": 3}]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "operation_failed");
+
+        let frame = host.presentation.element(ElementId(id)).unwrap().frame;
+        call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "set_frame", "id": id,
+                "frame": {"x": frame.x, "y": frame.y, "width": frame.width + 90., "height": frame.height}}]}),
+        )
+        .unwrap();
+        let table = host
+            .presentation
+            .element(ElementId(id))
+            .unwrap()
+            .as_table()
+            .unwrap();
+        assert_eq!(
+            table.width,
+            crate::table::TableSizing::Fixed(frame.width + 90.)
+        );
     }
 
     #[test]

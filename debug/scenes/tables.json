@@ -1,0 +1,39 @@
+[
+  {"op": "add_font", "face": {"family": "Inter", "weight": 400}},
+  {"op": "add_font", "face": {"family": "Inter", "weight": 600}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 1, "frame": {"x": 80, "y": 80},
+    "table": {"cells": [["Default table", "B"], ["", "Two\nlines"]]}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 2, "frame": {"x": 80, "y": 360},
+    "table": {"cells": [["Fruit", "Qty", "Price"], ["Apples", "3", "1.20"], ["Pears", "12", "0.80"], ["Total", "15", "2.00"]],
+      "stroke": null, "fill": {"solid": {"color": "F4F6FA"}}}}},
+  {"op": "set_cell_style", "id": 2, "rows": {"start": 0, "end": 1},
+    "fill": {"solid": {"color": "1F4BFF"}},
+    "text": {"color": "FFFFFF", "font": {"family": "Inter", "weight": 600}}},
+  {"op": "set_cell_style", "id": 2, "columns": {"start": 1, "end": 3}, "text": {"align": "right"}},
+  {"op": "set_borders", "id": 2, "rows": {"start": 3, "end": 4}, "sides": "top",
+    "stroke": {"color": "111111", "opacity": 1, "width": 3}},
+  {"op": "set_borders", "id": 2, "sides": "inside_horizontal", "rows": {"start": 1, "end": 3},
+    "stroke": {"color": "C8CCD6", "opacity": 1, "width": 1, "dash": "dashed"}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 3, "frame": {"x": 620, "y": 80},
+    "table": {"cells": [["Merged header", "", ""], ["a", "b", "c"], ["d", "tall", "e"], ["f", "", "g"]]}}},
+  {"op": "merge_cells", "id": 3, "rows": {"start": 0, "end": 1}, "columns": {"start": 0, "end": 3}},
+  {"op": "merge_cells", "id": 3, "rows": {"start": 2, "end": 4}, "columns": {"start": 1, "end": 2}},
+  {"op": "set_cell_style", "id": 3, "rows": {"start": 0, "end": 1}, "text": {"align": "center"},
+    "fill": {"linear_gradient": {"angle": 0, "stops": [{"position": 0, "color": "FFE08A"}, {"position": 1, "color": "FF9F7A"}]}}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 4, "frame": {"x": 620, "y": 420},
+    "table": {"cells": [["Fixed", "width"], ["shares", "space"]], "width": {"fixed": 420}, "height": {"fixed": 160}}}},
+  {"op": "set_borders", "id": 4, "sides": "outside", "stroke": {"color": "D0342C", "opacity": 1, "width": 4}},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "id": 5, "frame": {"x": 1200, "y": 200, "rotation": 20},
+    "table": {"cells": [["Rotated", "1"], ["table", "2"]],
+      "fill": {"solid": {"color": "E8F5E9"}}}}}
+]

@@ -743,6 +743,75 @@ pub fn layer_menu(
                     .ok();
             })
     };
+    let mut menu = menu;
+    if let Some((id, table, range)) = view.selected_cells()
+        && !view.presentation.is_locked(id)
+    {
+        let rows = table.row_count();
+        let columns = table.column_count();
+        let (can_merge, can_split) = (view.can_merge(), view.can_split());
+        menu = menu
+            .item(item("Insert row above", true, |editor, _, _| {
+                editor.insert_rows_near(false);
+            }))
+            .item(item("Insert row below", true, |editor, _, _| {
+                editor.insert_rows_near(true);
+            }))
+            .item(item("Insert column left", true, |editor, _, _| {
+                editor.insert_columns_near(false);
+            }))
+            .item(item("Insert column right", true, |editor, _, _| {
+                editor.insert_columns_near(true);
+            }))
+            .separator()
+            .item(item(
+                "Delete rows",
+                range.rows.len() < rows,
+                |editor, _, _| {
+                    editor.delete_rows();
+                },
+            ))
+            .item(item(
+                "Delete columns",
+                range.columns.len() < columns,
+                |editor, _, _| {
+                    editor.delete_columns();
+                },
+            ))
+            .separator()
+            .item(item("Move row up", range.rows.start > 0, |editor, _, _| {
+                editor.move_lines_by(true, false);
+            }))
+            .item(item(
+                "Move row down",
+                range.rows.end < rows,
+                |editor, _, _| {
+                    editor.move_lines_by(true, true);
+                },
+            ))
+            .item(item(
+                "Move column left",
+                range.columns.start > 0,
+                |editor, _, _| {
+                    editor.move_lines_by(false, false);
+                },
+            ))
+            .item(item(
+                "Move column right",
+                range.columns.end < columns,
+                |editor, _, _| {
+                    editor.move_lines_by(false, true);
+                },
+            ))
+            .separator()
+            .item(item("Merge cells", can_merge, |editor, _, _| {
+                editor.merge_cells();
+            }))
+            .item(item("Split cell", can_split, |editor, _, _| {
+                editor.split_cells();
+            }))
+            .separator();
+    }
     menu.item(item("Rename", single.is_some(), |editor, window, cx| {
         if let Some(id) = editor.single_selection() {
             editor.start_rename(id, window, cx);

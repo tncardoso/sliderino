@@ -26,6 +26,7 @@ pub fn application() -> Application {
 /// in `Application::run`.
 pub fn init(cx: &mut App) {
     gpui_kit::init(cx);
+    crate::editor::bind_keys(cx);
     cx.text_system()
         .add_fonts(assets::fonts())
         .expect("embedded Inter fonts load");

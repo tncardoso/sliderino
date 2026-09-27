@@ -131,6 +131,9 @@ fn design_tab(
         let element = editor.presentation.element(id)?;
         element.as_text().map(|_| element)
     });
+    if let Some((id, _)) = editor.selected_table() {
+        return locked_view(editor, table_design(editor, id, cx).into_any_element());
+    }
     let shapes = editor.selected_shapes();
     let content = match (selected, shapes) {
         (Some(element), _) => text_design(editor, element, problems, cx).into_any_element(),
@@ -140,6 +143,11 @@ fn design_tab(
         }
         (None, None) => slide_design(editor, problems, cx).into_any_element(),
     };
+    locked_view(editor, content)
+}
+
+/// The content, read-only when the selection is locked.
+fn locked_view(editor: &EditorView, content: AnyElement) -> AnyElement {
     if !editor.selection_locked() {
         return content;
     }
@@ -151,6 +159,205 @@ fn design_tab(
         .child(div().opacity(0.6).child(content))
         .child(div().absolute().inset_0().occlude())
         .into_any_element()
+}
+
+/// Design tab of a table: position, rows and columns, then text, fill and
+/// borders of the whole table, or of the selected cells.
+fn table_design(
+    editor: &EditorView,
+    id: crate::document::ElementId,
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let element = editor
+        .presentation
+        .element(id)
+        .expect("the selected table exists");
+    let table = element.as_table().expect("a table");
+    let cells = editor.selected_cells().map(|(_, table, range)| {
+        table
+            .anchors()
+            .into_iter()
+            .filter(|(row, column)| range.contains(*row, *column))
+            .count()
+    });
+    let subtitle = match cells {
+        Some(1) => "Table · 1 cell".to_string(),
+        Some(count) => format!("Table · {count} cells"),
+        None => format!("Table · {} × {}", table.column_count(), table.row_count()),
+    };
+    let subtitle = if editor.selection_locked() {
+        format!("{subtitle} · Locked")
+    } else {
+        subtitle
+    };
+    let style = editor.table_text_style(id).unwrap_or_default();
+    let proxy = editor.table_proxy(id);
+    let kinds: Vec<&ElementKind> = proxy.iter().collect();
+    v_flex()
+        .child(header(IconName::Table, element_name(element), subtitle))
+        .child(position_section(editor, false, cx))
+        .child(table_section(editor, id, cells.is_some(), cx))
+        .child(text_section(editor, &style, TextSizing::Fixed, cx))
+        .child(text_color_section(editor, &style, "TEXT COLOR"))
+        .child(shape_fill_section(editor, &kinds, false, cx))
+        .when_enabled(cells.is_some(), |this| {
+            this.child(border_sides_section(editor, cx))
+        })
+        .child(stroke_section(editor, &kinds, cx))
+}
+
+/// Rows, columns, padding and size of a table; merge, split and reset of
+/// the selected cells.
+fn table_section(
+    editor: &EditorView,
+    id: crate::document::ElementId,
+    cells: bool,
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let table = editor
+        .presentation
+        .element(id)
+        .and_then(Element::as_table)
+        .expect("a table");
+    let (rows, columns) = (table.row_count(), table.column_count());
+    let counter = |label: &'static str, count: usize, is_rows: bool| {
+        let minus = Button::new(if is_rows {
+            "table-remove-row"
+        } else {
+            "table-remove-column"
+        })
+        .ghost()
+        .xsmall()
+        .icon(IconName::Minus)
+        .disabled(count <= 1)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.remove_last_line(id, is_rows);
+            cx.notify();
+        }));
+        let plus = Button::new(if is_rows {
+            "table-add-row"
+        } else {
+            "table-add-column"
+        })
+        .ghost()
+        .xsmall()
+        .icon(IconName::Plus)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.insert_line(id, is_rows, count);
+            cx.notify();
+        }));
+        h_flex()
+            .flex_1()
+            .h(px(28.))
+            .px(px(4.))
+            .gap(px(4.))
+            .rounded(px(6.))
+            .bg(theme::field())
+            .items_center()
+            .child(div().flex_1().text_color(theme::text_muted()).child(label))
+            .child(minus)
+            .child(div().text_color(theme::text()).child(count.to_string()))
+            .child(plus)
+    };
+    let auto = |axis: &'static str, label: &'static str, is_auto: bool, width: bool| {
+        text_segment(axis, label, is_auto).on_click(cx.listener(move |this, _, _, cx| {
+            this.set_table_auto(width);
+            cx.notify();
+        }))
+    };
+    let mut section = section()
+        .child(section_label("TABLE"))
+        .child(field_row(
+            counter("Rows", rows, true),
+            counter("Columns", columns, false),
+        ))
+        .child(field_row(
+            input_field(field_icon(IconName::Scan), &editor.table_inspector.padding),
+            segmented()
+                .flex_1()
+                .child(auto(
+                    "table-auto-width",
+                    "Auto W",
+                    table.width == crate::table::TableSizing::Auto,
+                    true,
+                ))
+                .child(auto(
+                    "table-auto-height",
+                    "Auto H",
+                    table.height == crate::table::TableSizing::Auto,
+                    false,
+                )),
+        ));
+    if cells {
+        let (can_merge, can_split) = (editor.can_merge(), editor.can_split());
+        section = section.child(
+            h_flex()
+                .gap(px(4.))
+                .child(
+                    Button::new("table-merge")
+                        .xsmall()
+                        .icon(IconName::TableCellsMerge)
+                        .label("Merge")
+                        .disabled(!can_merge)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.merge_cells();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("table-split")
+                        .xsmall()
+                        .icon(IconName::TableCellsSplit)
+                        .label("Split")
+                        .disabled(!can_split)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.split_cells();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("table-reset-cells")
+                        .xsmall()
+                        .ghost()
+                        .label("Reset to table style")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.reset_cells();
+                            cx.notify();
+                        })),
+                ),
+        );
+    }
+    section
+}
+
+/// The edges of the selected cells that the stroke below sets.
+fn border_sides_section(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+    use crate::table::Sides;
+    let side = |(id, label, sides): (&'static str, &'static str, Sides)| {
+        text_segment(id, label, editor.border_sides == sides).on_click(cx.listener(
+            move |this, _, _, cx| {
+                this.border_sides = sides;
+                cx.notify();
+            },
+        ))
+    };
+    let outer = [
+        ("borders-all", "All", Sides::All),
+        ("borders-outside", "Outer", Sides::Outside),
+        ("borders-inside", "Inner", Sides::Inside),
+        ("borders-inside-h", "Inner H", Sides::InsideHorizontal),
+        ("borders-inside-v", "Inner V", Sides::InsideVertical),
+    ];
+    let single = [
+        ("borders-top", "Top", Sides::Top),
+        ("borders-bottom", "Bottom", Sides::Bottom),
+        ("borders-left", "Left", Sides::Left),
+        ("borders-right", "Right", Sides::Right),
+    ];
+    section()
+        .child(section_label("BORDERS"))
+        .child(segmented().children(outer.into_iter().map(side)))
+        .child(segmented().children(single.into_iter().map(side)))
 }
 
 fn header(icon: IconName, title: String, subtitle: String) -> impl IntoElement {
@@ -348,6 +555,7 @@ pub fn kind_name(element: &Element) -> &'static str {
         ElementKind::Rectangle(_) => "Rectangle",
         ElementKind::Ellipse(_) => "Ellipse",
         ElementKind::Line(_) => "Line",
+        ElementKind::Table(_) => "Table",
     }
 }
 
@@ -361,6 +569,7 @@ pub fn element_icon(element: &Element) -> IconName {
         "Shader" => IconName::Sparkles,
         "Rectangle" => IconName::Square,
         "Ellipse" => IconName::Circle,
+        "Table" => IconName::Table,
         _ => IconName::Slash,
     }
 }
@@ -371,12 +580,13 @@ pub fn element_name(element: &Element) -> String {
     if let Some(name) = &element.name {
         return name.clone();
     }
-    let Some(text) = element.as_text() else {
-        return format!("{} {}", kind_name(element), element.id.0);
+    let first = match (element.as_text(), element.as_table()) {
+        (Some(text), _) => text.content.lines().next().unwrap_or("").trim(),
+        (_, Some(table)) => table.first_text().unwrap_or(""),
+        _ => return format!("{} {}", kind_name(element), element.id.0),
     };
-    let first = text.content.lines().next().unwrap_or("").trim();
     if first.is_empty() {
-        return "Text".into();
+        return kind_name(element).into();
     }
     let mut name: String = first.chars().take(28).collect();
     if first.chars().count() > 28 {
@@ -742,7 +952,16 @@ fn select_field(select: impl IntoElement) -> impl IntoElement {
 }
 
 fn fill_section(editor: &EditorView, style: &TextStyle) -> impl IntoElement {
-    section().child(section_label("FILL")).child(
+    text_color_section(editor, style, "FILL")
+}
+
+/// The color of text, under `label`.
+fn text_color_section(
+    editor: &EditorView,
+    style: &TextStyle,
+    label: &'static str,
+) -> impl IntoElement {
+    section().child(section_label(label)).child(
         h_flex()
             .h(px(28.))
             .pl(px(4.))
@@ -800,7 +1019,7 @@ fn shape_design(
         .child(position_section(editor, lines && ids.len() == 1, cx))
         .when_enabled(rectangles, |this| this.child(corners_section(editor)))
         .when_enabled(filled, |this| {
-            this.child(shape_fill_section(editor, &kinds, cx))
+            this.child(shape_fill_section(editor, &kinds, true, cx))
         })
         .child(stroke_section(editor, &kinds, cx))
         .when_enabled(lines, |this| this.child(line_ends_section(&kinds, cx)))
@@ -848,9 +1067,12 @@ fn color_row(
         .child(div().w(px(72.)).flex_shrink_0().flex().child(trailing))
 }
 
+/// The fill of shapes; `media` offers videos and shaders, which table
+/// cells cannot show.
 fn shape_fill_section(
     editor: &EditorView,
     kinds: &[&ElementKind],
+    media: bool,
     cx: &mut Context<EditorView>,
 ) -> impl IntoElement {
     let fills: Vec<&Fill> = kinds.iter().filter_map(|kind| kind.fill()).collect();
@@ -885,7 +1107,14 @@ fn shape_fill_section(
     let picker = v_flex()
         .gap(px(4.))
         .child(segmented().children(paints.into_iter().map(type_segment)))
-        .child(segmented().children(pictures.into_iter().map(type_segment)));
+        .child(
+            segmented().children(
+                pictures
+                    .into_iter()
+                    .filter(|(_, _, kind)| media || *kind == FillType::Image)
+                    .map(type_segment),
+            ),
+        );
     let inspector = &editor.shape_inspector;
     let mut section = section().child(section_label("FILL")).child(picker);
     match fill_type {

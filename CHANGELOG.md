@@ -4,6 +4,23 @@
 
 ### Added
 
+- The Table tool. Click to add a table of 3 × 3 cells, or drag to choose
+  the number of rows and columns. A table is always as small as its text:
+  each column is as wide as its widest cell and each row as tall as its
+  tallest cell. Drag a handle to give it more space; the extra space goes to
+  all columns or rows in equal parts.
+- Double-click a cell to edit its text. Tab and Shift+Tab go to the next and
+  the previous cell. Click, Shift+click or drag to select cells; type to
+  replace the text of a cell, and press Delete to clear the selected cells.
+- Insert, delete and move rows and columns from the context menu, the Table
+  section of the properties panel, or the "+" buttons that show next to a
+  selected table. Drag selected rows or columns to move them.
+- Merge and split cells. Copy and paste cells, also to and from
+  spreadsheets. Paste tab-separated text on the canvas to make a new table.
+- Set the text style, the fill and the stroke of a whole table, or of the
+  selected cells only. Choose the sides of the cells that get the stroke.
+- Agents can add and edit tables: see "Tables" in the agent API.
+
 - Select more than one slide in the Slides tab: Ctrl+click adds or removes
   a slide, and Shift+click selects a range of slides.
 - Right-click a slide thumbnail to add a new slide, duplicate the selected
