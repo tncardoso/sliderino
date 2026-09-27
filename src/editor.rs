@@ -35,6 +35,7 @@ use crate::text_layout::TextLayout;
 use crate::theme;
 use crate::ui::canvas::canvas;
 use crate::ui::inspector::Inspector;
+use crate::ui::playback::Playback;
 use crate::ui::properties_panel::properties_panel;
 use crate::ui::shape_inspector::ShapeInspector;
 use crate::ui::slides_panel::slides_panel;
@@ -384,6 +385,11 @@ pub struct EditorView {
     pictures_pending: HashSet<Picture>,
     /// Pictures that cannot be loaded; they show as a placeholder.
     pictures_failed: HashSet<Picture>,
+    /// The done share, 0 to 1, of the videos being converted for an insert.
+    pub converting: Option<f32>,
+    /// The video and shader fills of selected shapes that play on the
+    /// canvas: the Preview of the inspector. Videos play without sound.
+    pub preview: RefCell<Playback>,
     _activation: Subscription,
 }
 
@@ -449,6 +455,8 @@ impl EditorView {
             pictures_wanted: RefCell::new(HashSet::new()),
             pictures_pending: HashSet::new(),
             pictures_failed: HashSet::new(),
+            converting: None,
+            preview: RefCell::new(Playback::muted()),
             _activation: activation,
         }
     }
@@ -900,6 +908,71 @@ impl EditorView {
             self.pictures_wanted.borrow_mut().insert(picture);
         }
         pixels
+    }
+
+    /// The picture a fill of the canvas shows: its live frame while it
+    /// plays in the Preview, or else its still picture.
+    pub fn canvas_picture(&self, id: ElementId, fill: &Fill, frame: &Frame) -> Option<Arc<Pixmap>> {
+        let mut preview = self.preview.borrow_mut();
+        if fill.is_animated() && preview.is_live(id) {
+            let size = |value: f32| value.round().max(1.) as u32;
+            let live = preview.picture(
+                id,
+                fill,
+                &self.presentation,
+                (size(frame.width), size(frame.height)),
+            );
+            if live.is_some() {
+                return live;
+            }
+        }
+        drop(preview);
+        self.fill_picture(fill, frame)
+    }
+
+    /// Whether the selected video and shader fills play in the Preview.
+    pub fn previewing(&self) -> bool {
+        let preview = self.preview.borrow();
+        self.selection.iter().any(|id| preview.is_live(*id))
+    }
+
+    /// Plays the video and shader fills of the selected shapes on the
+    /// canvas, or stops them when they play.
+    pub fn toggle_preview(&mut self) {
+        if self.previewing() {
+            self.preview.borrow_mut().clear();
+            return;
+        }
+        let mut preview = self.preview.borrow_mut();
+        for id in &self.selection {
+            if let Some(fill) = self
+                .presentation
+                .element(*id)
+                .and_then(|element| element.kind.fill())
+            {
+                preview.start(*id, fill, &self.presentation);
+            }
+        }
+    }
+
+    /// Stops the Preview of fills that are no longer selected, or no longer
+    /// video or shader fills.
+    fn sync_preview(&mut self) {
+        let mut preview = self.preview.borrow_mut();
+        let stale: Vec<ElementId> = preview
+            .ids()
+            .filter(|id| {
+                !self.selection.contains(id)
+                    || !self
+                        .presentation
+                        .element(*id)
+                        .and_then(|element| element.kind.fill())
+                        .is_some_and(Fill::is_animated)
+            })
+            .collect();
+        for id in stale {
+            preview.stop(id);
+        }
     }
 
     /// Whether pictures the canvas or the thumbnails draw are still being
@@ -1499,7 +1572,11 @@ impl Render for EditorView {
         let _span = crate::perf::span("render");
         self.sync_inspector(window, cx);
         self.sync_shape_inspector(window, cx);
+        self.sync_preview();
         let scene = self.canvas_scene(cx);
+        if self.preview.borrow().animating() {
+            window.request_animation_frame();
+        }
         let problems = crate::ui::properties_panel::diagnostics(self);
         let root = v_flex()
             .id("editor")

@@ -32,6 +32,7 @@ sliderino instances                     # list_instances
 sliderino open                          # open_editor
 sliderino info                          # get_basic_info
 sliderino screenshot -o slide.png       # get_screenshot
+sliderino shader-video 4 -o shader.mp4  # render_shader_video
 sliderino apply ops.json --label "Add title"   # apply_operations
 sliderino undo                          # undo
 sliderino redo                          # redo
@@ -58,13 +59,14 @@ The error data lists the instances.
 | --- | --- |
 | `list_instances` | List the open editors. |
 | `open_editor` | Start an editor and wait until it accepts calls. |
-| `get_basic_info` | Get the revision, the slides, the fonts, the images and the undo state. |
+| `get_basic_info` | Get the revision, the slides, the fonts, the images, the videos and the undo state. |
 | `get_selection` | Get the slide, the list of elements and the text that the person selected. |
 | `get_slide` | Get the elements of a slide in paint order. |
 | `get_elements` | Get elements by id, with the text layout and the overflow. |
 | `find_elements` | Find text elements that contain a string. |
-| `get_screenshot` | Render a slide to PNG. The default scale is 0.5 (800 × 450). |
-| `get_diagnostics` | List text that overflows its box and characters that the font does not have. |
+| `get_screenshot` | Render a slide to PNG. The default scale is 0.5 (800 × 450). Videos show their first frame. Shaders show their frame at `time` (default 0). |
+| `get_diagnostics` | List text that overflows its box, characters that the font does not have, shaders that do not compile, and videos and shaders that cannot play on this computer. |
+| `render_shader_video` | Render the shader fill of an element to an MP4 file. |
 | `list_fonts` | List the embedded faces and the families that you can embed. |
 | `apply_operations` | Apply a list of operations as one undo step. |
 | `undo` | Undo the latest step, from a person or from an agent. |
@@ -305,6 +307,85 @@ as the fill of a rectangle or an ellipse:
   uses stays in the presentation after you delete the element, so that undo
   can restore the element.
 
+## Videos
+
+A presentation holds its videos. Add a video with `add_video`, then use it
+as the fill of a rectangle or an ellipse:
+
+```json
+[
+  {"op": "add_video", "id": "$clip", "path": "/home/me/demo.webm"},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 160, "y": 90, "width": 1280, "height": 720},
+    "rectangle": {"fill": {"video": {"id": "$clip", "start": "on_click", "loop": false}}}}}
+]
+```
+
+- Sliderino keeps each video as an MP4 file with H.264 video and AAC audio.
+  PowerPoint and web browsers can play this format. If the file has an
+  other format, the editor changes it to MP4 before it applies the
+  operations. This can take a long time.
+- A video can have at most 512 MiB.
+- Give `path` or `data`, as for `add_image`.
+- If the presentation already holds the same bytes, `add_video` does not add
+  them again.
+- A video fill is `{"video": {"id", "fit", "opacity", "start", "loop",
+  "muted"}}`. `fit` is the same as for images. `start` is `auto` (the
+  default) or `on_click`. `loop` is `true` by default. `muted` is `false` by
+  default.
+- A presentation plays the videos. A screenshot and a PDF show the first
+  frame of the video.
+- `remove_video` removes a video that no fill uses.
+- Sliderino uses GStreamer to read, change and play videos. If a GStreamer
+  plugin is missing, `add_video` fails and `get_diagnostics` gives a
+  `media_error`.
+
+## Shaders
+
+A shader fill draws a fragment shader in the shape. Write the shader in GLSL
+as on Shadertoy:
+
+```json
+{"op": "set_shape_style", "id": 4, "patch": {"fill": {"shader": {
+  "source": "void mainImage(out vec4 fragColor, in vec2 fragCoord)\n{\n    vec2 uv = fragCoord / iResolution.xy;\n    fragColor = vec4(uv, 0.5 + 0.5 * sin(iTime), 1.0);\n}\n",
+  "duration": 6}}}}
+```
+
+- The shader must have `void mainImage(out vec4 fragColor, in vec2
+  fragCoord)`. `fragCoord` is in pixels from the bottom-left corner of the
+  shape box.
+- The shader can use `iResolution`, `iTime`, `iTimeDelta`, `iFrame`,
+  `iFrameRate`, `iMouse` (always 0), `iDate` (always 0), `iChannel0` and
+  `iChannelResolution`. The shader has one pass.
+- `channel0` gives an image of the presentation (an id or a `"$name"` of
+  `add_image`) for `iChannel0`. As on Shadertoy, `texture(iChannel0,
+  fragCoord / iResolution.xy)` shows the image upright.
+- The alpha of `fragColor` has no effect: the shader is opaque. Use
+  `opacity` to show what is below.
+- Without `source`, the fill gets the default shader of Shadertoy.
+- `duration` is from 1 to 60 seconds (default 10). A shader with `loop`
+  starts again after `duration`. A shader without `loop` stops at
+  `duration`. `start` is the same as for videos.
+- PPTX gets the shader as a video of `duration` seconds. Use
+  `render_shader_video` to make this video and examine it. A screenshot and
+  a PDF show the shader at time 0; `get_screenshot` with `time` shows it at
+  an other time.
+- A shader that does not compile shows a gray box. `get_diagnostics` gives
+  the problem as `shader_error` with the `line` of the source and the
+  `message`.
+
+## Presentations
+
+Click **Present** in the editor to show the slides on the full screen, from
+the slide that the editor shows:
+
+- The `auto` videos and shaders of a slide start when the slide shows.
+- A click, →, Space or Page Down starts the next `on_click` fill of the
+  slide. The fills start in layer order, from the bottom. When all `on_click`
+  fills started, the same keys go to the next slide.
+- A click on a video or a shader that started pauses it or plays it again.
+- ← and Page Up go to the previous slide. Esc stops the presentation.
+
 ## Rotation
 
 - `frame.rotation` is an angle in degrees. A positive angle turns the element
@@ -350,6 +431,7 @@ change and selects the changed element.
 | `unknown_instance` | No editor has the given process id. |
 | `invalid_arguments` | The arguments do not match the schema of the tool. |
 | `unknown_slide`, `unknown_element` | The id does not exist. |
+| `render_failed` | The editor cannot render the slide or the shader video. |
 | `operation_failed` | An operation cannot apply. `data.op` gives its index. |
 | `stale_revision` | The document changed after `base_revision`. |
 | `connection_failed` | The editor closed the connection. |

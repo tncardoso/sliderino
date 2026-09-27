@@ -63,6 +63,13 @@ icon_assets!(
         SquareRoundCorner,
         Upload,
         Trash,
+        Film,
+        Sparkles,
+        Pause,
+        Repeat,
+        Volume2,
+        VolumeX,
+        Timer,
     ]
 );
 

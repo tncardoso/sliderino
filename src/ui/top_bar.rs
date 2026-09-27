@@ -151,9 +151,18 @@ fn actions(editor: &EditorView, cx: &Context<EditorView>) -> impl IntoElement {
         .camera
         .map(|camera| camera.label())
         .unwrap_or_default();
+    let converting = editor.converting.map(|share| {
+        div()
+            .id("converting")
+            .test_support()
+            .px(px(8.))
+            .text_color(theme::text_muted())
+            .child(format!("Converting video… {}%", (share * 100.).round()))
+    });
     h_flex()
         .gap(px(8.))
         .pr(px(12.))
+        .children(converting)
         .child(agent_status(editor, cx))
         .child(
             div()
@@ -178,6 +187,7 @@ fn actions(editor: &EditorView, cx: &Context<EditorView>) -> impl IntoElement {
                 .icon(IconName::Play)
                 .label("Present")
                 .h(px(28.))
-                .px(px(12.)),
+                .px(px(12.))
+                .on_click(cx.listener(|this, _, window, cx| this.present(window, cx))),
         )
 }

@@ -4,6 +4,29 @@
 
 ### Added
 
+- Video fills: fill a rectangle or an ellipse with a video. Drop a video
+  file on the canvas, or pick Video in the fill of the Design tab. Videos in
+  other formats than MP4 (H.264 and AAC) change to MP4 when you add them;
+  the top bar shows the progress. Set the fit, the opacity, when the video
+  starts (Auto or On click), Loop and Sound.
+- Shader fills: fill a shape with a GLSL shader written as on Shadertoy
+  (`mainImage`, `iTime`, `iResolution`, `iChannel0` and more). Edit the
+  source in the Design tab; the problems of the source show with their line.
+  Give the shader an image as `iChannel0`, and set its duration, Start and
+  Loop.
+- Preview in the Design tab plays the selected videos and shaders on the
+  canvas, without sound.
+- Present shows the slides on the full screen. Videos and shaders start when
+  the slide shows or on a click, in layer order. Click a video or a shader
+  to pause it. Use the arrow keys to go between slides and Esc to stop.
+- Agents can add videos with `add_video`, fill shapes with `video` and
+  `shader`, show shaders at a time with the `time` of `get_screenshot`, and
+  make the MP4 of a shader with `render_shader_video`
+  (`sliderino shader-video`). `get_diagnostics` reports shaders that do not
+  compile and videos that cannot play.
+- Videos need GStreamer with its base, good and bad plugins, and an H.264
+  and an AAC encoder (the ugly plugins or libav) to change other formats.
+  Shaders need a GPU.
 - Upload font files (TTF, OTF or TTC). Click the upload button next to the
   font family to give the font to the selected texts, or drop the files on
   the canvas. The font goes into the presentation. If an installed or

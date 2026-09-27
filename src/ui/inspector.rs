@@ -97,7 +97,7 @@ pub fn number(value: f32) -> String {
 pub fn parse(text: &str) -> Option<f32> {
     let value: f32 = text
         .trim()
-        .trim_end_matches(['%', '°'])
+        .trim_end_matches(['%', '°', 's'])
         .trim()
         .parse()
         .ok()?;

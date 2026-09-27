@@ -614,3 +614,59 @@ fn shapes_take_an_image_fill_and_its_fit(cx: &mut TestAppContext) {
     });
     assert!(error.is_err());
 }
+
+#[gpui_kit::test]
+fn shapes_take_a_shader_fill_and_its_playback(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_fill_type(FillType::Shader);
+        editor.set_fill_start(crate::document::Start::OnClick);
+        editor.set_fill_loop(false);
+        editor
+            .fill_with_image_bytes(crate::images::tests::png(8, 8).to_vec())
+            .unwrap();
+    });
+    let Some(Fill::Image(image)) = kind(cx, handle, id).fill().cloned() else {
+        panic!("an image fill");
+    };
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_fill_type(FillType::Shader);
+        editor.set_shader_channel(Some(image.id), None);
+    });
+    let Some(Fill::Shader(shader)) = kind(cx, handle, id).fill().cloned() else {
+        panic!("a shader fill");
+    };
+    assert_eq!(shader.source.as_ref(), crate::shaders::DEFAULT_SOURCE);
+    assert_eq!(shader.channel0, Some(image.id));
+    assert_eq!(
+        history(cx, handle),
+        vec![
+            "Fill",
+            "Start",
+            "Loop",
+            "Image fill",
+            "Fill",
+            "Shader channel"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn the_preview_stops_when_the_shape_is_no_longer_selected(cx: &mut TestAppContext) {
+    let mut presentation = Presentation::new();
+    let id = add_shape(&mut presentation, frame(100., 100., 200., 200.), ellipse());
+    let handle = open_with(cx, presentation);
+    select(cx, handle, vec![id]);
+    crate::ui::test_support::with_editor(cx, handle, |editor, _| {
+        editor.set_fill_type(FillType::Shader);
+        editor.toggle_preview();
+        assert!(editor.previewing());
+    });
+    select(cx, handle, vec![]);
+    cx.run_until_parked();
+    let live = read(cx, handle, |editor| editor.preview.borrow().is_live(id));
+    assert!(!live);
+}

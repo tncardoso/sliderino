@@ -13,6 +13,8 @@ pub mod image_insert;
 pub mod inspector;
 #[cfg(all(test, feature = "perf"))]
 mod perf_tests;
+pub mod playback;
+pub mod presenter;
 pub mod properties_panel;
 #[cfg(test)]
 mod rotation_tests;

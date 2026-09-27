@@ -1,0 +1,24 @@
+[
+  {"op": "add_font", "face": {"family": "Inter", "weight": 400}},
+  {"op": "add_image", "id": "$landscape", "path": "assets/landscape.png"},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 80, "y": 80, "width": 640, "height": 360},
+    "rectangle": {"corner_radius": 32, "fill": {"shader": {}}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 880, "y": 80, "width": 360, "height": 360, "rotation": 15},
+    "ellipse": {"fill": {"shader": {"start": "on_click", "loop": false, "duration": 4,
+      "source": "void mainImage(out vec4 fragColor, in vec2 fragCoord)\n{\n    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;\n    float rings = sin(40.0 * length(uv) - 4.0 * iTime);\n    fragColor = vec4(vec3(0.5 + 0.5 * rings) * vec3(0.2, 0.5, 1.0), 1.0);\n}\n"}},
+      "stroke": {"width": 6}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 80, "y": 520, "width": 480, "height": 300},
+    "rectangle": {"fill": {"shader": {"channel0": "$landscape",
+      "source": "void mainImage(out vec4 fragColor, in vec2 fragCoord)\n{\n    vec2 uv = fragCoord / iResolution.xy;\n    uv.x += 0.02 * sin(10.0 * uv.y + 3.0 * iTime);\n    fragColor = texture(iChannel0, uv);\n}\n"}}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 640, "y": 520, "width": 480, "height": 300},
+    "rectangle": {"fill": {"shader": {"source": "void mainImage(out vec4 c, in vec2 p) { c = vec4(nope); }\n"}}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 120, "y": 120, "width": 560, "height": 60},
+    "text": {"content": "Text over a shader", "sizing": "fixed",
+             "style": {"size": 40, "color": "FFFFFF"}}}}
+]

@@ -137,10 +137,13 @@ impl EditorView {
             let Some(text) = element.as_text() else {
                 if element.kind.is_shape() {
                     let (frame, _) = dragged.apply(element);
-                    let picture = element
-                        .kind
-                        .fill()
-                        .and_then(|fill| self.fill_picture(fill, &frame));
+                    let picture = element.kind.fill().and_then(|fill| {
+                        if preview {
+                            self.canvas_picture(element.id, fill, &frame)
+                        } else {
+                            self.fill_picture(fill, &frame)
+                        }
+                    });
                     items.push(PaintItem::Shape(PaintShape {
                         element: Element {
                             frame,

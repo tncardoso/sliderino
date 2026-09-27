@@ -4,8 +4,10 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::color_picker::ColorPicker;
+use gpui_kit::component::input::Editor;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::Select;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -14,8 +16,8 @@ use gpui_kit::{
 };
 
 use crate::document::{
-    Dash, Element, ElementKind, Fill, HAlign, HeadKind, HeadSize, ImageFit, TextCase, TextSizing,
-    TextStyle, TextStylePatch, VAlign,
+    Dash, Element, ElementKind, Fill, HAlign, HeadKind, HeadSize, ImageFit, Start, TextCase,
+    TextSizing, TextStyle, TextStylePatch, VAlign,
 };
 use crate::editor::EditorView;
 use crate::text_layout::TextLayout;
@@ -34,12 +36,14 @@ pub fn diagnostics(editor: &mut EditorView) -> Vec<(Severity, String)> {
     let _span = crate::perf::span("diagnostics");
     if let Some(id) = editor.single_selection()
         && let Some(element) = editor.presentation.element(id).cloned()
-        && element.as_text().is_some()
     {
-        return editor
-            .layout_of(id)
-            .map(|layout| text_problems(&layout, &element_font(&element)))
-            .unwrap_or_default();
+        if element.as_text().is_some() {
+            return editor
+                .layout_of(id)
+                .map(|layout| text_problems(&layout, &element_font(&element)))
+                .unwrap_or_default();
+        }
+        return shader_problem(&element).into_iter().collect();
     }
     let elements: Vec<Element> = editor
         .current_slide()
@@ -56,7 +60,24 @@ pub fn diagnostics(editor: &mut EditorView) -> Vec<(Severity, String)> {
             problems.push((severity, format!("{name}: {message}")));
         }
     }
+    for node in editor.current_slide().visible_leaves() {
+        if let Some((severity, message)) = shader_problem(node.element) {
+            problems.push((
+                severity,
+                format!("{}: {message}", element_name(node.element)),
+            ));
+        }
+    }
     problems
+}
+
+/// The compile error of the shader fill of an element.
+fn shader_problem(element: &Element) -> Option<(Severity, String)> {
+    let Some(Fill::Shader(shader)) = element.kind.fill() else {
+        return None;
+    };
+    let error = crate::shaders::check(&shader.source).err()?;
+    Some((Severity::Warning, format!("Shader {error}")))
 }
 
 pub fn properties_panel(
@@ -316,12 +337,14 @@ fn selection_design(editor: &EditorView, cx: &mut Context<EditorView>) -> impl I
 }
 
 /// The kind of an element as the panels name it. A rectangle filled with
-/// an image is an image.
+/// an image, a video or a shader is an image, a video or a shader.
 pub fn kind_name(element: &Element) -> &'static str {
     match &element.kind {
         ElementKind::Text(_) => "Text",
         ElementKind::Group(_) => "Group",
         ElementKind::Rectangle(shape) if matches!(shape.fill, Fill::Image(_)) => "Image",
+        ElementKind::Rectangle(shape) if matches!(shape.fill, Fill::Video(_)) => "Video",
+        ElementKind::Rectangle(shape) if matches!(shape.fill, Fill::Shader(_)) => "Shader",
         ElementKind::Rectangle(_) => "Rectangle",
         ElementKind::Ellipse(_) => "Ellipse",
         ElementKind::Line(_) => "Line",
@@ -334,6 +357,8 @@ pub fn element_icon(element: &Element) -> IconName {
         "Text" => IconName::Type,
         "Group" => IconName::Group,
         "Image" => IconName::Image,
+        "Video" => IconName::Film,
+        "Shader" => IconName::Sparkles,
         "Rectangle" => IconName::Square,
         "Ellipse" => IconName::Circle,
         _ => IconName::Slash,
@@ -830,27 +855,37 @@ fn shape_fill_section(
 ) -> impl IntoElement {
     let fills: Vec<&Fill> = kinds.iter().filter_map(|kind| kind.fill()).collect();
     let fill_type = common(fills.iter().map(|fill| FillType::of(fill)));
-    let types = [
-        ("fill-none", "None", FillType::None),
-        ("fill-solid", "Solid", FillType::Solid),
-        ("fill-linear", "Linear", FillType::Linear),
-        ("fill-radial", "Radial", FillType::Radial),
-        ("fill-image", "Image", FillType::Image),
-    ];
-    let picker = segmented().children(types.into_iter().map(|(id, label, kind)| {
+    let type_segment = |(id, label, kind): (&'static str, &'static str, FillType)| {
         text_segment(id, label, fill_type == Some(kind)).on_click(cx.listener(
             move |this, _, window, cx| {
-                if kind == FillType::Image {
-                    if this.selected_fill_type() != Some(FillType::Image) {
-                        this.choose_image(ImageTarget::Fill, window, cx);
+                match kind {
+                    // An image or a video comes from a file.
+                    FillType::Image | FillType::Video => {
+                        if this.selected_fill_type() != Some(kind) {
+                            this.choose_image(ImageTarget::Fill, window, cx);
+                        }
                     }
-                } else {
-                    this.set_fill_type(kind);
+                    _ => this.set_fill_type(kind),
                 }
                 cx.notify();
             },
         ))
-    }));
+    };
+    let paints = [
+        ("fill-none", "None", FillType::None),
+        ("fill-solid", "Solid", FillType::Solid),
+        ("fill-linear", "Linear", FillType::Linear),
+        ("fill-radial", "Radial", FillType::Radial),
+    ];
+    let pictures = [
+        ("fill-image", "Image", FillType::Image),
+        ("fill-video", "Video", FillType::Video),
+        ("fill-shader", "Shader", FillType::Shader),
+    ];
+    let picker = v_flex()
+        .gap(px(4.))
+        .child(segmented().children(paints.into_iter().map(type_segment)))
+        .child(segmented().children(pictures.into_iter().map(type_segment)));
     let inspector = &editor.shape_inspector;
     let mut section = section().child(section_label("FILL")).child(picker);
     match fill_type {
@@ -889,9 +924,10 @@ fn shape_fill_section(
                 ))
                 .child(stops(editor, &fills, cx));
         }
-        Some(FillType::Image) => {
+        Some(FillType::Image | FillType::Video) => {
             let fit = common(fills.iter().filter_map(|fill| match fill {
                 Fill::Image(image) => Some(image.fit),
+                Fill::Video(video) => Some(video.fit),
                 _ => None,
             }));
             let fits = ImageFit::ALL.into_iter().map(|option| {
@@ -924,7 +960,11 @@ fn shape_fill_section(
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.choose_image(ImageTarget::Fill, window, cx);
                             }))
-                            .child(field_icon(IconName::Image))
+                            .child(field_icon(if fill_type == Some(FillType::Video) {
+                                IconName::Film
+                            } else {
+                                IconName::Image
+                            }))
                             .child(div().text_color(theme::text()).child("Replace…")),
                     )
                     .child(div().w(px(72.)).flex_shrink_0().flex().child(shape_input(
@@ -933,10 +973,203 @@ fn shape_fill_section(
                         ShapeField::FillOpacity,
                     ))),
             );
+            if fill_type == Some(FillType::Video) {
+                section = section.child(playback_rows(editor, &fills, cx));
+            }
+        }
+        Some(FillType::Shader) => {
+            section = section
+                .child(shader_source(editor, cx))
+                .child(shader_channel(editor, &fills, cx))
+                .child(field_row(
+                    shape_input(
+                        editor,
+                        field_icon(IconName::Timer),
+                        ShapeField::ShaderDuration,
+                    ),
+                    shape_input(editor, field_icon(IconName::Blend), ShapeField::FillOpacity),
+                ))
+                .child(playback_rows(editor, &fills, cx));
         }
         _ => {}
     }
     section
+}
+
+/// The source editor of the selected shader fills, the first problem of
+/// the source, and a button that applies a typed source.
+fn shader_source(editor: &EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
+    let inspector = &editor.shape_inspector;
+    let problem = inspector.shader_error.as_ref().map(|error| {
+        div()
+            .id("shader-error")
+            .test_support()
+            .text_color(theme::warn())
+            .child(error.to_string())
+    });
+    let apply = inspector.shader_dirty.then(|| {
+        Button::new("apply-shader")
+            .xsmall()
+            .outline()
+            .label("Apply")
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.apply_shader_source(window, cx);
+            }))
+    });
+    v_flex()
+        .gap(px(4.))
+        .child(
+            div().h(px(180.)).child(
+                Editor::new(&inspector.shader_source)
+                    .h_full()
+                    .text_size(px(11.)),
+            ),
+        )
+        .children(problem)
+        .children(apply)
+}
+
+/// The image the selected shader fills read as `iChannel0`.
+fn shader_channel(
+    editor: &EditorView,
+    fills: &[&Fill],
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let channel = common(fills.iter().filter_map(|fill| match fill {
+        Fill::Shader(shader) => Some(shader.channel0),
+        _ => None,
+    }));
+    let label = match channel {
+        Some(Some(image)) => {
+            let size = editor
+                .presentation
+                .images
+                .get(image)
+                .map(|data| format!(" · {}×{}", data.width, data.height))
+                .unwrap_or_default();
+            format!("Image {}{size}", image.0)
+        }
+        Some(None) => "No image".into(),
+        None => "Mixed".into(),
+    };
+    let clear = matches!(channel, Some(Some(_)) | None).then(|| {
+        div()
+            .id("clear-channel")
+            .test_support()
+            .size(px(20.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme::field()))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.set_shader_channel(None, None);
+                cx.notify();
+            }))
+            .child(
+                Icon::new(IconName::X)
+                    .size(px(12.))
+                    .text_color(theme::text_muted()),
+            )
+    });
+    h_flex()
+        .gap(px(4.))
+        .child(
+            h_flex()
+                .id("choose-channel")
+                .test_support()
+                .flex_1()
+                .h(px(28.))
+                .px(px(8.))
+                .gap(px(6.))
+                .rounded(px(6.))
+                .bg(theme::field())
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.choose_image(ImageTarget::Channel, window, cx);
+                }))
+                .child(field_letter("0"))
+                .child(div().text_color(theme::text()).child(label)),
+        )
+        .children(clear)
+}
+
+/// When the selected video and shader fills start, whether they loop and
+/// whether the videos play their sound, and the Preview button.
+fn playback_rows(
+    editor: &EditorView,
+    fills: &[&Fill],
+    cx: &mut Context<EditorView>,
+) -> impl IntoElement {
+    let playback: Vec<(Start, bool)> = fills.iter().filter_map(|fill| fill.playback()).collect();
+    let start = common(playback.iter().map(|(start, _)| start));
+    let looped = common(playback.iter().map(|(_, looped)| looped)).copied();
+    let muted = common(fills.iter().filter_map(|fill| match fill {
+        Fill::Video(video) => Some(video.muted),
+        _ => None,
+    }));
+    let starts = Start::ALL.into_iter().map(|option| {
+        let id = match option {
+            Start::Auto => "start-auto",
+            Start::OnClick => "start-on-click",
+        };
+        text_segment(id, option.label(), start == Some(&option)).on_click(cx.listener(
+            move |this, _, _, cx| {
+                this.set_fill_start(option);
+                cx.notify();
+            },
+        ))
+    });
+    let sound = muted.map(|muted| {
+        Switch::new("fill-sound")
+            .small()
+            .checked(!muted)
+            .label("Sound")
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                this.set_video_muted(!*checked);
+                cx.notify();
+            }))
+    });
+    let previewing = editor.previewing();
+    v_flex()
+        .gap(px(8.))
+        .child(segmented().children(starts))
+        .child(
+            h_flex()
+                .gap(px(12.))
+                .child(
+                    Switch::new("fill-loop")
+                        .small()
+                        .checked(looped.unwrap_or(false))
+                        .label("Loop")
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.set_fill_loop(*checked);
+                            cx.notify();
+                        })),
+                )
+                .children(sound),
+        )
+        .child(
+            Button::new("fill-preview")
+                .xsmall()
+                .outline()
+                .icon(if previewing {
+                    IconName::Pause
+                } else {
+                    IconName::Play
+                })
+                .label(if previewing {
+                    "Stop preview"
+                } else {
+                    "Preview"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_preview();
+                    cx.notify();
+                })),
+        )
 }
 
 /// One row per gradient stop, when the gradients have the same number of

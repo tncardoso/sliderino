@@ -143,9 +143,26 @@ fn author_line(span: naga::Span, full: &str) -> u32 {
     line.saturating_sub(prelude_lines())
 }
 
-/// Parses and validates a shader on the CPU. The GPU is not needed.
+/// Parses and validates a shader on the CPU. The GPU is not needed. The
+/// results of the last sources are kept, so that the editor can check the
+/// shaders it shows on each render.
 pub fn check(source: &str) -> Result<(), ShaderError> {
-    parse(source).map(|_| ())
+    static CHECKED: Mutex<Vec<(u64, Result<(), ShaderError>)>> = Mutex::new(Vec::new());
+    const KEPT: usize = 64;
+    let key = hash(source);
+    if let Ok(checked) = CHECKED.lock()
+        && let Some((_, result)) = checked.iter().find(|(found, _)| *found == key)
+    {
+        return result.clone();
+    }
+    let result = parse(source).map(|_| ());
+    if let Ok(mut checked) = CHECKED.lock() {
+        checked.push((key, result.clone()));
+        if checked.len() > KEPT {
+            drop(checked.remove(0));
+        }
+    }
+    result
 }
 
 fn parse(source: &str) -> Result<(naga::Module, naga::valid::ModuleInfo), ShaderError> {
@@ -427,10 +444,16 @@ impl Gpu {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        // Shadertoy samples straight colors, not premultiplied ones.
+        // Shadertoy samples straight colors, not premultiplied ones, and
+        // flips images: texture coordinate y = 0 is the bottom row, so that
+        // texture(iChannel0, fragCoord / iResolution.xy) shows the image
+        // upright.
+        let width = pixels.width() as usize;
         let straight: Vec<u8> = pixels
             .pixels()
-            .iter()
+            .chunks(width)
+            .rev()
+            .flatten()
             .flat_map(|pixel| {
                 let color = pixel.demultiply();
                 [color.red(), color.green(), color.blue(), color.alpha()]
@@ -817,6 +840,27 @@ mod tests {
             broken.encode(),
             Err(VideoJobError::Render(RenderError::Shader(_)))
         ));
+    }
+
+    #[test]
+    fn channels_show_upright_as_on_shadertoy() {
+        if !gpu_or_skip() {
+            return;
+        }
+        // Red on top, blue at the bottom.
+        let mut channel = Pixmap::new(4, 4).unwrap();
+        for (index, pixel) in channel.pixels_mut().iter_mut().enumerate() {
+            let color = if index < 8 { (255, 0, 0) } else { (0, 0, 255) };
+            *pixel = tiny_skia::ColorU8::from_rgba(color.0, color.1, color.2, 255).premultiply();
+        }
+        let source = "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p / iResolution.xy); }\n";
+        let pixmap = render(source, Some(&Arc::new(channel)), 4, 4, Inputs::at(0.)).unwrap();
+        assert_eq!(pixmap.pixel(1, 0).unwrap().red(), 255, "red on top");
+        assert_eq!(
+            pixmap.pixel(1, 3).unwrap().blue(),
+            255,
+            "blue at the bottom"
+        );
     }
 
     #[test]

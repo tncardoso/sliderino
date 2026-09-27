@@ -6,15 +6,16 @@
 //! text fields, a field commits on Enter or when it loses the focus.
 
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::{AppContext as _, Context, Entity, Focusable as _, Hsla, Subscription, Window};
 
 use crate::document::{
-    Arrowhead, Dash, ElementId, ElementKind, Fill, GradientStop, HeadKind, HeadSize,
-    LinearGradient, Operation, RadialGradient, Rgb, ShaderFill, ShapeStylePatch, SolidFill, Stroke,
-    Vec2,
+    Arrowhead, Dash, ElementId, ElementKind, Fill, GradientStop, HeadKind, HeadSize, ImageId,
+    LinearGradient, Operation, RadialGradient, Rgb, ShaderFill, ShapeStylePatch, SolidFill, Start,
+    Stroke, Vec2,
 };
 use crate::editor::EditorView;
+use crate::shaders::ShaderError;
 use crate::style::MAX_STOPS;
 use crate::ui::inspector::number;
 
@@ -32,6 +33,8 @@ pub enum ShapeField {
     RadiusY,
     /// The position of a gradient stop, by index.
     StopPosition(usize),
+    /// The loop of a shader, in seconds.
+    ShaderDuration,
 }
 
 impl ShapeField {
@@ -46,6 +49,7 @@ impl ShapeField {
             ShapeField::CenterY,
             ShapeField::RadiusX,
             ShapeField::RadiusY,
+            ShapeField::ShaderDuration,
         ];
         fields.extend((0..MAX_STOPS).map(ShapeField::StopPosition));
         fields
@@ -91,6 +95,10 @@ impl ShapeField {
                 )
             }
             ShapeField::StopPosition(index) => Some(fill?.stops()?.get(index)?.position * 100.),
+            ShapeField::ShaderDuration => match fill? {
+                Fill::Shader(shader) => Some(shader.duration),
+                _ => None,
+            },
         }
     }
 
@@ -98,6 +106,7 @@ impl ShapeField {
         match self {
             ShapeField::StrokeWidth | ShapeField::CornerRadius => number(value),
             ShapeField::GradientAngle => format!("{}°", number(value)),
+            ShapeField::ShaderDuration => format!("{} s", number(value)),
             _ => format!("{}%", number(value)),
         }
     }
@@ -188,6 +197,18 @@ impl ShapeField {
                     Some(())
                 })
             }
+            ShapeField::ShaderDuration
+                if (crate::style::MIN_SHADER_DURATION..=crate::style::MAX_SHADER_DURATION)
+                    .contains(&value) =>
+            {
+                fill(&|fill| {
+                    let Fill::Shader(shader) = fill else {
+                        return None;
+                    };
+                    shader.duration = value;
+                    Some(())
+                })
+            }
             _ => None,
         }
     }
@@ -202,6 +223,7 @@ impl ShapeField {
             ShapeField::CenterX | ShapeField::CenterY => "Gradient center",
             ShapeField::RadiusX | ShapeField::RadiusY => "Gradient radius",
             ShapeField::StopPosition(_) => "Gradient stop",
+            ShapeField::ShaderDuration => "Shader duration",
         }
     }
 }
@@ -284,6 +306,12 @@ pub struct ShapeInspector {
     shown: Vec<ElementId>,
     /// Fields the author typed into and has not committed yet.
     dirty: Vec<ShapeField>,
+    /// The source of the selected shader fills.
+    pub shader_source: Entity<EditorState>,
+    /// The first problem of the source being typed, checked as it changes.
+    pub shader_error: Option<ShaderError>,
+    /// Whether the author typed into the source and did not apply it yet.
+    pub shader_dirty: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -332,6 +360,21 @@ impl ShapeInspector {
         let stop_colors = (0..MAX_STOPS)
             .map(|index| picker(ColorTarget::Stop(index)))
             .collect();
+        let shader_source = cx.new(|cx| EditorState::new(window, cx).soft_wrap(false));
+        subscriptions.push(cx.subscribe_in(
+            &shader_source,
+            window,
+            |this: &mut EditorView, state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.shape_inspector.shader_dirty = true;
+                    let source = state.read(cx).value();
+                    this.shape_inspector.shader_error = crate::shaders::check(&source).err();
+                    cx.notify();
+                }
+                InputEvent::Blur => this.apply_shader_source(window, cx),
+                _ => {}
+            },
+        ));
         Self {
             fields,
             fill_color,
@@ -339,6 +382,9 @@ impl ShapeInspector {
             stop_colors,
             shown: Vec::new(),
             dirty: Vec::new(),
+            shader_source,
+            shader_error: None,
+            shader_dirty: false,
             _subscriptions: subscriptions,
         }
     }
@@ -405,6 +451,17 @@ impl EditorView {
                 self.commit_shape_field(field, window, cx);
             }
         }
+        if self.shape_inspector.shader_dirty
+            && !self
+                .shape_inspector
+                .shader_source
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            // Left by clicking elsewhere: to the shapes it showed.
+            self.apply_shader_source(window, cx);
+        }
         let Some(ids) = self.selected_shapes() else {
             self.shape_inspector.shown.clear();
             return;
@@ -417,6 +474,20 @@ impl EditorView {
             }
         }
         let kinds = self.shape_kinds(&ids);
+        let source = common(kinds.iter().filter_map(|kind| match kind.fill()? {
+            Fill::Shader(shader) => Some(shader.source.clone()),
+            _ => None,
+        }));
+        let editor = self.shape_inspector.shader_source.clone();
+        if let Some(source) = source
+            && !self.shape_inspector.shader_dirty
+            && editor.read(cx).value() != source.as_ref()
+        {
+            self.shape_inspector.shader_error = crate::shaders::check(&source).err();
+            editor.update(cx, |state, cx| {
+                state.set_value(source.to_string(), window, cx)
+            });
+        }
         let fill = common(kinds.iter().filter_map(|kind| match kind.fill()? {
             Fill::Solid(solid) => Some(solid.color),
             _ => None,
@@ -523,6 +594,114 @@ impl EditorView {
         let shown = self.shape_field_text(field, &ids);
         input.update(cx, |state, cx| state.set_value(shown, window, cx));
         cx.notify();
+    }
+
+    /// Writes the typed shader source into the selected shader fills, as
+    /// one undo step.
+    pub fn apply_shader_source(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.shape_inspector.shader_dirty {
+            return;
+        }
+        self.shape_inspector.shader_dirty = false;
+        let source: std::sync::Arc<str> =
+            std::sync::Arc::from(self.shape_inspector.shader_source.read(cx).value().as_ref());
+        let ids = self.shape_inspector.shown.clone();
+        self.edit_shapes("Shader source", &ids, |kind| match kind.fill()? {
+            Fill::Shader(shader) if shader.source != source => Some(ShapeStylePatch {
+                fill: Some(Fill::Shader(ShaderFill {
+                    source: source.clone(),
+                    ..shader.clone()
+                })),
+                ..ShapeStylePatch::default()
+            }),
+            _ => None,
+        });
+        cx.notify();
+    }
+
+    /// Changes a video or shader fill of the selected shapes; `change`
+    /// returns `None` to leave a fill as it is.
+    fn edit_playing_fills(&mut self, label: &str, change: impl Fn(&Fill) -> Option<Fill>) {
+        self.edit_selected_shapes(label, |kind| {
+            let fill = change(kind.fill()?)?;
+            (Some(&fill) != kind.fill()).then(|| ShapeStylePatch {
+                fill: Some(fill),
+                ..ShapeStylePatch::default()
+            })
+        });
+    }
+
+    /// When the video and shader fills of the selected shapes start.
+    pub fn set_fill_start(&mut self, start: Start) {
+        self.edit_playing_fills("Start", |fill| match fill {
+            Fill::Video(video) => Some(Fill::Video(crate::document::VideoFill { start, ..*video })),
+            Fill::Shader(shader) => Some(Fill::Shader(ShaderFill {
+                start,
+                ..shader.clone()
+            })),
+            _ => None,
+        });
+    }
+
+    /// Whether the video and shader fills of the selected shapes loop.
+    pub fn set_fill_loop(&mut self, looped: bool) {
+        self.edit_playing_fills("Loop", |fill| match fill {
+            Fill::Video(video) => {
+                Some(Fill::Video(crate::document::VideoFill { looped, ..*video }))
+            }
+            Fill::Shader(shader) => Some(Fill::Shader(ShaderFill {
+                looped,
+                ..shader.clone()
+            })),
+            _ => None,
+        });
+    }
+
+    /// Whether the video fills of the selected shapes play their sound.
+    pub fn set_video_muted(&mut self, muted: bool) {
+        self.edit_playing_fills("Mute", |fill| match fill {
+            Fill::Video(video) => Some(Fill::Video(crate::document::VideoFill { muted, ..*video })),
+            _ => None,
+        });
+    }
+
+    /// The image the shader fills of the selected shapes read as
+    /// `iChannel0`.
+    pub fn set_shader_channel(&mut self, image: Option<ImageId>, embed: Option<Operation>) {
+        let Some(ids) = self.selected_shapes() else {
+            return;
+        };
+        let mut operations: Vec<Operation> = embed.into_iter().collect();
+        for id in ids {
+            let Some(Fill::Shader(shader)) =
+                self.presentation.element(id).and_then(|e| e.kind.fill())
+            else {
+                continue;
+            };
+            if shader.channel0 == image {
+                continue;
+            }
+            operations.push(Operation::SetShapeStyle {
+                id,
+                patch: ShapeStylePatch {
+                    fill: Some(Fill::Shader(ShaderFill {
+                        channel0: image,
+                        ..shader.clone()
+                    })),
+                    ..ShapeStylePatch::default()
+                },
+            });
+        }
+        if operations.is_empty() {
+            return;
+        }
+        let selection = self.selection.clone();
+        self.commit(
+            "Shader channel",
+            Operation::Batch(operations),
+            selection.clone(),
+        );
+        self.selection = selection;
     }
 
     fn set_shape_color(&mut self, target: ColorTarget, color: Rgb) {

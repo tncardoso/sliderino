@@ -798,84 +798,141 @@ pub fn poster(data: &VideoData) -> Option<Arc<Pixmap>> {
     Some(pixels)
 }
 
+/// Audio outputs of a player with sound, the first installed one is
+/// used. The PipeWire output comes before the automatic one: through the
+/// PulseAudio layer of PipeWire, the PulseAudio output can wait forever.
+const AUDIO_SINKS: [&str; 2] = ["pipewiresink", "autoaudiosink"];
+
+/// How long a player waits for its first frame before it drops its sound:
+/// an audio output that does not start holds the video too.
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
+
 /// Plays one video: its frames for a fill, its sound on the default audio
 /// output. Dropping the player stops it.
 pub struct Player {
     playbin: gst::Element,
-    /// The newest sample of the app sink, put there by its streaming
-    /// thread.
-    newest: Arc<Mutex<Option<gst::Sample>>>,
+    newest: Newest,
     looped: bool,
     /// The last frame pulled from the sink.
     frame: Option<Arc<Pixmap>>,
     finished: bool,
+    /// Whether it was asked to play: GStreamer changes state in the
+    /// background, so its own state lags behind.
+    wants_play: bool,
+    /// What made the pipeline, to make it again without sound.
+    data: VideoData,
+    max_side: u32,
+    /// Whether the sound goes to an audio output.
+    sound: bool,
+    started: std::time::Instant,
+}
+
+/// The newest sample of an app sink, put there by its streaming thread.
+type Newest = Arc<Mutex<Option<gst::Sample>>>;
+
+/// A paused playbin at the start of the video whose frames go to `newest`.
+fn player_pipeline(
+    data: &VideoData,
+    max_side: u32,
+    sound: bool,
+) -> Result<(gst::Element, Newest), VideoError> {
+    let (playbin, sink) = playbin(data, max_side)?;
+    let newest = Arc::new(Mutex::new(None));
+    let keep = |newest: &Newest, sample| {
+        if let Ok(mut newest) = newest.lock() {
+            *newest = Some(sample);
+        }
+        Ok(gst::FlowSuccess::Ok)
+    };
+    let (on_preroll, on_sample) = (newest.clone(), newest.clone());
+    sink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_preroll(move |sink| {
+                keep(
+                    &on_preroll,
+                    sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?,
+                )
+            })
+            .new_sample(move |sink| {
+                keep(
+                    &on_sample,
+                    sink.pull_sample().map_err(|_| gst::FlowError::Eos)?,
+                )
+            })
+            .build(),
+    );
+    // Without sound, no audio output opens at all.
+    let audio = match first_installed(&AUDIO_SINKS).filter(|_| sound) {
+        Some(name) => element(name)?,
+        None => element("fakesink")?,
+    };
+    if !sound {
+        audio.set_property("sync", true);
+    }
+    playbin.set_property("audio-sink", &audio);
+    playbin
+        .set_state(gst::State::Paused)
+        .map_err(|_| VideoError::Unreadable)?;
+    Ok((playbin, newest))
 }
 
 impl Player {
     /// A paused player at the start of the video, with frames of at most
-    /// `max_side` pixels on a side. `silent` sends the sound nowhere, for
-    /// tests.
+    /// `max_side` pixels on a side. A muted player opens no audio output.
     pub fn new(
         data: &VideoData,
         max_side: u32,
         looped: bool,
         muted: bool,
-        silent: bool,
     ) -> Result<Player, VideoError> {
-        let (playbin, sink) = playbin(data, max_side)?;
-        let newest = Arc::new(Mutex::new(None));
-        let keep = |newest: &Arc<Mutex<Option<gst::Sample>>>, sample| {
-            if let Ok(mut newest) = newest.lock() {
-                *newest = Some(sample);
-            }
-            Ok(gst::FlowSuccess::Ok)
-        };
-        let (on_preroll, on_sample) = (newest.clone(), newest.clone());
-        sink.set_callbacks(
-            gst_app::AppSinkCallbacks::builder()
-                .new_preroll(move |sink| {
-                    keep(
-                        &on_preroll,
-                        sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?,
-                    )
-                })
-                .new_sample(move |sink| {
-                    keep(
-                        &on_sample,
-                        sink.pull_sample().map_err(|_| gst::FlowError::Eos)?,
-                    )
-                })
-                .build(),
-        );
-        playbin.set_property("mute", muted);
-        if silent {
-            playbin.set_property("audio-sink", element("fakesink")?);
-        }
-        playbin
-            .set_state(gst::State::Paused)
-            .map_err(|_| VideoError::Unreadable)?;
+        let sound = !muted && data.has_audio;
+        let (playbin, newest) = player_pipeline(data, max_side, sound)?;
         Ok(Player {
             playbin,
             newest,
             looped,
             frame: None,
             finished: false,
+            wants_play: false,
+            data: data.clone(),
+            max_side,
+            sound,
+            started: std::time::Instant::now(),
         })
+    }
+
+    /// Makes the pipeline again without sound, when the audio output holds
+    /// the first frame back.
+    fn drop_sound(&mut self) {
+        let Ok((playbin, newest)) = player_pipeline(&self.data, self.max_side, false) else {
+            return;
+        };
+        eprintln!("sliderino: the audio output does not start; the video plays without sound");
+        let _ = self.playbin.set_state(gst::State::Null);
+        self.playbin = playbin;
+        self.newest = newest;
+        self.sound = false;
+        if self.wants_play {
+            let _ = self.playbin.set_state(gst::State::Playing);
+        }
     }
 
     pub fn play(&mut self) {
         if self.finished {
             self.restart();
         }
+        self.wants_play = true;
         let _ = self.playbin.set_state(gst::State::Playing);
     }
 
     pub fn pause(&mut self) {
+        self.wants_play = false;
         let _ = self.playbin.set_state(gst::State::Paused);
     }
 
+    /// Whether it plays or was asked to, and did not reach its end.
     pub fn playing(&self) -> bool {
-        self.playbin.current_state() == gst::State::Playing && !self.finished
+        self.wants_play && !self.finished
     }
 
     /// Goes back to the start.
@@ -885,10 +942,6 @@ impl Player {
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::ZERO,
         );
-    }
-
-    pub fn set_muted(&self, muted: bool) {
-        self.playbin.set_property("mute", muted);
     }
 
     /// Whether the video played to its end and does not loop.
@@ -912,6 +965,9 @@ impl Player {
         let sample = self.newest.lock().ok().and_then(|mut newest| newest.take());
         if let Some(pixels) = sample.as_ref().and_then(sample_pixels) {
             self.frame = Some(Arc::new(pixels));
+        }
+        if self.frame.is_none() && self.sound && self.started.elapsed() > FIRST_FRAME_WAIT {
+            self.drop_sound();
         }
         self.frame.clone()
     }
@@ -1083,7 +1139,7 @@ pub(crate) mod tests {
             return;
         }
         let data = VideoData::read(mp4(32, 16)).unwrap();
-        let mut once = Player::new(&data, 64, false, true, true).unwrap();
+        let mut once = Player::new(&data, 64, false, true).unwrap();
         let start = std::time::Instant::now();
         while once.frame().is_none() && start.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(10));
@@ -1096,7 +1152,7 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(once.finished());
-        let mut looped = Player::new(&data, 64, true, true, true).unwrap();
+        let mut looped = Player::new(&data, 64, true, true).unwrap();
         looped.play();
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_millis(1500) {

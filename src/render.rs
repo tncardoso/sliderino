@@ -131,6 +131,72 @@ pub fn render_slide_at(
     Ok(pixmap)
 }
 
+/// One layer of a slide split by [`render_layers`].
+pub enum Layer {
+    /// Elements drawn together, the size of the slide; the first layer has
+    /// the white of the slide under them, the others are transparent.
+    Still(Pixmap),
+    /// An element to draw on its own, such as a playing video.
+    Apart(ElementId),
+}
+
+/// Renders the slide at `scale` as layers in paint order: the elements for
+/// which `apart` is true are left out, one layer each, and the elements
+/// between them are drawn together. A presentation draws the still layers
+/// once and the elements apart on each frame. Pictures of fills are drawn
+/// as [`render_slide`] draws them.
+pub fn render_layers(
+    presentation: &Presentation,
+    slide: SlideId,
+    scale: f32,
+    apart: &dyn Fn(&Element) -> bool,
+) -> Result<Vec<Layer>, RenderError> {
+    let slide = presentation
+        .slide(slide)
+        .ok_or(RenderError::UnknownSlide(slide))?;
+    if !scale.is_finite() || scale <= 0. {
+        return Err(RenderError::InvalidSize);
+    }
+    let width = (presentation.size.width as f32 * scale).round() as u32;
+    let height = (presentation.size.height as f32 * scale).round() as u32;
+    let new_layer = || Pixmap::new(width, height).ok_or(RenderError::InvalidSize);
+    let mut current = new_layer()?;
+    current.fill(Color::WHITE);
+    // Whether `current` has something, the white of the first layer too.
+    let mut drawn = true;
+    let mut layers = Vec::new();
+    let transform = Transform::from_scale(scale, scale);
+    let pixels = presentation_pixels(presentation, 0.);
+    for node in slide.visible_leaves() {
+        let element = node.element;
+        if apart(element) {
+            if drawn {
+                layers.push(Layer::Still(std::mem::replace(&mut current, new_layer()?)));
+                drawn = false;
+            }
+            layers.push(Layer::Apart(element.id));
+            continue;
+        }
+        let turned = turned(transform, &element.frame);
+        match presentation.text_layout(element.id) {
+            Some(layout) => paint_text(
+                &mut current,
+                presentation,
+                element,
+                node.opacity,
+                &layout,
+                turned,
+            ),
+            None => paint_shape(&mut current, element, node.opacity, turned, &pixels),
+        }
+        drawn = true;
+    }
+    if drawn {
+        layers.push(Layer::Still(current));
+    }
+    Ok(layers)
+}
+
 /// `transform` with the rotation of `frame` around its center applied first.
 fn turned(transform: Transform, frame: &Frame) -> Transform {
     if frame.rotation == 0. {
@@ -1049,5 +1115,29 @@ mod tests {
         let later = render_slide_at(&presentation, SlideId(1), 1., false, 6.).unwrap();
         let (red, _, _) = rgb(&later, 200, 150);
         assert!((126..=129).contains(&red), "it loops at 4 s: {red}");
+    }
+
+    #[test]
+    fn layers_split_the_slide_around_the_elements_apart() {
+        let presentation = scene(
+            r#"[{"op": "add_element", "slide": 1, "element": {"id": "$a",
+                  "frame": {"x": 0, "y": 0, "width": 100, "height": 100}, "rectangle": {"fill": {"solid": {"color": "000000"}}}}},
+                {"op": "add_element", "slide": 1, "element": {"id": "$b",
+                  "frame": {"x": 200, "y": 0, "width": 100, "height": 100}, "rectangle": {"fill": {"solid": {"color": "000000"}}}}},
+                {"op": "add_element", "slide": 1, "element": {"id": "$c",
+                  "frame": {"x": 400, "y": 0, "width": 100, "height": 100}, "rectangle": {"fill": {"solid": {"color": "000000"}}}}}]"#,
+        );
+        let apart = |element: &Element| element.id == ElementId(2);
+        let layers = render_layers(&presentation, SlideId(1), 0.5, &apart).unwrap();
+        let [Layer::Still(under), Layer::Apart(id), Layer::Still(over)] = &layers[..] else {
+            panic!("three layers");
+        };
+        assert_eq!(*id, ElementId(2));
+        assert!(inked(under, 25, 25) && !inked(under, 125, 25));
+        assert_eq!(over.pixel(225, 25).unwrap().alpha(), 255);
+        assert_eq!(over.pixel(25, 25).unwrap().alpha(), 0, "transparent");
+        let top = |element: &Element| element.id == ElementId(3);
+        let layers = render_layers(&presentation, SlideId(1), 0.5, &top).unwrap();
+        assert!(matches!(&layers[..], [Layer::Still(_), Layer::Apart(_)]));
     }
 }

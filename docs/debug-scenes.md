@@ -78,6 +78,8 @@ the same format (see `agent-api.md`).
 | `remove_font` | `face`, or `family` |
 | `add_image` | `id` (optional), `path` (from the folder of the scene) or `data` (base64) |
 | `remove_image` | `id` |
+| `add_video` | `id` (optional), `path` (from the folder of the scene) or `data` (base64). Other formats than MP4 with H.264 change to it. |
+| `remove_video` | `id` |
 | `batch` | `ops` (a list of operations; all apply or none apply) |
 
 Rules:
@@ -111,7 +113,10 @@ Rules:
   operation (from 0).
 
 The folder `debug/scenes` has examples: `shapes.json` shows the shapes,
-fills, strokes and arrowheads, and `images.json` shows image fills.
+fills, strokes and arrowheads, `images.json` shows image fills, and
+`shaders.json` shows shader fills, a shader channel and a shader that does
+not compile.
 
-The `scene` command waits until the editor decodes all images before it
-captures the slide.
+The `scene` command waits until the editor decodes all images and video
+frames and renders all shaders before it captures the slide. The capture
+shows the first frame of videos and shaders at time 0.
