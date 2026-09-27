@@ -13,7 +13,7 @@ use std::time::Instant;
 use tiny_skia::Pixmap;
 
 use crate::document::{ElementId, Fill, Presentation};
-use crate::shaders::Inputs;
+use crate::shaders::{Inputs, PixelFormat, ShaderFrame, ShaderPlayer};
 use crate::videos::Player;
 
 /// Seconds that run while playing and stop while paused.
@@ -55,8 +55,19 @@ enum Live {
     Video(Player),
     Shader {
         clock: Clock,
-        /// The last rendered frame and the time and size it shows.
-        last: Option<(f32, (u32, u32), Arc<Pixmap>)>,
+        /// `None` until the first submit: [`Playback::shader`] makes it,
+        /// and makes it again when the requested format changes. Boxed so
+        /// that an idle video, the common case, does not pay for the
+        /// player's ring of buffers in the size of `Live`.
+        player: Option<Box<ShaderPlayer>>,
+        /// The time and size last submitted, so the same frame is not
+        /// rendered again every animation frame.
+        submitted: Option<(f32, (u32, u32))>,
+        /// The last frame converted to a `Pixmap`, by its serial: repeated
+        /// calls for the same frame return the same `Arc`, so a caller that
+        /// keys a cache off its address (the presenter, the editor canvas)
+        /// does not redo work for a frame it already has.
+        last: Option<(u64, Arc<Pixmap>)>,
     },
 }
 
@@ -107,7 +118,12 @@ impl Playback {
             Fill::Shader(_) => {
                 let mut clock = Clock::default();
                 clock.play();
-                Live::Shader { clock, last: None }
+                Live::Shader {
+                    clock,
+                    player: None,
+                    submitted: None,
+                    last: None,
+                }
             }
             _ => return false,
         };
@@ -162,13 +178,94 @@ impl Playback {
         }
     }
 
-    /// Frames the video players decoded since they started, in total.
+    /// The newest frame of a started shader fill as the GPU renders it, in
+    /// BGRA: for the presenter's direct path, which paints it without a
+    /// conversion.
+    pub fn shader_frame(
+        &mut self,
+        id: ElementId,
+        fill: &Fill,
+        presentation: &Presentation,
+        size: (u32, u32),
+    ) -> Option<ShaderFrame> {
+        let Fill::Shader(shader) = fill else {
+            return None;
+        };
+        self.shader(id, shader, presentation, size, PixelFormat::Bgra)
+    }
+
+    /// Submits a render of the shader fill of `id` when its time or size
+    /// changed since the last submit, and returns its newest frame. Recreates
+    /// the player when it does not exist yet or `format` differs from the
+    /// one it renders; the caller then has no frame until the new player
+    /// delivers its first one, so it shows the still picture until then.
+    fn shader(
+        &mut self,
+        id: ElementId,
+        fill: &crate::style::ShaderFill,
+        presentation: &Presentation,
+        size: (u32, u32),
+        format: PixelFormat,
+    ) -> Option<ShaderFrame> {
+        let Live::Shader {
+            clock,
+            player,
+            submitted,
+            ..
+        } = self.live.get_mut(&id)?
+        else {
+            return None;
+        };
+        if player
+            .as_ref()
+            .is_none_or(|player| player.format() != format)
+        {
+            *player = Some(Box::new(ShaderPlayer::new(format)));
+            *submitted = None;
+        }
+        let time = fill.time(clock.elapsed());
+        let size = crate::shaders::clamp_size(size.0, size.1);
+        if !fill.looped && time >= fill.duration {
+            // A shader that does not loop stops at its duration.
+            clock.pause();
+        }
+        if submitted.is_none_or(|(t, s)| t != time || s != size) {
+            let channel = match fill.channel0 {
+                Some(image) => Some(crate::images::pixels(presentation.images.get(image)?)?),
+                None => None,
+            };
+            if player
+                .as_mut()?
+                .submit(&fill.source, channel.as_ref(), size, Inputs::at(time))
+            {
+                *submitted = Some((time, size));
+            }
+        }
+        player.as_mut()?.latest()
+    }
+
+    /// Frames the video players decoded, and the shader players rendered,
+    /// since they started, in total.
     pub fn delivered(&self) -> u64 {
         self.live
             .values()
             .map(|live| match live {
                 Live::Video(player) => player.delivered(),
-                Live::Shader { .. } => 0,
+                Live::Shader { player, .. } => {
+                    player.as_ref().map_or(0, |player| player.delivered())
+                }
+            })
+            .sum()
+    }
+
+    /// Shader submits skipped because their ring of readback buffers was
+    /// busy, in total.
+    pub fn skipped(&self) -> u64 {
+        self.live
+            .values()
+            .map(|live| match live {
+                Live::Video(_) => 0,
+                Live::Shader { player, .. } => player.as_ref().map_or(0, |player| player.skipped()),
             })
             .sum()
     }
@@ -178,7 +275,9 @@ impl Playback {
         self.live.values().any(|live| match live {
             // A video that ended still looks for its end, once.
             Live::Video(player) => player.playing(),
-            Live::Shader { clock, .. } => clock.running(),
+            Live::Shader { clock, player, .. } => {
+                clock.running() || player.as_ref().is_some_and(|player| player.pending())
+            }
         })
     }
 
@@ -192,36 +291,23 @@ impl Playback {
         presentation: &Presentation,
         size: (u32, u32),
     ) -> Option<Arc<Pixmap>> {
-        match (self.live.get_mut(&id)?, fill) {
-            (Live::Video(player), Fill::Video(_)) => player.frame(),
-            (Live::Shader { clock, last }, Fill::Shader(shader)) => {
-                let time = shader.time(clock.elapsed());
-                if let Some((shown, shown_size, pixels)) = last
-                    && *shown == time
-                    && *shown_size == size
+        match fill {
+            Fill::Video(_) => match self.live.get_mut(&id)? {
+                Live::Video(player) => player.frame(),
+                Live::Shader { .. } => None,
+            },
+            Fill::Shader(shader) => {
+                let frame = self.shader(id, shader, presentation, size, PixelFormat::Rgba)?;
+                let Live::Shader { last, .. } = self.live.get_mut(&id)? else {
+                    return None;
+                };
+                if let Some((serial, pixels)) = last
+                    && *serial == frame.serial
                 {
                     return Some(pixels.clone());
                 }
-                let channel = match shader.channel0 {
-                    Some(image) => Some(crate::images::pixels(presentation.images.get(image)?)?),
-                    None => None,
-                };
-                let size = crate::shaders::clamp_size(size.0, size.1);
-                let pixels = Arc::new(
-                    crate::shaders::render(
-                        &shader.source,
-                        channel.as_ref(),
-                        size.0,
-                        size.1,
-                        Inputs::at(time),
-                    )
-                    .ok()?,
-                );
-                if !shader.looped && time >= shader.duration {
-                    // A shader that does not loop stops at its duration.
-                    clock.pause();
-                }
-                *last = Some((time, size, pixels.clone()));
+                let pixels = Arc::new(frame.pixmap()?);
+                *last = Some((frame.serial, pixels.clone()));
                 Some(pixels)
             }
             // The fill changed kind since it started.
@@ -248,6 +334,29 @@ mod tests {
         assert_eq!(clock.elapsed(), paused);
     }
 
+    /// Calls `picture` until a shader delivers its first frame, or panics
+    /// after 5 seconds: the GPU renders it off the calling thread, so the
+    /// frame does not arrive on the first call.
+    fn wait_for_shader_frame(
+        playback: &mut Playback,
+        id: ElementId,
+        fill: &Fill,
+        presentation: &Presentation,
+        size: (u32, u32),
+    ) -> Arc<Pixmap> {
+        let start = Instant::now();
+        loop {
+            if let Some(frame) = playback.picture(id, fill, presentation, size) {
+                return frame;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "no frame in time"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn shaders_play_pause_and_stop() {
         let presentation = Presentation::new();
@@ -260,13 +369,66 @@ mod tests {
         playback.toggle(id);
         assert!(!playback.is_playing(id) && playback.is_live(id));
         if crate::shaders::available() {
-            let first = playback.picture(id, &fill, &presentation, (8, 8)).unwrap();
+            let first = wait_for_shader_frame(&mut playback, id, &fill, &presentation, (8, 8));
             let again = playback.picture(id, &fill, &presentation, (8, 8)).unwrap();
             assert!(Arc::ptr_eq(&first, &again), "paused: the same frame");
         }
         playback.stop(id);
         assert!(!playback.is_live(id));
         assert!(!playback.start(id, &Fill::None, &presentation));
+    }
+
+    #[test]
+    fn a_shader_animates_while_a_frame_is_pending_after_pause() {
+        if !crate::shaders::available() {
+            return;
+        }
+        let presentation = Presentation::new();
+        let fill = Fill::Shader(ShaderFill::default());
+        let mut playback = Playback::default();
+        let id = ElementId(1);
+        assert!(playback.start(id, &fill, &presentation));
+        playback.toggle(id);
+        assert!(!playback.is_playing(id));
+        let start = Instant::now();
+        loop {
+            if playback.picture(id, &fill, &presentation, (8, 8)).is_some() {
+                break;
+            }
+            assert!(
+                playback.animating(),
+                "a render is in flight, but not animating"
+            );
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "no frame in time"
+            );
+        }
+        // Nothing is submitted again at the same paused time, and nothing
+        // is left in flight.
+        assert!(!playback.animating());
+    }
+
+    #[test]
+    fn a_format_change_recreates_the_player() {
+        if !crate::shaders::available() {
+            return;
+        }
+        let presentation = Presentation::new();
+        let fill = Fill::Shader(ShaderFill::default());
+        let mut playback = Playback::default();
+        let id = ElementId(1);
+        assert!(playback.start(id, &fill, &presentation));
+        // One submit on the BGRA player (the presenter's direct path).
+        playback.shader_frame(id, &fill, &presentation, (8, 8));
+        assert_eq!(playback.delivered(), 1);
+        // Asking for the other format (the CPU path) recreates the player:
+        // its serial starts over at 1 for this first submit, instead of
+        // adding to what the old (BGRA) player already delivered. Waiting
+        // for the GPU to actually map either frame is not needed here: a
+        // reused player would already show in the submit count.
+        playback.picture(id, &fill, &presentation, (8, 8));
+        assert_eq!(playback.delivered(), 1);
     }
 
     #[test]

@@ -181,28 +181,48 @@ struct Frame {
     scale: f32,
 }
 
-/// The fit and the corner radius of a video fill that the GPU can draw as
-/// it is: in a rectangle without rotation, stroke or transparency, whose
-/// corners cut the video as they cut the shape. Other fills go through the
-/// CPU renderer, which draws any shape.
-fn direct_video(element: &Element, opacity: f32) -> Option<(crate::document::ImageFit, f32)> {
+/// What a fill the GPU can draw directly, without the CPU renderer, is made
+/// of: a video frame fitted with [`crate::document::ImageFit`], or a shader
+/// frame, which always fills its box exactly.
+enum DirectContent {
+    Video(crate::document::ImageFit),
+    Shader,
+}
+
+/// The content and the corner radius of a video or shader fill that the GPU
+/// can draw as it is: in a rectangle without rotation, stroke or
+/// transparency, whose corners cut the picture as they cut the shape. A
+/// shader fills its box exactly, so its corners always cut this way; a
+/// video does only when its fit leaves no box uncovered, or its corner
+/// radius is 0. Other fills go through the CPU renderer, which draws any
+/// shape.
+fn direct_fill(element: &Element, opacity: f32) -> Option<(DirectContent, f32)> {
     let crate::document::ElementKind::Rectangle(rectangle) = &element.kind else {
         return None;
     };
-    let Fill::Video(video) = &rectangle.fill else {
-        return None;
-    };
-    let corners_cut =
-        rectangle.corner_radius == 0. || video.fit != crate::document::ImageFit::Contain;
-    (element.frame.rotation == 0.
-        && rectangle.stroke.is_none()
-        && opacity * video.opacity >= 1.
-        && corners_cut)
-        .then_some((video.fit, rectangle.corner_radius))
+    let radius = rectangle.corner_radius;
+    let plain = element.frame.rotation == 0. && rectangle.stroke.is_none();
+    match &rectangle.fill {
+        Fill::Video(video) => {
+            let corners_cut = radius == 0. || video.fit != crate::document::ImageFit::Contain;
+            (plain && opacity * video.opacity >= 1. && corners_cut)
+                .then_some((DirectContent::Video(video.fit), radius))
+        }
+        Fill::Shader(shader) => {
+            (plain && opacity * shader.opacity >= 1.).then_some((DirectContent::Shader, radius))
+        }
+        _ => None,
+    }
 }
 
 /// Flags the key of a video frame drawn as it is, apart from addresses.
 const SERIAL_KEY: usize = 1 << (usize::BITS - 1);
+
+/// Flags the key of a shader frame drawn as it is, apart from addresses and
+/// from a video's [`SERIAL_KEY`]: the two serials do not share a number
+/// space, so a fill that changes kind cannot show a stale frame with a key
+/// that happens to match.
+const SHADER_SERIAL_KEY: usize = 1 << (usize::BITS - 2);
 
 /// Performance figures of the presentation, shown with D.
 #[derive(Default)]
@@ -215,6 +235,9 @@ struct Stats {
     /// The frames the video players decoded, and when, for the decoded
     /// frames per second.
     decoded: VecDeque<(std::time::Instant, u64)>,
+    /// Shader submits skipped for a full ring of readback buffers, and
+    /// when, for the skipped submits per second.
+    skipped: VecDeque<(std::time::Instant, u64)>,
     /// Milliseconds of each step of a new picture, averaged.
     picture_ms: f32,
     raster_ms: f32,
@@ -252,18 +275,28 @@ impl Stats {
         times.len()
     }
 
-    fn lines(&mut self) -> Vec<String> {
-        let fps = Self::per_second(&mut self.renders, |at| *at);
-        let pictures = Self::per_second(&mut self.pictures, |at| *at);
-        Self::per_second(&mut self.decoded, |(at, _)| *at);
-        let decoded = match (self.decoded.front(), self.decoded.back()) {
+    /// The rate of a growing count kept as (when, cumulative total) pairs
+    /// over the last second: `decoded` and `skipped` count this way.
+    fn per_second_rate(counts: &mut VecDeque<(std::time::Instant, u64)>) -> f32 {
+        Self::per_second(counts, |(at, _)| *at);
+        match (counts.front(), counts.back()) {
             (Some((first, from)), Some((last, to))) if last > first => {
                 to.saturating_sub(*from) as f32 / last.duration_since(*first).as_secs_f32()
             }
             _ => 0.,
-        };
+        }
+    }
+
+    fn lines(&mut self) -> Vec<String> {
+        let fps = Self::per_second(&mut self.renders, |at| *at);
+        let pictures = Self::per_second(&mut self.pictures, |at| *at);
+        let decoded = Self::per_second_rate(&mut self.decoded);
+        let skipped = Self::per_second_rate(&mut self.skipped);
         vec![
-            format!("{fps} fps · {pictures} new pictures/s · {decoded:.0} decoded frames/s"),
+            format!(
+                "{fps} fps · {pictures} new pictures/s · {decoded:.0} decoded frames/s · \
+                 {skipped:.0} skipped shader/s"
+            ),
             format!(
                 "picture {:.1} ms · raster {:.1} ms ({}×{}) · convert {:.1} ms",
                 self.picture_ms,
@@ -402,11 +435,53 @@ impl PresenterView {
                 (element.frame.width * scale).round().max(1.) as u32,
                 (element.frame.height * scale).round().max(1.) as u32,
             );
-            if let Some((fit, radius)) = direct_video(&element, opacity) {
+            // A shader's direct path has its own `ShaderPlayer`, at a
+            // different format than the CPU path's: falling through to
+            // `picture` below when it has no frame yet would recreate the
+            // player back and forth between the two formats. A video has a
+            // single player for both paths, so it can fall through safely.
+            let mut direct_shader_pending = false;
+            if let Some((content, radius)) = direct_fill(&element, opacity) {
+                direct_shader_pending = matches!(content, DirectContent::Shader);
                 let started = std::time::Instant::now();
-                if let Some(video) = self.show.playback.video_frame(id) {
+                let box_ = element.frame;
+                let direct = match content {
+                    DirectContent::Video(fit) => self.show.playback.video_frame(id).map(
+                        |video| -> (u32, u32, Vec<u8>, usize, crate::document::Frame) {
+                            let key = SERIAL_KEY | video.serial as usize;
+                            let (x, y, width, height) = crate::shape::fit_rect(
+                                fit,
+                                box_.width,
+                                box_.height,
+                                (video.width, video.height),
+                            );
+                            let area = crate::document::Frame {
+                                x: box_.x + x,
+                                y: box_.y + y,
+                                width,
+                                height,
+                                rotation: 0.,
+                            };
+                            (video.width, video.height, video.bgra.to_vec(), key, area)
+                        },
+                    ),
+                    DirectContent::Shader => self
+                        .show
+                        .playback
+                        .shader_frame(id, fill, presentation, device)
+                        .map(|shader| {
+                            let key = SHADER_SERIAL_KEY | shader.serial as usize;
+                            (
+                                shader.width,
+                                shader.height,
+                                shader.bytes.to_vec(),
+                                key,
+                                box_,
+                            )
+                        }),
+                };
+                if let Some((width, height, bgra, key, area)) = direct {
                     let picture_time = started.elapsed();
-                    let key = SERIAL_KEY | video.serial as usize;
                     if let Some(frame) = self.frames.remove(&id) {
                         if frame.key == key {
                             shown.insert(id, frame);
@@ -418,43 +493,32 @@ impl PresenterView {
                     average(&mut stats.picture_ms, picture_time);
                     stats.pictures.push_back(std::time::Instant::now());
                     stats.raster_ms = 0.;
-                    stats.raster_size = (video.width, video.height);
+                    stats.raster_size = (width, height);
                     let started = std::time::Instant::now();
-                    let image =
-                        image::RgbaImage::from_raw(video.width, video.height, video.bgra.to_vec())
-                            .map(|buffer| RenderImage::new(vec![image::Frame::new(buffer)]));
+                    let image = image::RgbaImage::from_raw(width, height, bgra)
+                        .map(|buffer| RenderImage::new(vec![image::Frame::new(buffer)]));
                     average(&mut stats.convert_ms, started.elapsed());
-                    let Some(image) = image else {
-                        continue;
-                    };
-                    let box_ = element.frame;
-                    let (x, y, width, height) = crate::shape::fit_rect(
-                        fit,
-                        box_.width,
-                        box_.height,
-                        (video.width, video.height),
-                    );
-                    shown.insert(
-                        id,
-                        Frame {
-                            image: Arc::new(image),
-                            area: crate::document::Frame {
-                                x: box_.x + x,
-                                y: box_.y + y,
-                                width,
-                                height,
-                                rotation: 0.,
+                    if let Some(image) = image {
+                        shown.insert(
+                            id,
+                            Frame {
+                                image: Arc::new(image),
+                                area,
+                                clip: Some((box_, radius)),
+                                key,
+                                scale,
                             },
-                            clip: Some((box_, radius)),
-                            key,
-                            scale,
-                        },
-                    );
+                        );
+                    }
                     continue;
                 }
             }
             let started = std::time::Instant::now();
-            let live = self.show.playback.picture(id, fill, presentation, device);
+            let live = if direct_shader_pending {
+                None
+            } else {
+                self.show.playback.picture(id, fill, presentation, device)
+            };
             let picture_time = started.elapsed();
             let picture = live.or_else(|| {
                 // Not started, or no frame yet: the still picture.
@@ -561,6 +625,9 @@ impl Render for PresenterView {
         self.stats
             .decoded
             .push_back((now, self.show.playback.delivered()));
+        self.stats
+            .skipped
+            .push_back((now, self.show.playback.skipped()));
         let hud = self.stats.shown.then(|| {
             div()
                 .absolute()
@@ -724,7 +791,64 @@ impl crate::editor::EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::{ElementKind, RectangleElement, ShaderFill, Stroke};
     use crate::script;
+
+    /// A rectangle with a shader fill, at (0, 0, 100, 100).
+    fn shader_element() -> Element {
+        Element::new(
+            ElementId(1),
+            crate::document::Frame {
+                x: 0.,
+                y: 0.,
+                width: 100.,
+                height: 100.,
+                rotation: 0.,
+            },
+            ElementKind::Rectangle(RectangleElement {
+                fill: Fill::Shader(ShaderFill::default()),
+                stroke: None,
+                corner_radius: 0.,
+            }),
+        )
+    }
+
+    #[test]
+    fn a_shader_in_a_plain_rectangle_is_direct() {
+        let element = shader_element();
+        assert!(direct_fill(&element, 1.).is_some());
+    }
+
+    #[test]
+    fn a_rotated_shader_is_not_direct() {
+        let mut element = shader_element();
+        element.frame.rotation = 45.;
+        assert!(direct_fill(&element, 1.).is_none());
+    }
+
+    #[test]
+    fn a_stroked_shader_is_not_direct() {
+        let mut element = shader_element();
+        let ElementKind::Rectangle(rectangle) = &mut element.kind else {
+            unreachable!()
+        };
+        rectangle.stroke = Some(Stroke::default());
+        assert!(direct_fill(&element, 1.).is_none());
+    }
+
+    #[test]
+    fn a_transparent_shader_is_not_direct() {
+        let mut element = shader_element();
+        let ElementKind::Rectangle(rectangle) = &mut element.kind else {
+            unreachable!()
+        };
+        let Fill::Shader(shader) = &mut rectangle.fill else {
+            unreachable!()
+        };
+        shader.opacity = 0.5;
+        assert!(direct_fill(&element, 1.).is_none());
+        assert!(direct_fill(&element, 0.5).is_none());
+    }
 
     /// Two slides: the first with an on-click shader at the bottom, an
     /// auto shader and an on-click shader on top.
