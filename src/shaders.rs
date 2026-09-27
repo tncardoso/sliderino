@@ -15,6 +15,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tiny_skia::Pixmap;
@@ -244,6 +245,24 @@ fn inputs_bytes(
     bytes
 }
 
+/// The hash of a shader's source and the format of the target it compiled
+/// for: a live [`ShaderPlayer`] can target a different format than
+/// [`FORMAT`], so the same source can have a pipeline per format.
+type ProgramKey = (u64, wgpu::TextureFormat);
+type Programs = HashMap<ProgramKey, Result<Arc<wgpu::RenderPipeline>, ShaderError>>;
+
+/// What to render and where, for [`Gpu::render_to_buffer`].
+struct RenderRequest<'a> {
+    source: &'a str,
+    channel0: Option<&'a Arc<Pixmap>>,
+    target: &'a wgpu::Texture,
+    uniforms: &'a wgpu::Buffer,
+    width: u32,
+    height: u32,
+    inputs: Inputs,
+    format: wgpu::TextureFormat,
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -251,8 +270,8 @@ struct Gpu {
     pipeline_layout: wgpu::PipelineLayout,
     vertex: wgpu::ShaderModule,
     sampler: wgpu::Sampler,
-    /// Compiled shaders by the hash of their source.
-    programs: Mutex<HashMap<u64, Result<Arc<wgpu::RenderPipeline>, ShaderError>>>,
+    /// Compiled shaders by [`ProgramKey`].
+    programs: Mutex<Programs>,
     /// Uploaded channel images, by the address of their pixels; each entry
     /// keeps the pixels alive so the address stays a valid key.
     channels: Mutex<Vec<(Arc<Pixmap>, Arc<wgpu::Texture>)>>,
@@ -360,8 +379,14 @@ impl Gpu {
         })
     }
 
-    fn program(&self, source: &str) -> Result<Arc<wgpu::RenderPipeline>, ShaderError> {
-        let key = hash(source);
+    /// The compiled pipeline of `source`, rendering to `format`. Compiled
+    /// once per source and format, then kept.
+    fn program(
+        &self,
+        source: &str,
+        format: wgpu::TextureFormat,
+    ) -> Result<Arc<wgpu::RenderPipeline>, ShaderError> {
+        let key = (hash(source), format);
         if let Some(program) = self.programs.lock().ok().and_then(|p| p.get(&key).cloned()) {
             return program;
         }
@@ -392,7 +417,7 @@ impl Gpu {
                             entry_point: Some("main"),
                             compilation_options: Default::default(),
                             targets: &[Some(wgpu::ColorTargetState {
-                                format: FORMAT,
+                                format,
                                 blend: None,
                                 write_mask: wgpu::ColorWrites::ALL,
                             })],
@@ -482,16 +507,56 @@ impl Gpu {
         texture
     }
 
-    fn render(
+    /// A render target of `width` × `height`, for repeated renders at that
+    /// size.
+    fn make_target(&self, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shader-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    /// A uniform buffer of the shader inputs, for repeated renders.
+    fn make_uniforms(&self) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shader-inputs"),
+            size: INPUTS_BYTES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Renders one frame of `source` into `target` (`width` × `height`, the
+    /// size `target` was made at) and queues a copy of it to a new readback
+    /// buffer. Submitted to the queue but not waited on: the caller either
+    /// blocks on it ([`Gpu::render`]) or polls it ([`ShaderPlayer`]).
+    /// Returns the readback buffer and the byte stride of its rows, padded
+    /// to `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`.
+    fn render_to_buffer(
         &self,
-        source: &str,
-        channel0: Option<&Arc<Pixmap>>,
-        width: u32,
-        height: u32,
-        inputs: Inputs,
-    ) -> Result<Pixmap, RenderError> {
-        let _span = crate::perf::span("shader_render");
-        let pipeline = self.program(source).map_err(RenderError::Shader)?;
+        request: RenderRequest<'_>,
+    ) -> Result<(wgpu::Buffer, u32), RenderError> {
+        let RenderRequest {
+            source,
+            channel0,
+            target,
+            uniforms,
+            width,
+            height,
+            inputs,
+            format,
+        } = request;
+        let pipeline = self.program(source, format).map_err(RenderError::Shader)?;
         let channel = self.channel(channel0);
         let channel_size = (channel.width(), channel.height());
         let channel_size = if channel0.is_some() {
@@ -504,24 +569,8 @@ impl Gpu {
             height,
             depth_or_array_layers: 1,
         };
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shader-target"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
         let inputs = inputs_bytes(width, height, inputs, channel_size);
-        let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("shader-inputs"),
-            size: INPUTS_BYTES as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&uniforms, 0, &inputs);
+        self.queue.write_buffer(uniforms, 0, &inputs);
         let channel_view = channel.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shader-inputs"),
@@ -577,7 +626,7 @@ impl Gpu {
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &target,
+                texture: target,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -593,6 +642,35 @@ impl Gpu {
             size,
         );
         self.queue.submit([encoder.finish()]);
+        Ok((readback, row))
+    }
+
+    /// Renders one frame, blocking until it is done, and returns it as a
+    /// premultiplied [`Pixmap`] (the output is opaque, so straight and
+    /// premultiplied are the same). Used for stills, thumbnails, export and
+    /// [`VideoJob`]; a live shader uses [`ShaderPlayer`] instead, which does
+    /// not block the calling thread.
+    fn render(
+        &self,
+        source: &str,
+        channel0: Option<&Arc<Pixmap>>,
+        width: u32,
+        height: u32,
+        inputs: Inputs,
+    ) -> Result<Pixmap, RenderError> {
+        let _span = crate::perf::span("shader_render");
+        let target = self.make_target(width, height, FORMAT);
+        let uniforms = self.make_uniforms();
+        let (readback, row) = self.render_to_buffer(RenderRequest {
+            source,
+            channel0,
+            target: &target,
+            uniforms: &uniforms,
+            width,
+            height,
+            inputs,
+            format: FORMAT,
+        })?;
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device
@@ -612,7 +690,6 @@ impl Gpu {
             }
         }
         readback.unmap();
-        // The output is opaque, so its colors are premultiplied already.
         Ok(pixmap)
     }
 }
@@ -655,6 +732,253 @@ pub fn clamp_size(width: u32, height: u32) -> (u32, u32) {
         ((width as f32 * scale).round() as u32).max(1),
         ((height as f32 * scale).round() as u32).max(1),
     )
+}
+
+/// The pixel layout a [`ShaderPlayer`] renders and reads back: BGRA for the
+/// presenter's direct path, which hands the bytes straight to GPUI without a
+/// conversion; RGBA for the CPU renderer, which wraps them in a [`Pixmap`].
+/// The shader output is opaque, so straight and premultiplied alpha are the
+/// same either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelFormat {
+    Bgra,
+    Rgba,
+}
+
+impl PixelFormat {
+    fn wgpu(self) -> wgpu::TextureFormat {
+        match self {
+            PixelFormat::Bgra => wgpu::TextureFormat::Bgra8Unorm,
+            PixelFormat::Rgba => wgpu::TextureFormat::Rgba8Unorm,
+        }
+    }
+}
+
+/// One frame a [`ShaderPlayer`] read back from the GPU, shaped like
+/// [`crate::videos::VideoFrame`]: packed rows with no row padding, in the
+/// [`PixelFormat`] the player was made with.
+#[derive(Clone)]
+pub struct ShaderFrame {
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Arc<[u8]>,
+    /// Counts the frames a player delivered, so that a view knows a new one.
+    pub serial: u64,
+    /// The shader time (seconds) this frame shows.
+    pub time: f32,
+}
+
+impl ShaderFrame {
+    /// The frame as a premultiplied [`Pixmap`], for a player made with
+    /// [`PixelFormat::Rgba`].
+    pub fn pixmap(&self) -> Option<Pixmap> {
+        Pixmap::from_vec(
+            self.bytes.to_vec(),
+            tiny_skia::IntSize::from_wh(self.width, self.height)?,
+        )
+    }
+}
+
+/// Whether a readback slot of a [`ShaderPlayer`] is free to submit into, has
+/// a render in flight, or holds a mapped frame waiting to be taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotState {
+    Free,
+    Pending,
+    Ready,
+}
+
+/// One readback buffer of the ring a [`ShaderPlayer`] submits into.
+struct Slot {
+    buffer: wgpu::Buffer,
+    state: SlotState,
+    /// Set by the `map_async` callback when the mapping is ready to read.
+    mapped: Arc<AtomicBool>,
+    serial: u64,
+    time: f32,
+    width: u32,
+    height: u32,
+    /// Byte stride of a row in `buffer`, padded to
+    /// `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`.
+    row: u32,
+}
+
+/// Readback buffers kept per live shader: enough that a submit rarely finds
+/// every slot busy, without holding much GPU memory.
+const RING: usize = 3;
+
+/// Plays a shader live: renders ahead into a small ring of readback
+/// buffers and polls them, so the calling thread never waits for the GPU.
+/// Used by the presenter and by the editor's Preview; see
+/// [`crate::ui::playback::Playback`].
+pub struct ShaderPlayer {
+    format: PixelFormat,
+    size: (u32, u32),
+    target: Option<wgpu::Texture>,
+    uniforms: Option<wgpu::Buffer>,
+    ring: [Option<Slot>; RING],
+    serial: u64,
+    skipped: u64,
+    /// The last frame delivered, returned again while none is newer.
+    last: Option<ShaderFrame>,
+}
+
+impl ShaderPlayer {
+    pub fn new(format: PixelFormat) -> Self {
+        ShaderPlayer {
+            format,
+            size: (0, 0),
+            target: None,
+            uniforms: None,
+            ring: [const { None }; RING],
+            serial: 0,
+            skipped: 0,
+            last: None,
+        }
+    }
+
+    pub fn format(&self) -> PixelFormat {
+        self.format
+    }
+
+    /// Frames rendered since the player started, whether they were taken by
+    /// [`ShaderPlayer::latest`] or not.
+    pub fn delivered(&self) -> u64 {
+        self.serial
+    }
+
+    /// Submits a render that skipped because every slot of the ring was
+    /// busy.
+    pub fn skipped(&self) -> u64 {
+        self.skipped
+    }
+
+    /// Whether a render is in flight: the view should ask for another frame
+    /// soon.
+    pub fn pending(&self) -> bool {
+        self.ring
+            .iter()
+            .flatten()
+            .any(|slot| slot.state == SlotState::Pending)
+    }
+
+    /// Renders one frame at `size` (clamped to [`MAX_SIDE`], keeping its
+    /// proportions) into a free slot of the ring; does nothing and counts a
+    /// skip when every slot is busy. Returns whether it rendered.
+    pub fn submit(
+        &mut self,
+        source: &str,
+        channel0: Option<&Arc<Pixmap>>,
+        size: (u32, u32),
+        inputs: Inputs,
+    ) -> bool {
+        let Some(gpu) = gpu() else { return false };
+        let (width, height) = clamp_size(size.0, size.1);
+        if (width, height) != self.size {
+            self.size = (width, height);
+            self.target = None;
+            self.uniforms = None;
+            self.ring = [const { None }; RING];
+        }
+        let Some(index) = self.ring.iter().position(|slot| {
+            slot.as_ref()
+                .is_none_or(|slot| slot.state == SlotState::Free)
+        }) else {
+            self.skipped += 1;
+            return false;
+        };
+        let format = self.format.wgpu();
+        let target = self
+            .target
+            .get_or_insert_with(|| gpu.make_target(width, height, format));
+        let uniforms = self.uniforms.get_or_insert_with(|| gpu.make_uniforms());
+        let Ok((buffer, row)) = gpu.render_to_buffer(RenderRequest {
+            source,
+            channel0,
+            target,
+            uniforms,
+            width,
+            height,
+            inputs,
+            format,
+        }) else {
+            return false;
+        };
+        self.serial += 1;
+        let mapped = Arc::new(AtomicBool::new(false));
+        let callback_mapped = mapped.clone();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |_| {
+            callback_mapped.store(true, Ordering::Release);
+        });
+        self.ring[index] = Some(Slot {
+            buffer,
+            state: SlotState::Pending,
+            mapped,
+            serial: self.serial,
+            time: inputs.time,
+            width,
+            height,
+            row,
+        });
+        true
+    }
+
+    /// The newest frame that finished mapping since the last call, or the
+    /// last one delivered when none is newer. Frees every slot that was
+    /// ready: the older ones are dropped unread.
+    pub fn latest(&mut self) -> Option<ShaderFrame> {
+        let gpu = gpu()?;
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        for slot in self.ring.iter_mut().flatten() {
+            if slot.state == SlotState::Pending && slot.mapped.load(Ordering::Acquire) {
+                slot.state = SlotState::Ready;
+            }
+        }
+        let newest = self
+            .ring
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot {
+                Some(slot) if slot.state == SlotState::Ready => Some((index, slot.serial)),
+                _ => None,
+            })
+            .max_by_key(|(_, serial)| *serial)
+            .map(|(index, _)| index);
+        let Some(newest) = newest else {
+            return self.last.clone();
+        };
+        let mut frame = None;
+        for (index, slot) in self.ring.iter_mut().enumerate() {
+            let Some(slot) = slot else { continue };
+            if slot.state != SlotState::Ready {
+                continue;
+            }
+            if index == newest {
+                let line = 4 * slot.width as usize;
+                let mut bytes = vec![0u8; line * slot.height as usize];
+                {
+                    let mapped = slot.buffer.slice(..).get_mapped_range();
+                    for y in 0..slot.height as usize {
+                        let from = y * slot.row as usize;
+                        bytes[y * line..(y + 1) * line].copy_from_slice(&mapped[from..from + line]);
+                    }
+                }
+                slot.buffer.unmap();
+                frame = Some(ShaderFrame {
+                    width: slot.width,
+                    height: slot.height,
+                    bytes: Arc::from(bytes),
+                    serial: slot.serial,
+                    time: slot.time,
+                });
+            } else {
+                slot.buffer.unmap();
+            }
+            slot.state = SlotState::Free;
+        }
+        self.last = frame.clone();
+        frame
+    }
 }
 
 /// What a shader video is made of.
@@ -721,7 +1045,7 @@ impl VideoJob {
         }
         // Checks the shader and the GPU before GStreamer starts.
         let gpu = gpu().ok_or(VideoJobError::Render(RenderError::NoGpu))?;
-        gpu.program(&self.source)
+        gpu.program(&self.source, FORMAT)
             .map_err(|error| VideoJobError::Render(RenderError::Shader(error)))?;
         let fps = self.fps.clamp(1, 60);
         let (width, height) = crate::videos::encode_size(self.width, self.height);
@@ -867,5 +1191,76 @@ mod tests {
     fn large_sizes_are_clamped_with_their_proportions() {
         assert_eq!(clamp_size(3840, 1920), (1920, 960));
         assert_eq!(clamp_size(0, 10), (1, 10));
+    }
+
+    /// Polls a player until it delivers a frame, or panics after 5 seconds.
+    fn wait_for_frame(player: &mut ShaderPlayer) -> ShaderFrame {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(frame) = player.latest() {
+                return frame;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "no frame in time"
+            );
+        }
+    }
+
+    #[test]
+    fn a_player_delivers_a_frame_after_submit() {
+        if !gpu_or_skip() {
+            return;
+        }
+        let mut player = ShaderPlayer::new(PixelFormat::Rgba);
+        assert!(player.latest().is_none());
+        assert!(player.submit(DEFAULT_SOURCE, None, (8, 8), Inputs::at(0.)));
+        let frame = wait_for_frame(&mut player);
+        assert_eq!((frame.width, frame.height), (8, 8));
+    }
+
+    #[test]
+    fn a_player_renders_red_in_its_format() {
+        if !gpu_or_skip() {
+            return;
+        }
+        let source = "void mainImage(out vec4 fragColor, in vec2 fragCoord)\n{\n    fragColor = vec4(1.0, 0.0, 0.0, 1.0);\n}\n";
+        let mut bgra = ShaderPlayer::new(PixelFormat::Bgra);
+        assert!(bgra.submit(source, None, (2, 2), Inputs::at(0.)));
+        let frame = wait_for_frame(&mut bgra);
+        assert_eq!(&frame.bytes[0..4], &[0, 0, 255, 255]);
+
+        let mut rgba = ShaderPlayer::new(PixelFormat::Rgba);
+        assert!(rgba.submit(source, None, (2, 2), Inputs::at(0.)));
+        let frame = wait_for_frame(&mut rgba);
+        assert_eq!(&frame.bytes[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_full_ring_skips_the_submit() {
+        if !gpu_or_skip() {
+            return;
+        }
+        let mut player = ShaderPlayer::new(PixelFormat::Rgba);
+        for _ in 0..RING {
+            assert!(player.submit(DEFAULT_SOURCE, None, (8, 8), Inputs::at(0.)));
+        }
+        assert_eq!(player.skipped(), 0);
+        assert!(!player.submit(DEFAULT_SOURCE, None, (8, 8), Inputs::at(0.)));
+        assert_eq!(player.skipped(), 1);
+    }
+
+    #[test]
+    fn a_size_change_gives_frames_of_the_new_size() {
+        if !gpu_or_skip() {
+            return;
+        }
+        let mut player = ShaderPlayer::new(PixelFormat::Rgba);
+        assert!(player.submit(DEFAULT_SOURCE, None, (8, 8), Inputs::at(0.)));
+        let first = wait_for_frame(&mut player);
+        assert_eq!((first.width, first.height), (8, 8));
+        assert!(player.submit(DEFAULT_SOURCE, None, (16, 12), Inputs::at(0.)));
+        let second = wait_for_frame(&mut player);
+        assert_eq!((second.width, second.height), (16, 12));
     }
 }

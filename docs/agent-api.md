@@ -435,8 +435,8 @@ the slide that the editor shows:
 - A click on a video or a shader that started pauses it or plays it again.
 - ← and Page Up go to the previous slide. Esc stops the presentation.
 - D shows or hides the performance figures: the frames per second of the
-  screen, the new pictures and the decoded video frames per second, and the
-  time of each step of a frame.
+  screen, the new pictures and the decoded video frames per second, the
+  skipped shader frames per second, and the time of each step of a frame.
 
 ## Rotation
 

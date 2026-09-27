@@ -144,6 +144,8 @@
 - The agent tool `get_selection` gives the selected elements as a list.
 - Text opacity is now the opacity of the element. Agents set it with the
   `opacity` of `set_layer`, not with the text style.
+- Shader fills play smoother in a presentation and in the editor preview:
+  the GPU no longer makes the screen wait for a new frame.
 
 ### Fixed
 
