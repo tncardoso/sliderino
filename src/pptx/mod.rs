@@ -5,6 +5,7 @@
 //! `docs/pptx-export.md` gives the mapping and its limits.
 
 mod fonts;
+mod media;
 mod package;
 mod shapes;
 mod skeleton;
@@ -101,7 +102,7 @@ pub fn export(presentation: &Presentation, options: &Options) -> Result<Export, 
     let master_rel = presentation_rels.add(rel::SLIDE_MASTER, "slideMasters/slideMaster1.xml");
     let mut slide_rels = Vec::new();
     let font_plan = fonts::FontPlan::new(presentation, &mut warnings);
-    let mut media = slide::Media::default();
+    let mut media = media::Media::default();
     let mut slides = Vec::new();
     for (index, slide) in presentation.slides.iter().enumerate() {
         let name = format!("ppt/slides/slide{}.xml", index + 1);

@@ -22,6 +22,7 @@ pub mod rel {
     pub const SLIDE: &str = "slide";
     pub const THEME: &str = "theme";
     pub const FONT: &str = "font";
+    pub const IMAGE: &str = "image";
     pub const PRES_PROPS: &str = "presProps";
     pub const VIEW_PROPS: &str = "viewProps";
     pub const TABLE_STYLES: &str = "tableStyles";
@@ -84,6 +85,23 @@ impl Rels {
             target: target.into(),
         });
         id
+    }
+
+    /// The id of the relationship to `target` of `kind`, added if needed.
+    pub fn get_or_add(&mut self, kind: &str, target: &str) -> String {
+        let full = if kind.contains("://") {
+            kind.to_string()
+        } else {
+            format!("{REL}/{kind}")
+        };
+        match self
+            .entries
+            .iter()
+            .find(|entry| entry.kind == full && entry.target == target)
+        {
+            Some(entry) => entry.id.clone(),
+            None => self.add(kind, target),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -248,6 +266,8 @@ mod tests {
         let mut rels = Rels::default();
         assert_eq!(rels.add(rel::SLIDE_LAYOUT, "../x.xml"), "rId1");
         assert_eq!(rels.add(rel::THEME, "../t.xml"), "rId2");
+        assert_eq!(rels.get_or_add(rel::IMAGE, "../media/a.png"), "rId3");
+        assert_eq!(rels.get_or_add(rel::IMAGE, "../media/a.png"), "rId3");
         assert!(rels.to_xml().contains(&format!("{REL}/theme")));
     }
 

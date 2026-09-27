@@ -5,7 +5,7 @@
 //! transparent, not the group as one layer.
 
 use crate::document::{
-    Arrowhead, Dash, Fill, Frame, GradientStop, HeadKind, HeadSize, Rgb, Stroke, Vec2,
+    Arrowhead, Dash, Fill, Frame, GradientStop, HeadKind, HeadSize, ImageFit, Rgb, Stroke, Vec2,
 };
 
 use super::units::{angle, emu, percent};
@@ -206,6 +206,45 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
         ((a + (b - a) * t).round() as u32).min(255) << shift
     };
     Rgb(channel(16) | channel(8) | channel(0))
+}
+
+/// `a:blipFill` of an image placed by `fit` in a box of `width` ×
+/// `height`. The image stretches over the rectangle that `fit` gives, as
+/// offsets from the box (`a:fillRect`): negative offsets reach past the
+/// box (cover), positive ones leave bars (contain). The shape clips it.
+pub fn blip_fill(
+    xml: &mut Xml,
+    rel: &str,
+    fit: ImageFit,
+    (width, height): (f32, f32),
+    image: (u32, u32),
+    alpha: f32,
+) {
+    let (x, y, w, h) = crate::shape::fit_rect(fit, width, height, image);
+    xml.start("a:blipFill").attr("rotWithShape", 1);
+    xml.start("a:blip").attr("r:embed", rel);
+    let alpha = percent(alpha.clamp(0., 1.));
+    if alpha < 100_000 {
+        xml.empty("a:alphaModFix", &[("amt", &alpha)]);
+    }
+    xml.end();
+    let fraction = |part: f32, whole: f32| if whole > 0. { percent(part / whole) } else { 0 };
+    xml.start("a:stretch");
+    if fit == ImageFit::Stretch {
+        xml.empty("a:fillRect", &[]);
+    } else {
+        rect(
+            xml,
+            "a:fillRect",
+            [
+                fraction(x, width),
+                fraction(y, height),
+                fraction(width - x - w, width),
+                fraction(height - y - h, height),
+            ],
+        );
+    }
+    xml.end().end();
 }
 
 /// `a:ln` of a stroke; `None` writes a line without fill.

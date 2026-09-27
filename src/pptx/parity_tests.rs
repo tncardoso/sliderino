@@ -14,6 +14,7 @@ const SCENES: &[&str] = &[
     "rotation.json",
     "custom-font.json",
     "system-font.json",
+    "images.json",
     "pptx/groups.json",
 ];
 
@@ -104,4 +105,17 @@ fn a_changed_line_is_a_difference() {
             .any(|problem| problem.contains("element 2: lines")),
         "{problems:?}"
     );
+}
+
+#[test]
+fn an_image_used_twice_is_one_part() {
+    let presentation = load("images.json");
+    let export = export(&presentation, &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    let media: Vec<&String> = deck
+        .names()
+        .iter()
+        .filter(|name| name.starts_with("ppt/media/"))
+        .collect();
+    assert_eq!(media.len(), 2, "{media:?}");
 }

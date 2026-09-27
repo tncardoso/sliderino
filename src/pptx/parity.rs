@@ -33,6 +33,7 @@ pub fn compare(presentation: &Presentation, deck: &Deck) -> Result<Vec<String>, 
     }
     for (slide, summary) in presentation.slides.iter().zip(&slides) {
         let mut check = Check {
+            deck,
             out: &mut out,
             at: format!("slide {}", slide.id.0),
         };
@@ -42,6 +43,7 @@ pub fn compare(presentation: &Presentation, deck: &Deck) -> Result<Vec<String>, 
 }
 
 struct Check<'a> {
+    deck: &'a Deck,
     out: &'a mut Vec<String>,
     at: String,
 }
@@ -129,7 +131,13 @@ impl Check<'_> {
                 } else {
                     self.equal("geometry", shape.geometry.as_deref(), Some("rect"));
                 }
-                self.fill(&rectangle.fill, shape.fill.as_ref(), opacity, &frame);
+                self.fill(
+                    presentation,
+                    &rectangle.fill,
+                    shape.fill.as_ref(),
+                    opacity,
+                    &frame,
+                );
                 self.stroke(
                     rectangle.stroke.as_ref(),
                     None,
@@ -139,7 +147,13 @@ impl Check<'_> {
             }
             ElementKind::Ellipse(ellipse) => {
                 self.equal("geometry", shape.geometry.as_deref(), Some("ellipse"));
-                self.fill(&ellipse.fill, shape.fill.as_ref(), opacity, &frame);
+                self.fill(
+                    presentation,
+                    &ellipse.fill,
+                    shape.fill.as_ref(),
+                    opacity,
+                    &frame,
+                );
                 self.stroke(ellipse.stroke.as_ref(), None, shape.line.as_ref(), opacity);
             }
             ElementKind::Line(line) => {
@@ -329,7 +343,14 @@ impl Check<'_> {
         }
     }
 
-    fn fill(&mut self, fill: &Fill, got: Option<&FillSummary>, opacity: f32, frame: &Frame) {
+    fn fill(
+        &mut self,
+        presentation: &Presentation,
+        fill: &Fill,
+        got: Option<&FillSummary>,
+        opacity: f32,
+        frame: &Frame,
+    ) {
         match (fill, got) {
             (Fill::None, Some(FillSummary::None)) => {}
             (Fill::Solid(solid), Some(FillSummary::Solid(color))) => {
@@ -405,8 +426,68 @@ impl Check<'_> {
                     }
                 }
             }
-            (Fill::Image(_) | Fill::Video(_) | Fill::Shader(_), _) => {}
+            (
+                Fill::Image(image),
+                Some(FillSummary::Blip {
+                    part,
+                    alpha,
+                    source,
+                    fill,
+                }),
+            ) => {
+                let Some(data) = presentation.images.get(image.id) else {
+                    self.fail(format!("image {} is missing", image.id.0));
+                    return;
+                };
+                if (alpha - image.opacity * opacity).abs() > FRACTION {
+                    self.fail(format!(
+                        "image alpha {alpha}, not {}",
+                        image.opacity * opacity
+                    ));
+                }
+                self.picture(part, (data.width, data.height));
+                let (x, y, w, h) = crate::shape::fit_rect(
+                    image.fit,
+                    frame.width,
+                    frame.height,
+                    (data.width, data.height),
+                );
+                let expected = [
+                    x / frame.width,
+                    y / frame.height,
+                    (frame.width - x - w) / frame.width,
+                    (frame.height - y - h) / frame.height,
+                ];
+                if source.iter().any(|inset| *inset != 0.)
+                    || fill
+                        .iter()
+                        .zip(expected)
+                        .any(|(got, want)| (got - want).abs() > 1e-4)
+                {
+                    self.fail(format!(
+                        "image placed at {fill:?} (crop {source:?}), not {expected:?}"
+                    ));
+                }
+            }
+            (Fill::Video(_) | Fill::Shader(_), _) => {}
             (fill, got) => self.fail(format!("fill {got:?}, not {}", fill.label())),
+        }
+    }
+
+    /// The picture part `part` is an image of `size` upright pixels, with
+    /// no EXIF turn left for the viewer to miss.
+    fn picture(&mut self, part: &str, size: (u32, u32)) {
+        let Some(bytes) = self.deck.part(part) else {
+            self.fail(format!("the picture {part} is missing"));
+            return;
+        };
+        match crate::images::ImageData::read(bytes.to_vec().into()) {
+            Ok(data) if data.orientation <= 1 && (data.width, data.height) == size => {}
+            Ok(data) => self.fail(format!(
+                "the picture {part} is {}x{} turned by EXIF {}, not {}x{} upright",
+                data.width, data.height, data.orientation, size.0, size.1
+            )),
+            Err(error) => self.fail(format!("the picture {part}: {error}")),
         }
     }
 

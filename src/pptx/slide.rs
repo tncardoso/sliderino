@@ -2,12 +2,13 @@
 //! relationships to the layout and to the media the shapes use.
 
 use crate::document::{
-    Arrowhead, Dash, Element, ElementKind, Frame, HAlign, Presentation, Rgb, Slide, Stroke,
-    TextElement, TextSizing, VAlign, rotate_vector, turn_frame,
+    Arrowhead, Dash, Element, ElementKind, Fill, Frame, HAlign, ImageFill, Presentation, Rgb,
+    Slide, Stroke, TextElement, TextSizing, VAlign, rotate_vector, turn_frame,
 };
 use crate::text_layout;
 
-use super::package::{Package, Rels, rel};
+use super::media::Media;
+use super::package::{Rels, rel};
 use super::xml::Xml;
 use super::{A_NS, Options, P_NS, R_NS, Warning};
 use super::{shapes, skeleton};
@@ -18,21 +19,6 @@ pub struct Written {
     pub rels: Rels,
 }
 
-/// The media parts of the deck, shared by all slides: each image or video
-/// is written once.
-#[derive(Default)]
-pub struct Media {
-    parts: Vec<(String, Vec<u8>)>,
-}
-
-impl Media {
-    pub fn write(self, package: &mut Package) {
-        for (name, bytes) in self.parts {
-            package.binary(name, bytes, false);
-        }
-    }
-}
-
 /// The shapes of one slide, with the ids and relationships they need.
 pub struct SlideWriter<'a> {
     pub presentation: &'a Presentation,
@@ -40,6 +26,7 @@ pub struct SlideWriter<'a> {
     pub options: &'a Options,
     pub xml: Xml,
     pub rels: Rels,
+    pub media: &'a mut Media,
     pub warnings: &'a mut Vec<Warning>,
     /// The next `cNvPr` id. Id 1 is the shape tree.
     next_id: u32,
@@ -146,6 +133,36 @@ impl SlideWriter<'_> {
             ElementKind::Text(text) => self.text(element, text, &frame, opacity),
             ElementKind::Table(_) => {
                 self.warn(element, "not exported yet");
+            }
+        }
+    }
+
+    /// The `a:blipFill` of an image fill; no fill when the image is missing.
+    fn image_fill(&mut self, element: &Element, image: &ImageFill, frame: &Frame, opacity: f32) {
+        let Some(data) = self.presentation.images.get(image.id) else {
+            self.warn(
+                element,
+                format!("image {} is not in the presentation", image.id.0),
+            );
+            self.xml.empty("a:noFill", &[]);
+            return;
+        };
+        let size = (data.width, data.height);
+        match self.media.image(self.presentation, image.id) {
+            Ok(target) => {
+                let rel = self.rels.get_or_add(rel::IMAGE, &target);
+                shapes::blip_fill(
+                    &mut self.xml,
+                    &rel,
+                    image.fit,
+                    (frame.width, frame.height),
+                    size,
+                    image.opacity * opacity,
+                );
+            }
+            Err(message) => {
+                self.warn(element, message);
+                self.xml.empty("a:noFill", &[]);
             }
         }
     }
@@ -276,8 +293,10 @@ impl SlideWriter<'_> {
             .start("p:spPr");
         shapes::transform(&mut self.xml, frame);
         shapes::geometry(&mut self.xml, preset, adjust);
-        if let Some(fill) = element.kind.fill() {
-            shapes::fill(&mut self.xml, fill, opacity, frame.width, frame.height);
+        match element.kind.fill() {
+            Some(Fill::Image(image)) => self.image_fill(element, image, frame, opacity),
+            Some(fill) => shapes::fill(&mut self.xml, fill, opacity, frame.width, frame.height),
+            None => {}
         }
         shapes::outline(
             &mut self.xml,
@@ -311,13 +330,13 @@ pub fn write(
         .empty("p:nvPr", &[])
         .end();
     skeleton::group_properties(&mut xml);
-    let _ = media;
     let mut writer = SlideWriter {
         presentation,
         slide,
         options,
         xml,
         rels,
+        media,
         warnings,
         next_id: 2,
     };
