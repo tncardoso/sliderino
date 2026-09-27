@@ -10,6 +10,7 @@ mod package;
 mod shapes;
 mod skeleton;
 mod slide;
+pub(crate) mod table;
 mod text;
 pub mod units;
 pub mod xml;

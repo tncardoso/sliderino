@@ -543,6 +543,33 @@ pub struct TextSummary {
     pub paragraphs: Vec<ParagraphSummary>,
 }
 
+/// One cell of a table, covered cells of merges included.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellSummary {
+    pub row: usize,
+    pub column: usize,
+    pub grid_span: usize,
+    pub row_span: usize,
+    pub h_merge: bool,
+    pub v_merge: bool,
+    /// Margins l, r, t, b in slide units.
+    pub margins: [f32; 4],
+    pub anchor: String,
+    /// Borders left, right, top, bottom.
+    pub borders: [Option<LineSummary>; 4],
+    pub fill: Option<FillSummary>,
+    pub text: TextSummary,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableSummary {
+    /// Column widths and row heights in slide units.
+    pub columns: Vec<f32>,
+    pub rows: Vec<f32>,
+    pub style: String,
+    pub cells: Vec<CellSummary>,
+}
+
 /// One shape of a slide, with its frame in slide units and slide axes:
 /// the transforms of its groups are applied.
 #[derive(Clone, Debug, PartialEq)]
@@ -556,6 +583,7 @@ pub struct ShapeSummary {
     pub fill: Option<FillSummary>,
     pub line: Option<LineSummary>,
     pub text: Option<TextSummary>,
+    pub table: Option<TableSummary>,
     pub children: Vec<ShapeSummary>,
 }
 
@@ -674,6 +702,10 @@ fn shape_of(node: Node, placement: &Placement, rels: &[Relationship]) -> Option<
         fill: None,
         line: None,
         text: p(node, "txBody").map(text_of),
+        table: node
+            .descendants()
+            .find(|child| child.has_tag_name((A_NS, "tbl")))
+            .map(|table| table_of(table, rels)),
         children: Vec::new(),
     };
     if let Some(properties) = properties {
@@ -970,5 +1002,89 @@ fn run_of(properties: Option<Node>) -> RunSummary {
             .and_then(|latin| latin.attribute("typeface"))
             .unwrap_or_default()
             .to_string(),
+    }
+}
+
+fn table_of(table: Node, rels: &[Relationship]) -> TableSummary {
+    let u = super::units::units;
+    let number = |node: Node, name: &str| {
+        node.attribute(name)
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
+    let columns = a(table, "tblGrid")
+        .map(|grid| {
+            grid.children()
+                .filter(|col| col.has_tag_name((A_NS, "gridCol")))
+                .map(|col| u(number(col, "w")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let style = a(table, "tblPr")
+        .and_then(|properties| a(properties, "tableStyleId"))
+        .and_then(|id| id.text())
+        .unwrap_or_default()
+        .to_string();
+    let mut rows = Vec::new();
+    let mut cells = Vec::new();
+    for (row, tr) in table
+        .children()
+        .filter(|child| child.has_tag_name((A_NS, "tr")))
+        .enumerate()
+    {
+        rows.push(u(number(tr, "h")));
+        for (column, tc) in tr
+            .children()
+            .filter(|child| child.has_tag_name((A_NS, "tc")))
+            .enumerate()
+        {
+            let flag = |name: &str| matches!(tc.attribute(name), Some("1") | Some("true"));
+            let span = |name: &str| {
+                tc.attribute(name)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(1)
+            };
+            let properties = a(tc, "tcPr");
+            let margin = |name: &str, default: i64| {
+                properties
+                    .and_then(|properties| properties.attribute(name))
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .map_or(u(default), u)
+            };
+            let border = |name: &str| {
+                properties
+                    .and_then(|properties| a(properties, name))
+                    .map(|line| line_of(line, rels))
+            };
+            cells.push(CellSummary {
+                row,
+                column,
+                grid_span: span("gridSpan"),
+                row_span: span("rowSpan"),
+                h_merge: flag("hMerge"),
+                v_merge: flag("vMerge"),
+                // The defaults of ECMA-376: 0.1 inch left and right,
+                // 0.05 inch top and bottom.
+                margins: [
+                    margin("marL", 91_440),
+                    margin("marR", 91_440),
+                    margin("marT", 45_720),
+                    margin("marB", 45_720),
+                ],
+                anchor: properties
+                    .and_then(|properties| properties.attribute("anchor"))
+                    .unwrap_or("t")
+                    .to_string(),
+                borders: [border("lnL"), border("lnR"), border("lnT"), border("lnB")],
+                fill: properties.and_then(|properties| fill_of(properties, rels)),
+                text: a(tc, "txBody").map(text_of).unwrap_or_default(),
+            });
+        }
+    }
+    TableSummary {
+        columns,
+        rows,
+        style,
+        cells,
     }
 }

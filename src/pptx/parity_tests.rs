@@ -15,6 +15,7 @@ const SCENES: &[&str] = &[
     "custom-font.json",
     "system-font.json",
     "images.json",
+    "tables.json",
     "pptx/groups.json",
 ];
 
@@ -118,4 +119,47 @@ fn an_image_used_twice_is_one_part() {
         .filter(|name| name.starts_with("ppt/media/"))
         .collect();
     assert_eq!(media.len(), 2, "{media:?}");
+}
+
+#[test]
+fn a_changed_cell_is_a_difference() {
+    let mut presentation = load("tables.json");
+    let export = export(&presentation, &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    let crate::document::ElementKind::Table(table) = &mut presentation.slides[0].elements[1].kind
+    else {
+        panic!("not a table");
+    };
+    table.rows[1][0].text.color = Some(crate::document::Rgb(0xFF0000));
+    table.rows[0][0].fill = Some(crate::document::Fill::None);
+    let problems = parity::compare(&presentation, &deck).unwrap();
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("cell 1,0: text")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("cell 0,0: fill")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_turned_table_is_a_group_of_its_parts() {
+    let presentation = load("tables.json");
+    let export = export(&presentation, &Options::default()).unwrap();
+    assert!(
+        export
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("cannot turn a table")),
+    );
+    let deck = Deck::read(&export.bytes).unwrap();
+    let slides = deck.summary().unwrap();
+    let turned = slides[0].shapes.last().unwrap();
+    assert_eq!(turned.kind, super::inspect::ShapeKind::Group);
+    assert_eq!(turned.name, "Table 5");
 }

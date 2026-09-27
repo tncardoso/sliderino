@@ -5,11 +5,12 @@
 
 use crate::document::{
     Element, ElementKind, Fill, Frame, GradientStop, HAlign, HeadKind, HeadSize, Presentation,
-    Stroke, TextCase, TextElement, TextSizing, TextStyle, VAlign,
+    Stroke, TableElement, TextCase, TextElement, TextSizing, TextStyle, VAlign,
 };
 
 use super::inspect::{
     Color, Deck, FillSummary, InspectError, LineSummary, RunSummary, ShapeKind, ShapeSummary,
+    TextSummary,
 };
 
 /// Largest difference of a position or a size, in slide units.
@@ -91,7 +92,9 @@ impl Check<'_> {
                 ShapeKind::Shape
             }
         };
-        if shape.kind != expected_kind {
+        let turned_table =
+            matches!(element.kind, ElementKind::Table(_)) && element.frame.rotation != 0.;
+        if shape.kind != expected_kind && !turned_table {
             self.fail(format!("is a {:?}, not a {expected_kind:?}", shape.kind));
             return;
         }
@@ -108,10 +111,10 @@ impl Check<'_> {
             },
             _ => element.frame,
         };
-        if let ElementKind::Text(text) = &element.kind {
-            self.text(presentation, element, text, shape, opacity);
-        } else {
-            self.frame(&frame, &shape.frame);
+        match &element.kind {
+            ElementKind::Text(text) => self.text(presentation, element, text, shape, opacity),
+            ElementKind::Table(_) => {}
+            _ => self.frame(&frame, &shape.frame),
         }
 
         match &element.kind {
@@ -168,7 +171,8 @@ impl Check<'_> {
                     opacity,
                 );
             }
-            ElementKind::Text(_) | ElementKind::Table(_) => {}
+            ElementKind::Table(table) => self.table(presentation, element, table, shape, opacity),
+            ElementKind::Text(_) => {}
         }
     }
 
@@ -220,7 +224,20 @@ impl Check<'_> {
         self.equal("anchor", body.anchor.as_str(), anchor);
         self.equal("insets", body.insets, [0.; 4]);
         self.equal("autofit", body.autofit, false);
+        self.paragraphs(body, text, &layout, opacity);
+    }
 
+    /// The paragraphs of a text body: one line of the deck for each line of
+    /// the layout, with the style of the text.
+    fn paragraphs(
+        &mut self,
+        body: &TextSummary,
+        text: &TextElement,
+        layout: &crate::text_layout::TextLayout,
+        opacity: f32,
+    ) {
+        let height = layout.lines[0].height;
+        let justify = text.style.align == HAlign::Justify;
         let paragraphs: Vec<&str> = text.content.split('\n').collect();
         if body.paragraphs.len() != paragraphs.len() {
             self.fail(format!(
@@ -272,11 +289,147 @@ impl Check<'_> {
             if justify {
                 expected = vec![source.trim_end_matches([' ', '\t']).to_string()];
             }
+            // An empty line has no run: a paragraph of nothing is one empty line.
             self.equal("lines", &paragraph.lines, &expected);
             for run in &paragraph.runs {
                 self.run(run, &text.style, opacity);
             }
         }
+    }
+
+    /// An editable table at the frame of the element, or, when it is
+    /// turned, a group of its parts.
+    fn table(
+        &mut self,
+        presentation: &Presentation,
+        element: &Element,
+        table: &TableElement,
+        shape: &ShapeSummary,
+        opacity: f32,
+    ) {
+        let Ok(layout) = crate::table::layout(table, &presentation.fonts) else {
+            self.fail("has no layout");
+            return;
+        };
+        if element.frame.rotation != 0. {
+            if shape.kind != ShapeKind::Group {
+                self.fail(format!("a turned table is a {:?}, not a group", shape.kind));
+                return;
+            }
+            let parts: Vec<Element> =
+                crate::table::parts(element.id, &element.frame, table, &layout)
+                    .iter()
+                    .map(|part| part.element().clone())
+                    .collect();
+            self.elements(presentation, &parts, &shape.children, opacity);
+            return;
+        }
+        if shape.kind != ShapeKind::Frame {
+            self.fail(format!(
+                "a table is a {:?}, not a graphic frame",
+                shape.kind
+            ));
+            return;
+        }
+        let frame = Frame {
+            width: layout.width(),
+            height: layout.height(),
+            ..element.frame
+        };
+        self.frame(&frame, &shape.frame);
+        let Some(got) = &shape.table else {
+            self.fail("has no a:tbl");
+            return;
+        };
+        self.equal("table style", got.style.as_str(), super::NO_TABLE_STYLE);
+        let near = |a: &[f32], b: &[f32]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() <= DISTANCE)
+        };
+        if !near(&got.columns, &layout.columns) || !near(&got.rows, &layout.rows) {
+            self.fail(format!(
+                "grid {:?} × {:?}, not {:?} × {:?}",
+                got.columns, got.rows, layout.columns, layout.rows
+            ));
+            return;
+        }
+        let owners = table.owners();
+        let at = self.at.clone();
+        for cell in &got.cells {
+            self.at = format!("{at} cell {},{}", cell.row, cell.column);
+            let owner = owners[cell.row][cell.column];
+            if owner != (cell.row, cell.column) {
+                self.equal(
+                    "merge",
+                    (cell.h_merge, cell.v_merge),
+                    (owner.1 < cell.column, owner.0 < cell.row),
+                );
+                continue;
+            }
+            let span = table.span_of(cell.row, cell.column);
+            self.equal(
+                "span",
+                (cell.grid_span, cell.row_span),
+                (span.columns, span.rows),
+            );
+            let Some(laid) = layout
+                .cells
+                .iter()
+                .find(|laid| (laid.row, laid.column) == (cell.row, cell.column))
+            else {
+                self.fail("is not in the layout");
+                continue;
+            };
+            let style = &laid.text.style;
+            let anchor = match style.vertical_align {
+                VAlign::Top => "t",
+                VAlign::Middle => "ctr",
+                VAlign::Bottom => "b",
+            };
+            self.equal("anchor", cell.anchor.as_str(), anchor);
+            // The text starts on the padding, and the top margin moves the
+            // viewer baseline onto the Sliderino one.
+            let first = &laid.layout.lines[0];
+            let shift = (first.height - 0.2 * style.size) - (first.baseline - first.top);
+            let [left, right, top, bottom] = cell.margins;
+            let slack = 0.25 * style.size;
+            let starts = match style.align {
+                HAlign::Left | HAlign::Justify => (left - table.padding).abs() <= DISTANCE,
+                HAlign::Right => (right - table.padding).abs() <= DISTANCE,
+                HAlign::Center => (left - right).abs() <= DISTANCE,
+            };
+            let room = left + right >= 2. * table.padding - slack - DISTANCE;
+            let vertical = (top - (table.padding - shift).max(0.)).abs() <= DISTANCE
+                && (top + bottom - 2. * table.padding).abs() <= DISTANCE
+                || table.padding < shift.abs();
+            if !(starts && room && vertical) {
+                self.fail(format!(
+                    "margins {:?} for padding {} and shift {shift}",
+                    cell.margins, table.padding
+                ));
+            }
+            let rect = laid.rect;
+            self.fill(
+                presentation,
+                table.fill_of(cell.row, cell.column),
+                cell.fill.as_ref(),
+                opacity,
+                &rect,
+            );
+            let expected = crate::pptx::table::borders(table, &owners, cell.row, cell.column);
+            for (side, (got, stroke)) in cell.borders.iter().zip(expected).enumerate() {
+                let name = ["left", "right", "top", "bottom"][side];
+                match (got, stroke) {
+                    (Some(line), None) if line.fill == FillSummary::None => {}
+                    (got, Some(stroke)) => self.stroke(Some(&stroke), None, got.as_ref(), opacity),
+                    (got, None) => self.fail(format!("{name} border {got:?}, not none")),
+                }
+            }
+            if laid.text.content.is_empty() {
+                continue;
+            }
+            self.paragraphs(&cell.text, &laid.text, &laid.layout, opacity);
+        }
+        self.at = at;
     }
 
     fn run(&mut self, run: &RunSummary, style: &TextStyle, opacity: f32) {

@@ -5,7 +5,10 @@ use crate::document::{
     Arrowhead, Dash, Element, ElementKind, Fill, Frame, HAlign, ImageFill, Presentation, Rgb,
     Slide, Stroke, TextElement, TextSizing, VAlign, rotate_vector, turn_frame,
 };
+use crate::table::TableElement;
 use crate::text_layout;
+
+use super::units::emu;
 
 use super::media::Media;
 use super::package::{Rels, rel};
@@ -131,10 +134,149 @@ impl SlideWriter<'_> {
                 self.xml.end().end();
             }
             ElementKind::Text(text) => self.text(element, text, &frame, opacity),
-            ElementKind::Table(_) => {
-                self.warn(element, "not exported yet");
-            }
+            ElementKind::Table(table) => self.table(element, table, &frame, opacity, turns),
         }
+    }
+
+    /// A table. PowerPoint does not turn tables, so a turned table is a
+    /// group of its fills, borders and texts.
+    fn table(
+        &mut self,
+        element: &Element,
+        table: &TableElement,
+        frame: &Frame,
+        opacity: f32,
+        turns: &[Turn],
+    ) {
+        let Ok(layout) = crate::table::layout(table, &self.presentation.fonts) else {
+            self.warn(element, "a font of the table cannot be read");
+            return;
+        };
+        if layout.missing_glyphs > 0 {
+            self.warn(
+                element,
+                format!(
+                    "the fonts have no glyph for {} character(s)",
+                    layout.missing_glyphs
+                ),
+            );
+        }
+        if frame.rotation != 0. {
+            self.warn(
+                element,
+                "PowerPoint cannot turn a table: it is a group of shapes",
+            );
+            let parts = crate::table::parts(element.id, &element.frame, table, &layout);
+            let group = Element {
+                name: Some(
+                    element
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("Table {}", element.id.0)),
+                ),
+                opacity: 1.,
+                hidden: false,
+                ..Element::new(
+                    element.id,
+                    element.frame,
+                    ElementKind::Group(crate::document::GroupElement {
+                        children: parts.iter().map(|part| part.element().clone()).collect(),
+                    }),
+                )
+            };
+            // `opacity` already holds the opacity of the table.
+            self.element(&group, opacity, turns);
+            return;
+        }
+
+        let mut cells = Vec::with_capacity(layout.cells.len());
+        let owners = table.owners();
+        for cell in &layout.cells {
+            let Some(font) = self.presentation.fonts.get(&cell.text.style.font) else {
+                self.warn(element, "a font of the table is not in the presentation");
+                return;
+            };
+            let shift = super::text::baseline_shift(&cell.text.style, font);
+            cells.push(super::table::CellSpec {
+                text: &cell.text,
+                layout: &cell.layout,
+                font,
+                fill: table.fill_of(cell.row, cell.column),
+                borders: super::table::borders(table, &owners, cell.row, cell.column),
+                margins: super::table::margins(table.padding, &cell.text, shift),
+            });
+        }
+        let mut graphic = Xml::fragment();
+        let presentation = self.presentation;
+        let media = &mut *self.media;
+        let rels = &mut self.rels;
+        let mut problems = Vec::new();
+        super::table::graphic(
+            &mut graphic,
+            table,
+            &layout,
+            &cells,
+            opacity,
+            |xml, fill, size| {
+                let Fill::Image(image) = fill else {
+                    return false;
+                };
+                let Some(data) = presentation.images.get(image.id) else {
+                    problems.push(format!("image {} is not in the presentation", image.id.0));
+                    return false;
+                };
+                match media.image(presentation, image.id) {
+                    Ok(target) => {
+                        let rel = rels.get_or_add(rel::IMAGE, &target);
+                        shapes::blip_fill(
+                            xml,
+                            &rel,
+                            image.fit,
+                            size,
+                            (data.width, data.height),
+                            image.opacity * opacity,
+                        );
+                        true
+                    }
+                    Err(message) => {
+                        problems.push(message);
+                        false
+                    }
+                }
+            },
+        );
+        for problem in problems {
+            self.warn(element, problem);
+        }
+
+        let table_frame = Frame {
+            width: layout.width(),
+            height: layout.height(),
+            ..*frame
+        };
+        self.xml.start("p:graphicFrame").start("p:nvGraphicFramePr");
+        self.names(element, "Table");
+        self.xml
+            .start("p:cNvGraphicFramePr")
+            .empty("a:graphicFrameLocks", &[("noGrp", &1)])
+            .end()
+            .empty("p:nvPr", &[])
+            .end()
+            .start("p:xfrm")
+            .empty(
+                "a:off",
+                &[("x", &emu(table_frame.x)), ("y", &emu(table_frame.y))],
+            )
+            .empty(
+                "a:ext",
+                &[
+                    ("cx", &emu(table_frame.width)),
+                    ("cy", &emu(table_frame.height)),
+                ],
+            )
+            .end()
+            .raw(&graphic.finish())
+            .end();
     }
 
     /// The `a:blipFill` of an image fill; no fill when the image is missing.
