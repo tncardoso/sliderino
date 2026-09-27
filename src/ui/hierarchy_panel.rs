@@ -49,9 +49,9 @@ pub struct DraggedLayers {
     label: SharedString,
 }
 
-/// The pill that follows the pointer while layers are dragged.
-struct DragPreview {
-    label: SharedString,
+/// The pill that follows the pointer while layers or slides are dragged.
+pub struct DragPreview {
+    pub label: SharedString,
 }
 
 impl Render for DragPreview {

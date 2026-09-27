@@ -308,6 +308,16 @@ pub enum Op {
         id: IdRef,
         index: usize,
     },
+    /// Copies a slide and its elements, with new ids.
+    DuplicateSlide {
+        id: IdRef,
+        /// Position of the copy; right after the slide when omitted.
+        #[serde(default)]
+        index: Option<usize>,
+        /// A reference such as `"$copy"` for the id of the copy.
+        #[serde(default, rename = "ref")]
+        reference: Option<IdRef>,
+    },
     AddElement {
         slide: IdRef,
         /// Group of the slide to add to; the slide itself when omitted.
@@ -432,6 +442,7 @@ impl Op {
             Op::AddSlide { .. } => "Add slide",
             Op::RemoveSlide { .. } => "Delete slide",
             Op::MoveSlide { .. } => "Move slide",
+            Op::DuplicateSlide { .. } => "Duplicate slide",
             Op::AddElement { element, .. } => match element.kind {
                 NewKind::Text(_) => "Create text",
                 NewKind::Group(_) => "Create group",
@@ -768,6 +779,25 @@ impl Compiler {
                 let id = self.slide(&id)?;
                 self.applied.last_slide = Some(id);
                 Operation::MoveSlide { id, index }
+            }
+            Op::DuplicateSlide {
+                id,
+                index,
+                reference,
+            } => {
+                let id = self.slide(&id)?;
+                let from = presentation
+                    .index_of(id)
+                    .ok_or(OpErrorKind::Apply(ApplyError::UnknownSlide(id)))?;
+                let mut slide = presentation.copy_slide(id).expect("the slide exists");
+                if reference.is_some() {
+                    slide.id = self.new_slide(presentation, reference)?;
+                }
+                self.applied.last_slide = Some(slide.id);
+                Operation::AddSlide {
+                    index: index.unwrap_or(from + 1),
+                    slide,
+                }
             }
             Op::AddElement {
                 slide,
@@ -1327,6 +1357,55 @@ mod tests {
         assert_eq!(text.style.size, 80.);
         assert_eq!(applied.last_element, Some(title));
         assert_eq!(applied.last_slide, Some(slide));
+    }
+
+    #[test]
+    fn duplicate_slide_copies_after_the_slide_with_new_ids() {
+        let mut presentation = Presentation::new();
+        let ops = parse(
+            r#"[
+              {"op": "add_slide"},
+              {"op": "add_element", "slide": 1, "element": {
+                "id": "$title", "text": {"content": "Hi"}}},
+              {"op": "duplicate_slide", "id": 1, "ref": "$copy"},
+              {"op": "add_element", "slide": "$copy", "element": {
+                "text": {"content": "Only on the copy"}}}
+            ]"#,
+        )
+        .unwrap();
+        let applied = apply(&mut presentation, ops, AGENT).unwrap();
+        let copy = SlideId(applied.refs["$copy"]);
+        let order: Vec<SlideId> = presentation.slides.iter().map(|s| s.id).collect();
+        assert_eq!(order, [SlideId(1), copy, SlideId(2)]);
+        let title = ElementId(applied.refs["$title"]);
+        let copied = &presentation.slide(copy).unwrap().elements;
+        assert_eq!(copied.len(), 2);
+        assert_ne!(copied[0].id, title);
+        assert_eq!(copied[0].as_text().unwrap().content, "Hi");
+        assert_eq!(presentation.slides[0].elements.len(), 1);
+
+        let before = presentation.slides.clone();
+        let applied = apply(
+            &mut presentation,
+            parse(r#"[{"op": "duplicate_slide", "id": 1, "index": 99}]"#).unwrap(),
+            AGENT,
+        )
+        .unwrap();
+        assert_eq!(presentation.slides.len(), 4);
+        assert_eq!(presentation.slides[3].id, applied.last_slide.unwrap());
+        presentation.apply(applied.inverse()).unwrap();
+        assert_eq!(presentation.slides, before);
+
+        let error = apply(
+            &mut presentation,
+            parse(r#"[{"op": "duplicate_slide", "id": 42}]"#).unwrap(),
+            AGENT,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            OpErrorKind::Apply(ApplyError::UnknownSlide(SlideId(42)))
+        );
     }
 
     #[test]

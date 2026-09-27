@@ -4,6 +4,16 @@
 
 ### Added
 
+- Select more than one slide in the Slides tab: Ctrl+click adds or removes
+  a slide, and Shift+click selects a range of slides.
+- Right-click a slide thumbnail to add a new slide, duplicate the selected
+  slides or delete them. When you delete all slides, an empty slide stays.
+  Undo restores the slides and their selection.
+- Drag slide thumbnails to change the order of the slides. When you drag a
+  selected slide, all selected slides move together.
+- Agents can copy a slide with the `duplicate_slide` operation.
+  `get_selection` gives the slides that are selected in the Slides tab in
+  `slides`.
 - The Home screen. `sliderino` opens on it. Start a new presentation
   (Ctrl+N) or open a file (Ctrl+O) there.
 - Save presentations as `.sldr` files, with their fonts, images and videos.

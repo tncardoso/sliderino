@@ -59,6 +59,7 @@ impl ToolSpec {
 const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - add_slide {slide?: {id?, elements?}, index?}
 - remove_slide {id}; move_slide {id, index}
+- duplicate_slide {id, index?, ref?}: copies the slide and its elements with new ids, right after it by default; ref (\"$copy\") names the copy
 - add_element {slide, parent?, element, index?}. element: {id?, name?, hidden?, locked?, opacity?, frame: {x, y, width, height, rotation}} plus one kind key: text: {content, sizing, style} | group: {children: [element]} | rectangle: {fill?, stroke?, corner_radius?} | ellipse: {fill?, stroke?} | line: {stroke?, start?, end?, from?, to?}
 - remove_element {id}; set_frame {id, frame}; set_text_sizing {id, sizing}
 - set_text_style {id, patch}; replace_text {id, range: {start, end} (bytes), text}
@@ -158,7 +159,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_selection",
-            description: "What the person sees and edits: the slide shown, the selected elements (a list) and the text selection when a text box is being edited.",
+            description: "What the person sees and edits: the slide shown, the slides selected in the slides panel (a list), the selected elements (a list) and the text selection when a text box is being edited.",
             schema: empty_schema(),
             target: Target::Instance,
             read_only: true,
@@ -307,6 +308,8 @@ pub fn spec(name: &str) -> Option<ToolSpec> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
     pub current_slide: SlideId,
+    /// Slides selected in the slides panel, in presentation order.
+    pub slides: Vec<SlideId>,
     pub selection: Vec<ElementId>,
     /// Element being edited and its selected byte range.
     pub text_edit: Option<(ElementId, Range<usize>)>,
@@ -556,6 +559,7 @@ fn selection(host: &dyn Host) -> Value {
     json!({
         "revision": host.presentation().revision(),
         "current_slide": view.current_slide,
+        "slides": view.slides,
         "selection": view.selection,
         "text_edit": text_edit,
     })
@@ -929,6 +933,7 @@ pub(crate) mod tests {
         fn view(&self) -> ViewState {
             ViewState {
                 current_slide: self.presentation.slides[0].id,
+                slides: vec![self.presentation.slides[0].id],
                 selection: Vec::new(),
                 text_edit: None,
             }

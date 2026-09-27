@@ -26,6 +26,8 @@ pub mod shape_paint;
 mod shape_tests;
 pub mod slides_panel;
 #[cfg(test)]
+mod slides_panel_tests;
+#[cfg(test)]
 pub mod test_support;
 pub mod text_input;
 #[cfg(test)]

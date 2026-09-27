@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::document::{ApplyError, ElementId, Operation, Presentation};
+use crate::document::{ApplyError, ElementId, Operation, Presentation, SlideId};
 
 /// A pause longer than this closes a typing burst.
 pub const BURST_PAUSE: Duration = Duration::from_secs(1);
@@ -19,9 +19,26 @@ pub struct Step {
     /// the redo stack).
     operation: Operation,
     /// Selection before and after the step, restored by undo and redo.
-    selection_before: Vec<ElementId>,
-    selection_after: Vec<ElementId>,
+    selection_before: Selection,
+    selection_after: Selection,
     burst: Option<Burst>,
+}
+
+/// What undo and redo select again: elements, and the slides selected in the
+/// slides panel. Empty `slides` keeps the slide selection of the editor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Selection {
+    pub elements: Vec<ElementId>,
+    pub slides: Vec<SlideId>,
+}
+
+impl From<Vec<ElementId>> for Selection {
+    fn from(elements: Vec<ElementId>) -> Self {
+        Self {
+            elements,
+            slides: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,16 +59,16 @@ impl History {
         &mut self,
         label: impl Into<String>,
         inverse: Operation,
-        selection_before: Vec<ElementId>,
-        selection_after: Vec<ElementId>,
+        selection_before: impl Into<Selection>,
+        selection_after: impl Into<Selection>,
     ) {
         self.close_burst();
         self.redo.clear();
         self.undo.push(Step {
             label: label.into(),
             operation: inverse,
-            selection_before,
-            selection_after,
+            selection_before: selection_before.into(),
+            selection_after: selection_after.into(),
             burst: None,
         });
     }
@@ -75,8 +92,8 @@ impl History {
         self.undo.push(Step {
             label: "Edit text".into(),
             operation: inverse,
-            selection_before: vec![element],
-            selection_after: vec![element],
+            selection_before: vec![element].into(),
+            selection_after: vec![element].into(),
             burst: Some(Burst { element, last: now }),
         });
     }
@@ -94,7 +111,7 @@ impl History {
     pub fn undo(
         &mut self,
         presentation: &mut Presentation,
-    ) -> Option<Result<Vec<ElementId>, ApplyError>> {
+    ) -> Option<Result<Selection, ApplyError>> {
         let mut step = self.undo.pop()?;
         step.burst = None;
         match presentation.apply(step.operation.clone()) {
@@ -116,7 +133,7 @@ impl History {
     pub fn redo(
         &mut self,
         presentation: &mut Presentation,
-    ) -> Option<Result<Vec<ElementId>, ApplyError>> {
+    ) -> Option<Result<Selection, ApplyError>> {
         let mut step = self.redo.pop()?;
         match presentation.apply(step.operation.clone()) {
             Ok(undo) => {
@@ -254,10 +271,10 @@ mod tests {
             .unwrap();
         history.record("Create text", inverse, vec![], vec![id]);
 
-        assert_eq!(history.undo(&mut presentation), Some(Ok(vec![])));
+        assert_eq!(history.undo(&mut presentation), Some(Ok(vec![].into())));
         assert!(presentation.element(id).is_none());
         assert_eq!(history.undone().collect::<Vec<_>>(), ["Create text"]);
-        assert_eq!(history.redo(&mut presentation), Some(Ok(vec![id])));
+        assert_eq!(history.redo(&mut presentation), Some(Ok(vec![id].into())));
         assert!(presentation.element(id).is_some());
         assert_eq!(
             history.undo(&mut presentation).map(|r| r.is_ok()),

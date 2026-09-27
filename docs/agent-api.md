@@ -73,7 +73,7 @@ The error data lists the instances.
 | `open_presentation` | Open a `.sldr` file in the editor. |
 | `save_presentation` | Save the presentation to a `.sldr` file. |
 | `get_basic_info` | Get the file, the unsaved state, the revision, the slides, the fonts, the images, the videos and the undo state. |
-| `get_selection` | Get the slide, the list of elements and the text that the person selected. |
+| `get_selection` | Get the slide, the list of slides, the list of elements and the text that the person selected. |
 | `get_slide` | Get the elements of a slide in paint order. |
 | `get_elements` | Get elements by id, with the text layout and the overflow. |
 | `find_elements` | Find text elements that contain a string. |
@@ -114,6 +114,13 @@ Rules:
 - To use a new id in a later operation of the same call, write a reference
   such as `"$title"` as the id. The result gives the id of each reference in
   `refs`.
+- `duplicate_slide` copies a slide and its elements. The copy and its
+  elements get new ids. The copy goes after the slide, or to `index` if you
+  give it. To use the id of the copy in a later operation, give a reference
+  in `ref`:
+  `{"op": "duplicate_slide", "id": 3, "ref": "$copy"}`.
+- `remove_slide` fails on the last slide of the presentation. Add a slide
+  before you remove it.
 - The editor embeds each font face that an operation uses. It gets the face
   from the fonts of Sliderino or from the fonts of the system. If the
   license of the face does not permit embedding, the editor embeds it and

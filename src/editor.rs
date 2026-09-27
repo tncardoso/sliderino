@@ -27,7 +27,7 @@ use crate::document::{
     Operation, Presentation, RectangleElement, Slide, SlideId, TextElement, TextSizing, TextStyle,
 };
 use crate::fonts::FontRegistry;
-use crate::history::History;
+use crate::history::{History, Selection};
 use crate::pictures::Picture;
 use crate::render::Pixmap;
 use crate::shortcuts::Shortcuts;
@@ -335,6 +335,13 @@ impl LayoutCache {
 pub struct EditorView {
     /// Slide shown on the canvas.
     pub current_slide: SlideId,
+    /// Slides selected in the slides panel, in selection order. Always holds
+    /// the current slide; see [`EditorView::click_slide`].
+    pub slide_selection: Vec<SlideId>,
+    /// Slide a Shift+click in the slides panel selects from.
+    pub slide_anchor: SlideId,
+    /// Where the slides dragged in the slides panel would land.
+    pub slide_drop: Option<(SlideId, crate::ui::slides_panel::SlideDrop)>,
     /// Tab of the left panel: 0 = Slides, 1 = Components, 2 = Hierarchy.
     pub library_tab: usize,
     /// Tab of the right panel: 0 = Design, 1 = Notes, 2 = History.
@@ -430,8 +437,12 @@ impl EditorView {
         })
         .detach();
         let saved_revision = presentation.revision();
+        let first = presentation.slides[0].id;
         Self {
-            current_slide: presentation.slides[0].id,
+            current_slide: first,
+            slide_selection: vec![first],
+            slide_anchor: first,
+            slide_drop: None,
             library_tab: 0,
             inspector_tab: 0,
             active_tool: Tool::Move,
@@ -794,11 +805,23 @@ impl EditorView {
     /// Restores the selection after undo or redo and shows the slide it is on.
     fn after_history(
         &mut self,
-        result: Result<Vec<ElementId>, ApplyError>,
+        result: Result<Selection, ApplyError>,
         slide_index: Option<usize>,
     ) -> Result<(), ApplyError> {
         let selection = result.inspect_err(|error| eprintln!("sliderino: undo failed: {error}"))?;
+        let slides: Vec<SlideId> = selection
+            .slides
+            .into_iter()
+            .filter(|id| self.presentation.slide(*id).is_some())
+            .collect();
+        if let Some(first) = slides.first() {
+            if !slides.contains(&self.current_slide) {
+                self.current_slide = *first;
+            }
+            self.slide_selection = slides;
+        }
         self.selection = selection
+            .elements
             .into_iter()
             .filter(|id| self.presentation.element(*id).is_some())
             .collect();
@@ -821,6 +844,14 @@ impl EditorView {
         if self.presentation.slide(self.current_slide).is_none() {
             let last = self.presentation.slides.len() - 1;
             self.current_slide = self.presentation.slides[slide_index.unwrap_or(0).min(last)].id;
+        }
+        self.slide_selection
+            .retain(|id| self.presentation.slide(*id).is_some());
+        if !self.slide_selection.contains(&self.current_slide) {
+            self.slide_selection = vec![self.current_slide];
+        }
+        if self.presentation.slide(self.slide_anchor).is_none() {
+            self.slide_anchor = self.current_slide;
         }
         let on_slide = |this: &Self, id: ElementId| {
             this.presentation
@@ -850,25 +881,223 @@ impl EditorView {
         }
     }
 
-    /// Shows another slide, leaving any text being edited.
+    /// Shows another slide and selects only it, leaving any text being
+    /// edited.
     pub fn select_slide(&mut self, id: SlideId) {
-        self.end_text_edit();
-        self.selection.clear();
-        self.current_slide = id;
+        self.show_slide(id);
+        self.slide_selection = vec![id];
+        self.slide_anchor = id;
     }
 
-    /// Adds an empty slide after the current one and shows it.
-    pub fn add_slide(&mut self) {
-        self.end_text_edit();
-        let id = self.presentation.new_slide_id();
-        let index = self
-            .presentation
-            .index_of(self.current_slide)
-            .map_or(usize::MAX, |ix| ix + 1);
-        let slide = Slide::new(id);
-        if self.commit("Add slide", Operation::AddSlide { index, slide }, vec![]) {
+    /// Shows another slide without changing the slide selection.
+    fn show_slide(&mut self, id: SlideId) {
+        if id != self.current_slide {
+            self.end_text_edit();
+            self.selection.clear();
             self.current_slide = id;
         }
+    }
+
+    /// A click on a slide thumbnail. A plain click selects only the slide,
+    /// Ctrl adds or removes it from the selection and Shift selects the
+    /// slides from the last plain or Ctrl click to it. The canvas shows the
+    /// clicked slide, or another selected one when Ctrl removes it.
+    pub fn click_slide(&mut self, id: SlideId, shift: bool, toggle: bool) {
+        if shift {
+            let (Some(from), Some(to)) = (
+                self.presentation.index_of(self.slide_anchor),
+                self.presentation.index_of(id),
+            ) else {
+                return self.select_slide(id);
+            };
+            self.slide_selection = self.presentation.slides[from.min(to)..=from.max(to)]
+                .iter()
+                .map(|slide| slide.id)
+                .collect();
+            self.show_slide(id);
+        } else if toggle {
+            self.slide_anchor = id;
+            if let Some(ix) = self.slide_selection.iter().position(|s| *s == id) {
+                if self.slide_selection.len() > 1 {
+                    self.slide_selection.remove(ix);
+                    if id == self.current_slide {
+                        let last = *self.slide_selection.last().expect("a selected slide");
+                        self.show_slide(last);
+                    }
+                }
+            } else {
+                self.slide_selection.push(id);
+                self.show_slide(id);
+            }
+        } else {
+            self.select_slide(id);
+        }
+    }
+
+    /// Keeps only the current slide selected in the slides panel.
+    pub fn collapse_slide_selection(&mut self) {
+        self.slide_selection = vec![self.current_slide];
+        self.slide_anchor = self.current_slide;
+    }
+
+    /// The selected slides in presentation order.
+    pub fn selected_slides(&self) -> Vec<SlideId> {
+        self.presentation
+            .slides
+            .iter()
+            .map(|slide| slide.id)
+            .filter(|id| self.slide_selection.contains(id))
+            .collect()
+    }
+
+    /// Applies an edit of the slides and records it as one undo step, then
+    /// selects `select` and shows the first of them, unless the current
+    /// slide is one of them. Returns false (and changes nothing) when the
+    /// edit fails.
+    pub fn commit_slides(
+        &mut self,
+        label: &str,
+        operations: Vec<Operation>,
+        select: Vec<SlideId>,
+    ) -> bool {
+        self.end_text_edit();
+        let before = Selection {
+            elements: self.selection.clone(),
+            slides: self.selected_slides(),
+        };
+        let slide_index = self.presentation.index_of(self.current_slide);
+        let operation = match <[Operation; 1]>::try_from(operations) {
+            Ok([operation]) => operation,
+            Err(operations) => Operation::Batch(operations),
+        };
+        let inverse = match self.presentation.apply(operation) {
+            Ok(inverse) => inverse,
+            Err(error) => {
+                eprintln!("sliderino: {label} failed: {error}");
+                return false;
+            }
+        };
+        let select: Vec<SlideId> = select
+            .into_iter()
+            .filter(|id| self.presentation.slide(*id).is_some())
+            .collect();
+        if let Some(first) = select.first()
+            && !select.contains(&self.current_slide)
+        {
+            self.show_slide(*first);
+        }
+        if !select.is_empty() {
+            self.slide_anchor = self.current_slide;
+            self.slide_selection = select;
+        }
+        self.repair_view(slide_index);
+        let after = Selection {
+            elements: self.selection.clone(),
+            slides: self.selected_slides(),
+        };
+        self.history.record(label, inverse, before, after);
+        true
+    }
+
+    /// Index after the last selected slide.
+    fn after_selected_slides(&self) -> usize {
+        self.selected_slides()
+            .last()
+            .and_then(|id| self.presentation.index_of(*id))
+            .map_or(usize::MAX, |ix| ix + 1)
+    }
+
+    /// Adds an empty slide after the selected ones and shows it.
+    pub fn add_slide(&mut self) {
+        let id = self.presentation.new_slide_id();
+        let index = self.after_selected_slides();
+        let slide = Slide::new(id);
+        self.commit_slides(
+            "Add slide",
+            vec![Operation::AddSlide { index, slide }],
+            vec![id],
+        );
+    }
+
+    /// Copies the selected slides, puts the copies after the last of them
+    /// and selects the copies.
+    pub fn duplicate_slides(&mut self) {
+        let sources = self.selected_slides();
+        let index = self.after_selected_slides();
+        let mut operations = Vec::new();
+        let mut copies = Vec::new();
+        for (offset, id) in sources.iter().enumerate() {
+            let Some(slide) = self.presentation.copy_slide(*id) else {
+                continue;
+            };
+            copies.push(slide.id);
+            operations.push(Operation::AddSlide {
+                index: index.saturating_add(offset),
+                slide,
+            });
+        }
+        if operations.is_empty() {
+            return;
+        }
+        let label = if copies.len() > 1 {
+            "Duplicate slides"
+        } else {
+            "Duplicate slide"
+        };
+        self.commit_slides(label, operations, copies);
+    }
+
+    /// Removes the selected slides and shows the slide that takes the place
+    /// of the first one. When all slides are selected, an empty slide
+    /// replaces them.
+    pub fn delete_slides(&mut self) {
+        let doomed = self.selected_slides();
+        let Some(first) = doomed
+            .first()
+            .and_then(|id| self.presentation.index_of(*id))
+        else {
+            return;
+        };
+        let remaining: Vec<SlideId> = self
+            .presentation
+            .slides
+            .iter()
+            .map(|slide| slide.id)
+            .filter(|id| !doomed.contains(id))
+            .collect();
+        let mut operations = Vec::new();
+        let select = match remaining.get(first).or(remaining.last()) {
+            Some(neighbor) => *neighbor,
+            None => {
+                let id = self.presentation.new_slide_id();
+                operations.push(Operation::AddSlide {
+                    index: usize::MAX,
+                    slide: Slide::new(id),
+                });
+                id
+            }
+        };
+        let label = if doomed.len() > 1 {
+            "Delete slides"
+        } else {
+            "Delete slide"
+        };
+        operations.extend(doomed.into_iter().map(|id| Operation::RemoveSlide { id }));
+        self.commit_slides(label, operations, vec![select]);
+    }
+
+    /// Moves the slides `moved` together, in their present order, to `to`:
+    /// an index in the present list of slides. They stay selected.
+    pub fn move_slides(&mut self, moved: Vec<SlideId>, to: usize) {
+        let Some(operations) = self.presentation.slide_moves(&moved, to) else {
+            return;
+        };
+        let label = if moved.len() > 1 {
+            "Move slides"
+        } else {
+            "Move slide"
+        };
+        self.commit_slides(label, operations, moved);
     }
 
     /// Creates a text box on the current slide and starts editing it.
@@ -1497,6 +1726,7 @@ impl EditorView {
             .and_then(|id| self.presentation.locate(*id))
             .and_then(|location| location.parent);
         self.selection = parent.into_iter().collect();
+        self.collapse_slide_selection();
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {

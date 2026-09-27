@@ -1088,6 +1088,49 @@ impl Presentation {
         id
     }
 
+    /// A copy of slide `id` for an [`Operation::AddSlide`], with a new slide
+    /// id and new ids for all its elements, groups and their children
+    /// included. Images, videos and fonts are shared by id.
+    pub fn copy_slide(&mut self, id: SlideId) -> Option<Slide> {
+        fn renumber(presentation: &mut Presentation, elements: &mut [Element]) {
+            for element in elements {
+                element.id = presentation.new_element_id();
+                if let Some(group) = element.as_group_mut() {
+                    renumber(presentation, &mut group.children);
+                }
+            }
+        }
+        let mut slide = self.slide(id)?.clone();
+        slide.id = self.new_slide_id();
+        renumber(self, &mut slide.elements);
+        Some(slide)
+    }
+
+    /// The [`Operation::MoveSlide`]s that put the slides `moved` together,
+    /// in their present order, at `to`: an index in the present list of
+    /// slides (`len` for the end). `None` when the order does not change.
+    pub fn slide_moves(&self, moved: &[SlideId], to: usize) -> Option<Vec<Operation>> {
+        let mut current: Vec<SlideId> = self.slides.iter().map(|slide| slide.id).collect();
+        let is_moved = |id: &SlideId| moved.contains(id);
+        let block: Vec<SlideId> = current.iter().copied().filter(is_moved).collect();
+        let mut target: Vec<SlideId> = current.iter().copied().filter(|id| !is_moved(id)).collect();
+        let at = current[..to.min(current.len())]
+            .iter()
+            .filter(|id| !is_moved(id))
+            .count();
+        target.splice(at..at, block);
+        let mut operations = Vec::new();
+        for (index, id) in target.iter().enumerate() {
+            if current[index] != *id {
+                let from = current.iter().position(|slide| slide == id)?;
+                current.remove(from);
+                current.insert(index, *id);
+                operations.push(Operation::MoveSlide { id: *id, index });
+            }
+        }
+        (!operations.is_empty()).then_some(operations)
+    }
+
     /// Reserves an image id for an [`Operation::AddImage`].
     pub fn new_image_id(&mut self) -> ImageId {
         let id = ImageId(self.next_image_id);
@@ -1969,6 +2012,84 @@ pub(crate) mod tests {
             presentation.apply(Operation::RemoveSlide { id }),
             Err(ApplyError::LastSlide)
         );
+    }
+
+    #[test]
+    fn a_copied_slide_gets_new_ids_for_all_its_elements() {
+        let mut presentation = with_inter();
+        let ids: Vec<ElementId> = ["A", "B", "C"]
+            .into_iter()
+            .map(|name| {
+                add_text(
+                    &mut presentation,
+                    name,
+                    TextSizing::AutoWidth,
+                    Frame::default(),
+                )
+            })
+            .collect();
+        let group = presentation.new_element_id();
+        let operations = presentation.group_operations(group, &ids[1..]).unwrap();
+        presentation.apply(Operation::Batch(operations)).unwrap();
+        let original = presentation.slides[0].id;
+
+        let copy = presentation.copy_slide(original).unwrap();
+        assert_ne!(copy.id, original);
+        let old: Vec<ElementId> = presentation.slides[0]
+            .walk()
+            .iter()
+            .map(|node| node.element.id)
+            .collect();
+        let new: Vec<ElementId> = copy.walk().iter().map(|node| node.element.id).collect();
+        assert_eq!(new.len(), old.len());
+        assert!(new.iter().all(|id| !old.contains(id)));
+        let id = copy.id;
+        presentation
+            .apply(Operation::AddSlide {
+                index: 1,
+                slide: copy,
+            })
+            .unwrap();
+        assert_eq!(presentation.slides[1].id, id);
+        assert_eq!(
+            presentation.slides[1].walk()[2]
+                .element
+                .as_text()
+                .unwrap()
+                .content,
+            "B"
+        );
+        assert!(presentation.copy_slide(SlideId(99)).is_none());
+    }
+
+    fn move_block(presentation: &mut Presentation, moved: &[SlideId], to: usize) -> bool {
+        match presentation.slide_moves(moved, to) {
+            Some(operations) => {
+                presentation.apply(Operation::Batch(operations)).unwrap();
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[test]
+    fn slide_moves_keep_the_block_together_in_order() {
+        let mut presentation = Presentation::new();
+        let s: Vec<SlideId> = std::iter::once(presentation.slides[0].id)
+            .chain((0..4).map(|_| add_slide(&mut presentation)))
+            .collect();
+        // Down: 1 and 3 after 4.
+        assert!(move_block(&mut presentation, &[s[1], s[3]], 5));
+        assert_eq!(ids(&presentation), [1, 3, 5, 2, 4]);
+        // Up: 2 and 4 to the start.
+        assert!(move_block(&mut presentation, &[s[3], s[1]], 0));
+        assert_eq!(ids(&presentation), [2, 4, 1, 3, 5]);
+        // Into the middle.
+        assert!(move_block(&mut presentation, &[s[0]], 1));
+        assert_eq!(ids(&presentation), [2, 1, 4, 3, 5]);
+        // Onto itself: no change.
+        assert!(!move_block(&mut presentation, &[s[0], s[3]], 1));
+        assert!(!move_block(&mut presentation, &[s[0], s[3]], 2));
     }
 
     #[test]

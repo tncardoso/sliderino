@@ -26,10 +26,6 @@ pub enum Operation {
         id: SlideId,
     },
     /// Moves a slide to `index` (clamped to the last position).
-    #[allow(
-        dead_code,
-        reason = "reordering in the slides panel and the agent API come later"
-    )]
     MoveSlide {
         id: SlideId,
         index: usize,

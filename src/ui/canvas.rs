@@ -716,6 +716,7 @@ impl EditorView {
             cx.notify();
             return;
         }
+        self.collapse_slide_selection();
         if event.button == MouseButton::Right
             && self.effective_tool() == Tool::Move
             && let Some(at) = self.to_slide(event.position)

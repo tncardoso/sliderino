@@ -425,6 +425,7 @@ impl Host for EditorView {
     fn view(&self) -> ViewState {
         ViewState {
             current_slide: self.current_slide,
+            slides: self.selected_slides(),
             selection: self.selection.clone(),
             text_edit: self
                 .text_edit
