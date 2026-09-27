@@ -2,13 +2,17 @@
 //! relationships to the layout and to the media the shapes use.
 
 use crate::document::{
-    Arrowhead, Dash, Element, ElementKind, Fill, Frame, HAlign, ImageFill, Presentation, Rgb,
-    Slide, Stroke, TextElement, TextSizing, VAlign, rotate_vector, turn_frame,
+    Arrowhead, Dash, Element, ElementKind, Fill, Frame, HAlign, ImageFill, ImageFit, Presentation,
+    Rgb, Slide, Stroke, TextElement, TextSizing, VAlign, rotate_vector, turn_frame,
 };
 use crate::table::TableElement;
 use crate::text_layout;
 
 use super::units::emu;
+
+/// The extension of `p:nvPr` that embeds the media of a picture.
+const MEDIA_EXTENSION: &str = "{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}";
+const P14_NS: &str = "http://schemas.microsoft.com/office/powerpoint/2010/main";
 
 use super::media::Media;
 use super::package::{Rels, rel};
@@ -33,6 +37,8 @@ pub struct SlideWriter<'a> {
     pub warnings: &'a mut Vec<Warning>,
     /// The next `cNvPr` id. Id 1 is the shape tree.
     next_id: u32,
+    /// The videos of the slide, for `p:timing`.
+    media_nodes: Vec<super::timing::MediaNode>,
 }
 
 /// A turn of the coordinates around a pivot, in degrees. The children of
@@ -103,6 +109,11 @@ impl SlideWriter<'_> {
             ElementKind::Rectangle(shape) => {
                 let adjust = shapes::corner_adjust(shape.corner_radius, frame.width, frame.height);
                 let preset = if adjust > 0 { "roundRect" } else { "rect" };
+                if matches!(shape.fill, Fill::Video(_) | Fill::Shader(_)) {
+                    let adjust = (adjust > 0).then_some(adjust);
+                    self.movie(element, &frame, preset, adjust, opacity);
+                    return;
+                }
                 self.shape(
                     element,
                     &frame,
@@ -112,7 +123,11 @@ impl SlideWriter<'_> {
                     opacity,
                 );
             }
-            ElementKind::Ellipse(_) => {
+            ElementKind::Ellipse(shape) => {
+                if matches!(shape.fill, Fill::Video(_) | Fill::Shader(_)) {
+                    self.movie(element, &frame, "ellipse", None, opacity);
+                    return;
+                }
                 self.shape(element, &frame, "Ellipse", "ellipse", None, opacity);
             }
             ElementKind::Line(line) => {
@@ -135,6 +150,187 @@ impl SlideWriter<'_> {
             }
             ElementKind::Text(text) => self.text(element, text, &frame, opacity),
             ElementKind::Table(table) => self.table(element, table, &frame, opacity, turns),
+        }
+    }
+
+    /// A shape with a video or shader fill: a picture that plays the video,
+    /// with the first frame as its poster. Cover crops the picture;
+    /// contain makes it the size of the video in the box, and the outline
+    /// of the shape is a shape of its own.
+    fn movie(
+        &mut self,
+        element: &Element,
+        frame: &Frame,
+        preset: &str,
+        adjust: Option<i64>,
+        opacity: f32,
+    ) {
+        let fill = element.kind.fill().expect("a shape with a fill");
+        let (clip, fit, fill_opacity, start, looped, muted) = match fill {
+            Fill::Video(video) => (
+                self.media.video(self.presentation, video.id),
+                video.fit,
+                video.opacity,
+                video.start,
+                video.looped,
+                video.muted,
+            ),
+            Fill::Shader(shader) => (
+                self.media
+                    .shader(self.presentation, shader, frame.width, frame.height),
+                // A shader is rendered at the size of the box.
+                ImageFit::Stretch,
+                shader.opacity,
+                shader.start,
+                shader.looped,
+                true,
+            ),
+            _ => unreachable!("a movie has a video or shader fill"),
+        };
+        let clip = match clip {
+            Ok(clip) => clip,
+            Err(message) => {
+                self.warn(element, format!("{message}: the shape has no fill"));
+                let kind = if preset == "ellipse" {
+                    "Ellipse"
+                } else {
+                    "Rectangle"
+                };
+                self.shape(element, frame, kind, preset, adjust, opacity);
+                return;
+            }
+        };
+        if fill_opacity * opacity < 1. {
+            self.warn(
+                element,
+                "PowerPoint plays videos opaque: only the first frame is transparent",
+            );
+        }
+
+        // Where the picture goes, and the crop of the video.
+        let (x, y, w, h) = crate::shape::fit_rect(fit, frame.width, frame.height, clip.size);
+        let (placed, crop, geometry) = if fit == ImageFit::Contain {
+            if preset != "rect" {
+                self.warn(element, "a contained video shows in a rectangle");
+            }
+            let local = Frame {
+                x: frame.x + x,
+                y: frame.y + y,
+                width: w,
+                height: h,
+                rotation: 0.,
+            };
+            (
+                turn_frame(&local, frame.center(), frame.rotation),
+                [0; 4],
+                ("rect", None),
+            )
+        } else {
+            let fraction = |part: f32, whole: f32| {
+                if whole > 0. {
+                    super::units::percent(part / whole)
+                } else {
+                    0
+                }
+            };
+            (
+                *frame,
+                [
+                    fraction(-x, w),
+                    fraction(-y, h),
+                    fraction(x + w - frame.width, w),
+                    fraction(y + h - frame.height, h),
+                ],
+                (preset, adjust),
+            )
+        };
+
+        let poster = self.rels.get_or_add(rel::IMAGE, &clip.poster);
+        let video = self.rels.get_or_add(rel::VIDEO, &clip.video);
+        let media = self.rels.get_or_add(rel::MEDIA, &clip.video);
+        let id = self.shape_id();
+        let name = element
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Video {}", element.id.0));
+        self.xml
+            .start("p:pic")
+            .start("p:nvPicPr")
+            .empty("p:cNvPr", &[("id", &id), ("name", &name)])
+            .start("p:cNvPicPr")
+            .empty("a:picLocks", &[("noChangeAspect", &1)])
+            .end()
+            .start("p:nvPr")
+            .empty("a:videoFile", &[("r:link", &video)])
+            .start("p:extLst")
+            .start("p:ext")
+            .attr("uri", MEDIA_EXTENSION)
+            .empty("p14:media", &[("xmlns:p14", &P14_NS), ("r:embed", &media)])
+            .end()
+            .end()
+            .end()
+            .end();
+        self.xml
+            .start("p:blipFill")
+            .start("a:blip")
+            .attr("r:embed", &poster);
+        let alpha = super::units::percent((fill_opacity * opacity).clamp(0., 1.));
+        if alpha < 100_000 {
+            self.xml.empty("a:alphaModFix", &[("amt", &alpha)]);
+        }
+        self.xml.end();
+        if crop != [0; 4] {
+            let [l, t, r, b] = crop;
+            self.xml
+                .empty("a:srcRect", &[("l", &l), ("t", &t), ("r", &r), ("b", &b)]);
+        }
+        self.xml
+            .start("a:stretch")
+            .empty("a:fillRect", &[])
+            .end()
+            .end();
+        self.xml.start("p:spPr");
+        shapes::transform(&mut self.xml, &placed);
+        shapes::geometry(&mut self.xml, geometry.0, geometry.1);
+        let stroke = element.kind.stroke();
+        if fit != ImageFit::Contain {
+            shapes::outline(&mut self.xml, stroke, opacity, [Arrowhead::NONE; 2]);
+        }
+        self.xml.end().end();
+        self.media_nodes.push(super::timing::MediaNode {
+            shape: id,
+            start,
+            looped,
+            muted,
+            duration: clip.duration,
+        });
+
+        if fit == ImageFit::Contain && stroke.is_some() {
+            // The outline on the box of the shape, over the video.
+            let outline = Element {
+                kind: match &element.kind {
+                    ElementKind::Ellipse(ellipse) => {
+                        ElementKind::Ellipse(crate::document::EllipseElement {
+                            fill: Fill::None,
+                            ..ellipse.clone()
+                        })
+                    }
+                    ElementKind::Rectangle(rectangle) => {
+                        ElementKind::Rectangle(crate::document::RectangleElement {
+                            fill: Fill::None,
+                            ..rectangle.clone()
+                        })
+                    }
+                    other => other.clone(),
+                },
+                ..element.clone()
+            };
+            let kind = if preset == "ellipse" {
+                "Ellipse"
+            } else {
+                "Rectangle"
+            };
+            self.shape(&outline, frame, kind, preset, adjust, opacity);
         }
     }
 
@@ -481,15 +677,22 @@ pub fn write(
         media,
         warnings,
         next_id: 2,
+        media_nodes: Vec::new(),
     };
     for element in &slide.elements {
         writer.element(element, 1., &[]);
     }
-    let SlideWriter { mut xml, rels, .. } = writer;
+    let SlideWriter {
+        mut xml,
+        rels,
+        media_nodes,
+        ..
+    } = writer;
     xml.end().end();
     xml.start("p:clrMapOvr")
         .empty("a:masterClrMapping", &[])
         .end();
+    super::timing::write(&mut xml, &media_nodes);
     xml.end();
     Written {
         xml: xml.finish(),

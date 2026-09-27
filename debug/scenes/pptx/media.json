@@ -1,0 +1,18 @@
+[
+  {"op": "add_video", "id": "$clip", "path": "../assets/clip.mp4"},
+
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 80, "y": 80, "width": 640, "height": 360},
+    "rectangle": {"corner_radius": 32, "fill": {"video": {"id": "$clip"}},
+                  "stroke": {"width": 6, "color": "1F4BFF"}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 880, "y": 80, "width": 360, "height": 360, "rotation": 15},
+    "ellipse": {"fill": {"video": {"id": "$clip", "start": "on_click", "loop": false, "muted": true}}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 80, "y": 520, "width": 480, "height": 320},
+    "rectangle": {"fill": {"video": {"id": "$clip", "fit": "contain", "start": "on_click"}},
+                  "stroke": {"width": 2, "dash": "dashed"}}}},
+  {"op": "add_element", "slide": 1, "element": {
+    "frame": {"x": 640, "y": 520, "width": 480, "height": 300},
+    "rectangle": {"fill": {"shader": {"duration": 2}}}}}
+]

@@ -543,6 +543,29 @@ pub struct TextSummary {
     pub paragraphs: Vec<ParagraphSummary>,
 }
 
+/// The video a picture plays: the parts of its `a:videoFile` link and its
+/// `p14:media` embed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaSummary {
+    pub video: String,
+    pub embed: String,
+}
+
+/// One video in the timing of a slide.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimingSummary {
+    /// The `cNvPr` id of the picture.
+    pub shape: u32,
+    /// `afterEffect`, `withEffect` or `clickEffect`.
+    pub kind: String,
+    /// Starts with the slide rather than on a click.
+    pub with_slide: bool,
+    /// Milliseconds.
+    pub duration: u32,
+    pub muted: bool,
+    pub looped: bool,
+}
+
 /// One cell of a table, covered cells of merges included.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CellSummary {
@@ -584,6 +607,7 @@ pub struct ShapeSummary {
     pub line: Option<LineSummary>,
     pub text: Option<TextSummary>,
     pub table: Option<TableSummary>,
+    pub media: Option<MediaSummary>,
     pub children: Vec<ShapeSummary>,
 }
 
@@ -602,6 +626,8 @@ impl ShapeSummary {
 pub struct SlideSummary {
     pub part: String,
     pub shapes: Vec<ShapeSummary>,
+    /// The videos in the order the slide starts them.
+    pub timing: Vec<TimingSummary>,
 }
 
 impl Deck {
@@ -610,17 +636,23 @@ impl Deck {
         self.slides()?
             .into_iter()
             .map(|part| {
-                let shapes = self.with_xml(&part, |document| {
+                let (shapes, timing) = self.with_xml(&part, |document| {
                     let tree = document
                         .descendants()
                         .find(|node| node.has_tag_name((P_NS, "spTree")));
-                    tree.map(|tree| {
-                        let rels = self.rels(&part).unwrap_or_default();
-                        shapes_of(tree, &Placement::default(), &rels)
-                    })
-                    .unwrap_or_default()
+                    let shapes = tree
+                        .map(|tree| {
+                            let rels = self.rels(&part).unwrap_or_default();
+                            shapes_of(tree, &Placement::default(), &rels)
+                        })
+                        .unwrap_or_default();
+                    (shapes, timing_of(document))
                 })?;
-                Ok(SlideSummary { part, shapes })
+                Ok(SlideSummary {
+                    part,
+                    shapes,
+                    timing,
+                })
             })
             .collect()
     }
@@ -706,8 +738,26 @@ fn shape_of(node: Node, placement: &Placement, rels: &[Relationship]) -> Option<
             .descendants()
             .find(|child| child.has_tag_name((A_NS, "tbl")))
             .map(|table| table_of(table, rels)),
+        media: None,
         children: Vec::new(),
     };
+    if kind == ShapeKind::Picture {
+        let target = |id: Option<&str>| {
+            id.and_then(|id| rels.iter().find(|rel| rel.id == id))
+                .map(|rel| rel.target.clone())
+        };
+        let video = node
+            .descendants()
+            .find(|child| child.has_tag_name((A_NS, "videoFile")))
+            .and_then(|file| target(file.attribute((R_NS, "link"))));
+        let embed = node
+            .descendants()
+            .find(|child| child.tag_name().name() == "media")
+            .and_then(|media| target(media.attribute((R_NS, "embed"))));
+        if let (Some(video), Some(embed)) = (video, embed) {
+            summary.media = Some(MediaSummary { video, embed });
+        }
+    }
     if let Some(properties) = properties {
         if let Some(geometry) = a(properties, "prstGeom") {
             summary.geometry = geometry.attribute("prst").map(str::to_string);
@@ -1087,4 +1137,59 @@ fn table_of(table: Node, rels: &[Relationship]) -> TableSummary {
         style,
         cells,
     }
+}
+
+/// The videos that `p:timing` starts, in order, with their media nodes.
+fn timing_of(document: &Document) -> Vec<TimingSummary> {
+    let Some(timing) = document
+        .descendants()
+        .find(|node| node.has_tag_name((P_NS, "timing")))
+    else {
+        return Vec::new();
+    };
+    let target = |node: Node| {
+        node.descendants()
+            .find(|child| child.has_tag_name((P_NS, "spTgt")))
+            .and_then(|target| target.attribute("spid"))
+            .and_then(|id| id.parse::<u32>().ok())
+    };
+    let mut out = Vec::new();
+    for effect in timing.descendants().filter(|node| {
+        node.has_tag_name((P_NS, "cTn")) && node.attribute("presetClass") == Some("mediacall")
+    }) {
+        let Some(shape) = target(effect) else {
+            continue;
+        };
+        // The click group holds an onBegin condition when it starts with
+        // the slide.
+        let with_slide = effect.ancestors().any(|ancestor| {
+            ancestor.has_tag_name((P_NS, "cTn"))
+                && p(ancestor, "stCondLst").is_some_and(|conditions| {
+                    conditions
+                        .children()
+                        .any(|cond| cond.attribute("evt") == Some("onBegin"))
+                })
+        });
+        let duration = effect
+            .descendants()
+            .filter(|node| node.has_tag_name((P_NS, "cTn")))
+            .filter_map(|node| node.attribute("dur")?.parse::<u32>().ok())
+            .next()
+            .unwrap_or(0);
+        let node = timing
+            .descendants()
+            .filter(|node| node.has_tag_name((P_NS, "cMediaNode")))
+            .find(|node| target(*node) == Some(shape));
+        out.push(TimingSummary {
+            shape,
+            kind: effect.attribute("nodeType").unwrap_or_default().to_string(),
+            with_slide,
+            duration,
+            muted: node.is_some_and(|node| node.attribute("mute") == Some("1")),
+            looped: node
+                .and_then(|node| p(node, "cTn"))
+                .is_some_and(|ctn| ctn.attribute("repeatCount") == Some("indefinite")),
+        });
+    }
+    out
 }

@@ -7,6 +7,9 @@ use super::inspect::Deck;
 use super::{Options, export, parity};
 use crate::document::Presentation;
 
+/// Scenes with videos, checked when the GStreamer plugins are installed.
+const VIDEO_SCENES: &[&str] = &["pptx/media.json"];
+
 /// The scenes to check, from `debug/scenes`.
 const SCENES: &[&str] = &[
     "shapes.json",
@@ -17,6 +20,8 @@ const SCENES: &[&str] = &[
     "images.json",
     "tables.json",
     "pptx/groups.json",
+    "pptx/media.json",
+    "shaders.json",
 ];
 
 fn scene_path(name: &str) -> PathBuf {
@@ -46,7 +51,12 @@ fn check(name: &str) -> Vec<String> {
 
 #[test]
 fn every_scene_exports_with_parity() {
-    let problems: Vec<String> = SCENES.iter().flat_map(|name| check(name)).collect();
+    let videos = crate::videos::tests::plugins_or_skip();
+    let problems: Vec<String> = SCENES
+        .iter()
+        .filter(|name| videos || !VIDEO_SCENES.contains(name))
+        .flat_map(|name| check(name))
+        .collect();
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 

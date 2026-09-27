@@ -5,12 +5,12 @@
 
 use crate::document::{
     Element, ElementKind, Fill, Frame, GradientStop, HAlign, HeadKind, HeadSize, Presentation,
-    Stroke, TableElement, TextCase, TextElement, TextSizing, TextStyle, VAlign,
+    Start, Stroke, TableElement, TextCase, TextElement, TextSizing, TextStyle, VAlign,
 };
 
 use super::inspect::{
     Color, Deck, FillSummary, InspectError, LineSummary, RunSummary, ShapeKind, ShapeSummary,
-    TextSummary,
+    TextSummary, TimingSummary,
 };
 
 /// Largest difference of a position or a size, in slide units.
@@ -19,6 +19,26 @@ const DISTANCE: f32 = 0.01;
 const ANGLE: f32 = 0.01;
 /// Largest difference of an alpha or a gradient position.
 const FRACTION: f32 = 0.000_02;
+
+/// A video the slide timing must start.
+struct Movie {
+    shape: u32,
+    start: Start,
+    looped: bool,
+    muted: bool,
+    /// Milliseconds.
+    duration: u32,
+}
+
+/// A shape whose video is contained in its box, with an outline: the
+/// outline is a shape of its own.
+fn outlined_movie(element: &Element) -> bool {
+    let contained = match element.kind.fill() {
+        Some(Fill::Video(video)) => video.fit == crate::document::ImageFit::Contain,
+        _ => false,
+    };
+    contained && element.kind.stroke().is_some()
+}
 
 /// The differences between `presentation` and `deck`; empty when they
 /// match.
@@ -35,10 +55,12 @@ pub fn compare(presentation: &Presentation, deck: &Deck) -> Result<Vec<String>, 
     for (slide, summary) in presentation.slides.iter().zip(&slides) {
         let mut check = Check {
             deck,
+            movies: Vec::new(),
             out: &mut out,
             at: format!("slide {}", slide.id.0),
         };
         check.elements(presentation, &slide.elements, &summary.shapes, 1.);
+        check.timing(&summary.timing);
     }
     Ok(out)
 }
@@ -46,6 +68,9 @@ pub fn compare(presentation: &Presentation, deck: &Deck) -> Result<Vec<String>, 
 struct Check<'a> {
     deck: &'a Deck,
     out: &'a mut Vec<String>,
+    /// The videos of the slide in paint order: the picture id and what the
+    /// fill asks for.
+    movies: Vec<Movie>,
     at: String,
 }
 
@@ -62,7 +87,12 @@ impl Check<'_> {
         opacity: f32,
     ) {
         let visible: Vec<&Element> = elements.iter().filter(|element| !element.hidden).collect();
-        if visible.len() != shapes.len() {
+        // A contained video with an outline is a picture and a shape.
+        let wanted: usize = visible
+            .iter()
+            .map(|element| 1 + usize::from(outlined_movie(element)))
+            .sum();
+        if wanted != shapes.len() {
             self.fail(format!(
                 "{} shape(s) for {} visible element(s)",
                 shapes.len(),
@@ -70,9 +100,27 @@ impl Check<'_> {
             ));
         }
         let at = self.at.clone();
-        for (element, shape) in visible.into_iter().zip(shapes) {
+        let mut shapes = shapes.iter();
+        for element in visible {
+            let Some(shape) = shapes.next() else { break };
             self.at = format!("{at} element {}", element.id.0);
             self.element(presentation, element, shape, opacity * element.opacity);
+            if outlined_movie(element)
+                && let Some(outline) = shapes.next()
+            {
+                self.frame(&element.frame, &outline.frame);
+                self.equal(
+                    "outline fill",
+                    outline.fill.as_ref(),
+                    Some(&FillSummary::None),
+                );
+                self.stroke(
+                    element.kind.stroke(),
+                    None,
+                    outline.line.as_ref(),
+                    opacity * element.opacity,
+                );
+            }
         }
         self.at = at;
     }
@@ -94,6 +142,17 @@ impl Check<'_> {
         };
         let turned_table =
             matches!(element.kind, ElementKind::Table(_)) && element.frame.rotation != 0.;
+        if let Some(fill @ (Fill::Video(_) | Fill::Shader(_))) = element.kind.fill() {
+            // A shader that does not render leaves a shape without fill.
+            if matches!(fill, Fill::Shader(_))
+                && shape.kind == ShapeKind::Shape
+                && shape.fill == Some(FillSummary::None)
+            {
+                return;
+            }
+            self.movie(presentation, element, fill, shape, opacity);
+            return;
+        }
         if shape.kind != expected_kind && !turned_table {
             self.fail(format!("is a {:?}, not a {expected_kind:?}", shape.kind));
             return;
@@ -294,6 +353,180 @@ impl Check<'_> {
             for run in &paragraph.runs {
                 self.run(run, &text.style, opacity);
             }
+        }
+    }
+
+    /// A shape with a video or shader fill: a picture that embeds the video,
+    /// with a poster, placed and cropped by the fit.
+    fn movie(
+        &mut self,
+        presentation: &Presentation,
+        element: &Element,
+        fill: &Fill,
+        shape: &ShapeSummary,
+        opacity: f32,
+    ) {
+        if shape.kind != ShapeKind::Picture {
+            self.fail(format!("a video is a {:?}, not a picture", shape.kind));
+            return;
+        }
+        let Some(media) = &shape.media else {
+            self.fail("the picture has no video");
+            return;
+        };
+        self.equal("media embed", media.embed.as_str(), media.video.as_str());
+        let Some(bytes) = self.deck.part(&media.video) else {
+            self.fail(format!("the video {} is missing", media.video));
+            return;
+        };
+        let (fit, fill_opacity, start, looped, muted, duration) = match fill {
+            Fill::Video(video) => {
+                let Some(data) = presentation.videos.get(video.id) else {
+                    self.fail(format!("video {} is missing", video.id.0));
+                    return;
+                };
+                if *bytes != *data.bytes {
+                    self.fail(format!(
+                        "{} is not the bytes of video {}",
+                        media.video, video.id.0
+                    ));
+                }
+                (
+                    video.fit,
+                    video.opacity,
+                    video.start,
+                    video.looped,
+                    video.muted,
+                    data.duration,
+                )
+            }
+            Fill::Shader(shader) => {
+                if bytes.get(4..8) != Some(b"ftyp") {
+                    self.fail(format!("{} is not an MP4 file", media.video));
+                }
+                (
+                    crate::document::ImageFit::Stretch,
+                    shader.opacity,
+                    shader.start,
+                    shader.looped,
+                    true,
+                    shader.duration,
+                )
+            }
+            _ => return,
+        };
+        let Some(FillSummary::Blip {
+            part,
+            alpha,
+            source,
+            ..
+        }) = &shape.fill
+        else {
+            self.fail(format!("the picture has no poster: {:?}", shape.fill));
+            return;
+        };
+        if (alpha - fill_opacity * opacity).abs() > FRACTION {
+            self.fail(format!(
+                "poster alpha {alpha}, not {}",
+                fill_opacity * opacity
+            ));
+        }
+        let Some(poster) = self
+            .deck
+            .part(part)
+            .and_then(|bytes| crate::images::ImageData::read(bytes.to_vec().into()).ok())
+        else {
+            self.fail(format!("the poster {part} cannot be read"));
+            return;
+        };
+        let frame = element.frame;
+        let (x, y, w, h) = crate::shape::fit_rect(
+            fit,
+            frame.width,
+            frame.height,
+            (poster.width, poster.height),
+        );
+        let preset = match &element.kind {
+            ElementKind::Ellipse(_) => "ellipse",
+            ElementKind::Rectangle(rectangle)
+                if rectangle.corner_radius > 0. && frame.width.min(frame.height) > 0. =>
+            {
+                "roundRect"
+            }
+            _ => "rect",
+        };
+        if fit == crate::document::ImageFit::Contain {
+            let local = Frame {
+                x: frame.x + x,
+                y: frame.y + y,
+                width: w,
+                height: h,
+                rotation: 0.,
+            };
+            let placed = crate::document::turn_frame(&local, frame.center(), frame.rotation);
+            self.frame(&placed, &shape.frame);
+            self.equal("geometry", shape.geometry.as_deref(), Some("rect"));
+            if source.iter().any(|inset| *inset != 0.) {
+                self.fail(format!("a contained video is cropped by {source:?}"));
+            }
+        } else {
+            self.frame(&frame, &shape.frame);
+            self.equal("geometry", shape.geometry.as_deref(), Some(preset));
+            let expected = [
+                -x / w,
+                -y / h,
+                (x + w - frame.width) / w,
+                (y + h - frame.height) / h,
+            ];
+            if source
+                .iter()
+                .zip(expected)
+                .any(|(got, want)| (got - want).abs() > 1e-4)
+            {
+                self.fail(format!("video crop {source:?}, not {expected:?}"));
+            }
+            self.stroke(element.kind.stroke(), None, shape.line.as_ref(), opacity);
+        }
+        self.movies.push(Movie {
+            shape: shape.id,
+            start,
+            looped,
+            muted,
+            duration: (duration * 1000.).round() as u32,
+        });
+    }
+
+    /// The timing starts the automatic videos with the slide, then each
+    /// video on a click, in paint order.
+    fn timing(&mut self, got: &[TimingSummary]) {
+        let movies = std::mem::take(&mut self.movies);
+        let auto = movies.iter().filter(|movie| movie.start == Start::Auto);
+        let clicks = movies.iter().filter(|movie| movie.start == Start::OnClick);
+        let expected: Vec<TimingSummary> = auto
+            .enumerate()
+            .map(|(index, movie)| {
+                (
+                    movie,
+                    true,
+                    if index == 0 {
+                        "afterEffect"
+                    } else {
+                        "withEffect"
+                    },
+                )
+            })
+            .chain(clicks.map(|movie| (movie, false, "clickEffect")))
+            .map(|(movie, with_slide, kind)| TimingSummary {
+                shape: movie.shape,
+                kind: kind.to_string(),
+                with_slide,
+                duration: movie.duration.max(1),
+                muted: movie.muted,
+                looped: movie.looped,
+            })
+            .collect();
+        if got != expected.as_slice() {
+            self.fail(format!("timing {got:?}, not {expected:?}"));
         }
     }
 

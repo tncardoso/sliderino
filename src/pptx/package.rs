@@ -23,6 +23,8 @@ pub mod rel {
     pub const THEME: &str = "theme";
     pub const FONT: &str = "font";
     pub const IMAGE: &str = "image";
+    pub const VIDEO: &str = "video";
+    pub const MEDIA: &str = "http://schemas.microsoft.com/office/2007/relationships/media";
     pub const PRES_PROPS: &str = "presProps";
     pub const VIEW_PROPS: &str = "viewProps";
     pub const TABLE_STYLES: &str = "tableStyles";
