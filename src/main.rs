@@ -1,6 +1,7 @@
-//! `sliderino`: without a command, opens the editor. The commands are the
-//! agent API: `mcp` serves it to an MCP client on stdio, the others call
-//! the open editor and print JSON. See `docs/agent-api.md`.
+//! `sliderino`: without a command, opens the Home screen, or the editor on
+//! the `.sldr` file it is given. The commands are the agent API: `mcp`
+//! serves it to an MCP client on stdio, the others call the open editor and
+//! print JSON. See `docs/agent-api.md`.
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -11,16 +12,19 @@ use serde_json::{Value, json};
 
 use sliderino::api::client::Session;
 use sliderino::api::protocol::{ApiError, ClientKind};
-use sliderino::api::{mcp, server, tools};
+use sliderino::api::{mcp, tools};
 use sliderino::app;
-use sliderino::document::Presentation;
-use sliderino::history::History;
 
 #[derive(Parser)]
 #[command(version, about = "Presentation editor for the agents age")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// A .sldr file to open in the editor.
+    file: Option<PathBuf>,
+    /// Open the editor on a new presentation instead of the Home screen.
+    #[arg(long, hide = true, conflicts_with = "file")]
+    new: bool,
     /// Open the editor without the agent API socket.
     #[arg(long)]
     no_api: bool,
@@ -43,6 +47,24 @@ enum Command {
     Open,
     /// Overview of the presentation (get_basic_info).
     Info,
+    /// Show a new presentation in the editor (new_presentation).
+    New {
+        /// Lose the unsaved changes of the open presentation.
+        #[arg(long)]
+        discard: bool,
+    },
+    /// Open a .sldr file in the editor (open_presentation).
+    OpenFile {
+        path: PathBuf,
+        /// Lose the unsaved changes of the open presentation.
+        #[arg(long)]
+        discard: bool,
+    },
+    /// Save the presentation to a .sldr file (save_presentation).
+    Save {
+        /// File to write; the file of the presentation by default.
+        path: Option<PathBuf>,
+    },
     /// Render a slide to a PNG file (get_screenshot).
     Screenshot {
         /// PNG file to write.
@@ -102,7 +124,12 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        open_editor(!cli.no_api);
+        let start = match (cli.file, cli.new) {
+            (Some(path), _) => app::Start::File(path),
+            (None, true) => app::Start::New,
+            (None, false) => app::Start::Home,
+        };
+        open_window(start, !cli.no_api);
         return ExitCode::SUCCESS;
     };
     let call = match command {
@@ -132,6 +159,18 @@ fn main() -> ExitCode {
         Command::Instances => Ok(("list_instances".into(), json!({}))),
         Command::Open => Ok(("open_editor".into(), json!({}))),
         Command::Info => Ok(("get_basic_info".into(), json!({}))),
+        Command::New { discard } => Ok(("new_presentation".into(), json!({"discard": discard}))),
+        Command::OpenFile { path, discard } => Ok((
+            "open_presentation".into(),
+            json!({"path": path, "discard": discard}),
+        )),
+        Command::Save { path } => Ok((
+            "save_presentation".into(),
+            match path {
+                Some(path) => json!({"path": path}),
+                None => json!({}),
+            },
+        )),
         Command::Screenshot {
             output,
             slide,
@@ -186,7 +225,7 @@ fn main() -> ExitCode {
     };
     print(call.and_then(|(tool, mut args)| {
         if let (Some(pid), Some(object)) = (cli.instance, args.as_object_mut())
-            && tools::spec(&tool).is_some_and(|spec| spec.target == tools::Target::Instance)
+            && tools::spec(&tool).is_some_and(|spec| spec.target != tools::Target::Local)
         {
             object.entry("instance").or_insert(json!(pid));
         }
@@ -199,19 +238,10 @@ fn main() -> ExitCode {
     }))
 }
 
-fn open_editor(api: bool) {
+fn open_window(start: app::Start, api: bool) {
     app::application().run(move |cx| {
         app::init(cx);
-        app::open_editor(
-            cx,
-            Presentation::new(),
-            History::default(),
-            move |editor, _, cx| {
-                if api && let Err(error) = server::start(editor, cx) {
-                    eprintln!("sliderino: the agent API is off: {error}");
-                }
-            },
-        );
+        app::open_window(cx, start, api);
     });
 }
 
@@ -267,5 +297,26 @@ fn print(result: Result<Value, ApiError>) -> ExitCode {
             );
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_name_is_a_command_and_anything_else_a_file() {
+        let cli = Cli::try_parse_from(["sliderino", "--instance", "7", "info"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Info)));
+        assert_eq!(cli.file, None);
+
+        let cli = Cli::try_parse_from(["sliderino", "deck.sldr"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.file, Some(PathBuf::from("deck.sldr")));
+
+        let cli = Cli::try_parse_from(["sliderino", "save", "out.sldr"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Save { path: Some(_) })));
+
+        assert!(Cli::try_parse_from(["sliderino", "--new", "deck.sldr"]).is_err());
     }
 }

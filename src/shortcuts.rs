@@ -107,6 +107,12 @@ pub struct Shortcuts {
     pub ungroup: KeyChord,
     /// Holding this key while dragging turns snapping off.
     pub snap_off: SnapOffModifier,
+    /// Saves to the file of the presentation, or asks for one.
+    pub save: KeyChord,
+    /// Asks for a new file and saves to it.
+    pub save_as: KeyChord,
+    pub new: KeyChord,
+    pub open: KeyChord,
 }
 
 /// The modifier that turns snapping off during a drag.
@@ -140,6 +146,10 @@ impl Default for Shortcuts {
             group: KeyChord::ctrl("g"),
             ungroup: KeyChord::ctrl_shift("g"),
             snap_off: SnapOffModifier::Ctrl,
+            save: KeyChord::ctrl("s"),
+            save_as: KeyChord::ctrl_shift("s"),
+            new: KeyChord::ctrl("n"),
+            open: KeyChord::ctrl("o"),
         }
     }
 }
@@ -165,6 +175,11 @@ mod tests {
         assert!(!shortcuts.undo.matches(&keystroke("ctrl-shift-z")));
         assert!(shortcuts.redo[0].matches(&keystroke("ctrl-shift-z")));
         assert!(shortcuts.redo[1].matches(&keystroke("ctrl-y")));
+        assert!(shortcuts.save.matches(&keystroke("ctrl-s")));
+        assert!(!shortcuts.save.matches(&keystroke("ctrl-shift-s")));
+        assert!(shortcuts.save_as.matches(&keystroke("ctrl-shift-s")));
+        assert!(shortcuts.new.matches(&keystroke("ctrl-n")));
+        assert!(shortcuts.open.matches(&keystroke("ctrl-o")));
     }
 
     #[test]

@@ -17,7 +17,11 @@ claude mcp add sliderino -- sliderino mcp
 
 The client starts `sliderino mcp` and stops it. The editor does not have to
 be open when the client starts the server. If no editor is open, call the
-`open_editor` tool.
+`open_editor` tool. It opens an editor with a new presentation.
+
+A window of Sliderino shows the Home screen or the editor. On the Home
+screen, only `new_presentation` and `open_presentation` work. The other
+tools of the instance fail with `no_presentation`.
 
 The editor shows each connected client at the top of the window, for
 example "Claude Code · MCP". Click it to see the clients.
@@ -31,6 +35,9 @@ as `{"error": {...}}`, and the exit code is 1.
 sliderino instances                     # list_instances
 sliderino open                          # open_editor
 sliderino info                          # get_basic_info
+sliderino new                           # new_presentation
+sliderino open-file deck.sldr           # open_presentation
+sliderino save deck.sldr                # save_presentation
 sliderino screenshot -o slide.png       # get_screenshot
 sliderino shader-video 4 -o shader.mp4  # render_shader_video
 sliderino apply ops.json --label "Add title"   # apply_operations
@@ -41,6 +48,9 @@ sliderino call get_slide '{"slide": 2}' # any tool
 ```
 
 `sliderino apply -` and `sliderino call TOOL -` read from stdin.
+
+`sliderino deck.sldr` opens the file in a new editor window. `sliderino`
+without a file opens the Home screen.
 
 ## Select an instance
 
@@ -59,7 +69,10 @@ The error data lists the instances.
 | --- | --- |
 | `list_instances` | List the open editors. |
 | `open_editor` | Start an editor and wait until it accepts calls. |
-| `get_basic_info` | Get the revision, the slides, the fonts, the images, the videos and the undo state. |
+| `new_presentation` | Show a new presentation in the editor. |
+| `open_presentation` | Open a `.sldr` file in the editor. |
+| `save_presentation` | Save the presentation to a `.sldr` file. |
+| `get_basic_info` | Get the file, the unsaved state, the revision, the slides, the fonts, the images, the videos and the undo state. |
 | `get_selection` | Get the slide, the list of elements and the text that the person selected. |
 | `get_slide` | Get the elements of a slide in paint order. |
 | `get_elements` | Get elements by id, with the text layout and the overflow. |
@@ -374,6 +387,35 @@ as on Shadertoy:
   the problem as `shader_error` with the `line` of the source and the
   `message`.
 
+## Files
+
+A `.sldr` file holds the presentation with its fonts, images and videos. It
+is a zip archive:
+
+- `presentation.json` holds the format number, the slide size, the slides,
+  the next ids and the list of the embedded files.
+- `fonts/`, `images/` and `videos/` hold the embedded files as they were
+  added.
+
+Use these tools:
+
+- `save_presentation {path?}` writes the file. Without `path`, it writes the
+  file of the presentation. If the presentation has no file, the tool fails
+  with `no_file`. With `path`, it replaces the file if it exists, and the
+  path becomes the file of the presentation. It adds `.sldr` when the path
+  has no extension.
+- `open_presentation {path, discard?}` shows the file in the editor.
+- `new_presentation {discard?}` shows a new presentation in the editor.
+
+A relative `path` starts at the working folder of the client.
+
+`open_presentation` and `new_presentation` fail with `unsaved_changes` when
+the open presentation has changes that are not saved. Save them with
+`save_presentation`, or give `discard: true` to lose them.
+
+`get_basic_info` gives `file` (the path, or null) and `unsaved` (true when
+the presentation changed after it was opened or saved).
+
 ## Presentations
 
 Click **Present** in the editor to show the slides on the full screen, from
@@ -437,6 +479,11 @@ change and selects the changed element.
 | `render_failed` | The editor cannot render the slide or the shader video. |
 | `operation_failed` | An operation cannot apply. `data.op` gives its index. |
 | `stale_revision` | The document changed after `base_revision`. |
+| `no_presentation` | The window shows the Home screen. Call `new_presentation` or `open_presentation`. |
+| `unsaved_changes` | The open presentation has unsaved changes and the call gives no `discard: true`. |
+| `no_file` | `save_presentation` gets no `path` and the presentation has no file. |
+| `cannot_open` | `open_presentation` cannot read the file. |
+| `io` | The editor cannot write the file. |
 | `connection_failed` | The editor closed the connection. |
 
 ## How it works

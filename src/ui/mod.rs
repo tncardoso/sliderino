@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod agent_tests;
+pub mod brand;
 pub mod canvas;
 pub mod font_upload;
 #[cfg(test)]
@@ -9,6 +10,7 @@ mod group_tests;
 pub mod hierarchy_panel;
 #[cfg(test)]
 mod hierarchy_tests;
+pub mod home;
 pub mod image_insert;
 pub mod inspector;
 #[cfg(all(test, feature = "perf"))]
@@ -30,6 +32,9 @@ pub mod text_input;
 mod text_tool_tests;
 pub mod top_bar;
 pub mod widgets;
+pub mod workspace;
+#[cfg(test)]
+mod workspace_tests;
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;

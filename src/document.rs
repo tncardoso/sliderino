@@ -936,6 +936,16 @@ impl FontLibrary {
     }
 }
 
+/// The ids a presentation gives to the next slide, element, image and
+/// video. Ids are never reused, so a saved presentation keeps them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextIds {
+    pub slide: u64,
+    pub element: u64,
+    pub image: u64,
+    pub video: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Presentation {
     pub size: SlideSize,
@@ -997,6 +1007,71 @@ impl Presentation {
         let id = presentation.new_slide_id();
         presentation.slides.push(Slide::new(id));
         presentation
+    }
+
+    /// Builds a saved presentation again through the checks of the edits:
+    /// the fonts must be readable, and every element must reference
+    /// embedded fonts, images and videos. The ids to give next never go
+    /// below `next`. The revision starts at 0.
+    pub fn from_saved(
+        size: SlideSize,
+        fonts: Vec<(FontFace, FontData)>,
+        images: Vec<(ImageId, ImageData)>,
+        videos: Vec<(VideoId, VideoData)>,
+        slides: Vec<Slide>,
+        next: NextIds,
+    ) -> Result<Self, ApplyError> {
+        let mut presentation = Self {
+            size,
+            slides: Vec::new(),
+            fonts: FontLibrary::default(),
+            images: ImageLibrary::default(),
+            videos: VideoLibrary::default(),
+            next_slide_id: next.slide.max(1),
+            next_element_id: next.element.max(1),
+            next_image_id: next.image.max(1),
+            next_video_id: next.video.max(1),
+            revision: 0,
+        };
+        for (face, data) in fonts {
+            presentation.apply_op(Operation::AddFont { face, data })?;
+        }
+        for (id, data) in images {
+            presentation.apply_op(Operation::AddImage { id, data })?;
+        }
+        for (id, data) in videos {
+            presentation.apply_op(Operation::AddVideo { id, data })?;
+        }
+        for slide in slides {
+            let id = slide.id;
+            presentation.apply_one(Operation::AddSlide {
+                index: usize::MAX,
+                slide: Slide::new(id),
+            })?;
+            for element in slide.elements {
+                presentation.apply_one(Operation::AddElement {
+                    slide: id,
+                    parent: None,
+                    index: usize::MAX,
+                    element,
+                })?;
+            }
+        }
+        if presentation.slides.is_empty() {
+            let id = presentation.new_slide_id();
+            presentation.slides.push(Slide::new(id));
+        }
+        Ok(presentation)
+    }
+
+    /// The ids the presentation gives next, for [`Self::from_saved`].
+    pub fn next_ids(&self) -> NextIds {
+        NextIds {
+            slide: self.next_slide_id,
+            element: self.next_element_id,
+            image: self.next_image_id,
+            video: self.next_video_id,
+        }
     }
 
     /// Reserves a slide id for an [`Operation::AddSlide`].

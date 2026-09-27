@@ -8,18 +8,19 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::component::h_flex;
 use gpui_kit::component::v_flex;
+use gpui_kit::{AppContext as _, EventEmitter};
 use gpui_kit::{
     Bounds, ClipboardItem, Context, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, KeyUpEvent, Keystroke, MouseButton, ParentElement, Pixels, Point, Render, Styled,
-    Subscription, Window, point, px,
+    Subscription, Task, Window, point, px,
 };
 
-use crate::api::server::Agents;
 use crate::camera::Camera;
 use crate::document::{
     ApplyError, Element, ElementId, ElementKind, EllipseElement, Fill, Frame, LineElement,
@@ -375,8 +376,12 @@ pub struct EditorView {
     pub hand_key_held: bool,
     /// Keyboard focus of the editor; key events reach the canvas through it.
     pub focus: FocusHandle,
-    /// Agents connected through the API, and whether the view follows them.
-    pub agents: Agents,
+    /// Show the slide and select the element of each agent edit.
+    pub follow_agents: bool,
+    /// The file the presentation was opened from or last saved to.
+    pub file: Option<PathBuf>,
+    /// The revision of the presentation when it was opened or last saved.
+    pub saved_revision: u64,
     /// Pictures of fills that the canvas or the thumbnails would draw but
     /// that are not decoded or rendered yet; see
     /// [`EditorView::load_pictures`].
@@ -424,6 +429,7 @@ impl EditorView {
             this.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
+        let saved_revision = presentation.revision();
         Self {
             current_slide: presentation.slides[0].id,
             library_tab: 0,
@@ -451,7 +457,9 @@ impl EditorView {
             pan_drag: None,
             hand_key_held: false,
             focus: cx.focus_handle(),
-            agents: Agents::default(),
+            follow_agents: false,
+            file: None,
+            saved_revision,
             pictures_wanted: RefCell::new(HashSet::new()),
             pictures_pending: HashSet::new(),
             pictures_failed: HashSet::new(),
@@ -1310,6 +1318,10 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if self.on_file_key(keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         // Keys typed into the inspector's fields belong to them.
         let focused = self.focus.is_focused(window);
         if focused && self.text_edit.is_some() {
@@ -1565,6 +1577,130 @@ pub fn word_end(text: &str, index: usize) -> usize {
         .find(|(_, ch)| !is_word(*ch))
         .map_or(after.len() - skipped, |(ix, _)| ix);
     index + skipped + word
+}
+
+/// What the editor asks of the window around it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorEvent {
+    /// Show the Home screen.
+    GoHome,
+    /// Show a new presentation.
+    New,
+    /// Ask for a file and show it.
+    Open,
+}
+
+impl EventEmitter<EditorEvent> for EditorView {}
+
+impl EditorView {
+    /// Whether the presentation changed since it was opened or saved.
+    pub fn is_dirty(&self) -> bool {
+        self.presentation.revision() != self.saved_revision
+    }
+
+    /// Records that the presentation, as it is now, is saved in `path`.
+    pub fn mark_saved(&mut self, path: PathBuf) {
+        self.file = Some(path);
+        self.saved_revision = self.presentation.revision();
+    }
+
+    /// The name of the presentation: its file name without the extension,
+    /// or "Untitled".
+    pub fn title(&self) -> String {
+        self.file
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .map_or_else(|| "Untitled".into(), |stem| stem.to_string_lossy().into())
+    }
+
+    /// Saves the presentation to its file. Without a file, or with
+    /// `save_as`, asks for one first. The task gives true when the file is
+    /// written; errors show as a notification.
+    pub fn save(
+        &mut self,
+        save_as: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        self.history.close_burst();
+        let file = self.file.clone().filter(|_| !save_as);
+        let directory = self
+            .file
+            .as_deref()
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_default();
+        let suggested = format!("{}.{}", self.title(), crate::file::EXTENSION);
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match file {
+                Some(path) => path,
+                None => {
+                    let Ok(chosen) =
+                        cx.update(|_, cx| cx.prompt_for_new_path(&directory, Some(&suggested)))
+                    else {
+                        return false;
+                    };
+                    match chosen.await {
+                        Ok(Ok(Some(path))) => crate::file::with_extension(&path),
+                        Ok(Ok(None)) | Err(_) => return false,
+                        Ok(Err(error)) => {
+                            this.update_in(cx, |_, window, cx| {
+                                crate::ui::show_error(format!("Cannot save: {error}"), window, cx);
+                            })
+                            .ok();
+                            return false;
+                        }
+                    }
+                }
+            };
+            let Ok((presentation, revision)) = this.read_with(cx, |editor, _| {
+                (editor.presentation.clone(), editor.presentation.revision())
+            }) else {
+                return false;
+            };
+            let target = path.clone();
+            let written = cx
+                .background_spawn(async move { crate::file::save(&presentation, &target) })
+                .await;
+            this.update_in(cx, |editor, window, cx| match written {
+                Ok(()) => {
+                    editor.file = Some(path);
+                    editor.saved_revision = revision;
+                    cx.notify();
+                    true
+                }
+                Err(error) => {
+                    let message = format!("Cannot save {}: {error}", path.display());
+                    crate::ui::show_error(message, window, cx);
+                    false
+                }
+            })
+            .unwrap_or(false)
+        })
+    }
+
+    /// Handles the file shortcuts: save, save as, new and open. Returns
+    /// true when the key was one of them.
+    fn on_file_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.shortcuts.save.matches(keystroke) {
+            self.save(false, window, cx).detach();
+        } else if self.shortcuts.save_as.matches(keystroke) {
+            self.save(true, window, cx).detach();
+        } else if self.shortcuts.new.matches(keystroke) {
+            cx.emit(EditorEvent::New);
+        } else if self.shortcuts.open.matches(keystroke) {
+            cx.emit(EditorEvent::Open);
+        } else {
+            return false;
+        }
+        true
+    }
 }
 
 impl Render for EditorView {

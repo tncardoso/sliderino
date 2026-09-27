@@ -8,11 +8,11 @@
 use std::io::BufReader;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
-use gpui_kit::Context;
+use gpui_kit::{App, Context, Global, Window};
 use serde_json::{Value, json};
 
 use crate::api::API_VERSION;
@@ -25,6 +25,7 @@ use crate::api::tools::{self, Host, ViewState};
 use crate::document::{ApplyError, Presentation};
 use crate::editor::{Drag, EditorView};
 use crate::history::History;
+use crate::ui::workspace::Workspace;
 
 /// How long the agent status shows a CLI call after it ends.
 const CLI_SHOWN_FOR: Duration = Duration::from_secs(3);
@@ -37,19 +38,24 @@ pub struct AgentClient {
     pub kind: ClientKind,
 }
 
-/// The editor's view of the API: who is connected, and whether the view
-/// follows their edits.
+/// Who is connected to the API of this process. A GPUI global: the title
+/// bars of the Home screen and of the editor read it.
 #[derive(Default)]
 pub struct Agents {
     pub clients: Vec<AgentClient>,
     /// Until when the status shows the last CLI call.
     pub cli_until: Option<Instant>,
-    /// Show the slide and select the element of each agent edit.
-    pub follow: bool,
     files: Option<InstanceFiles>,
 }
 
+impl Global for Agents {}
+
 impl Agents {
+    /// The agents of this process; `None` before the API starts.
+    pub fn get(cx: &App) -> Option<&Agents> {
+        cx.try_global::<Agents>()
+    }
+
     /// The text of the agent status: the MCP clients, else a recent CLI
     /// call, else `None`.
     pub fn status(&self, now: Instant) -> Option<String> {
@@ -108,8 +114,8 @@ pub enum Event {
     },
 }
 
-/// Opens this instance's socket and serves it on the editor.
-pub fn start(editor: &mut EditorView, cx: &mut Context<EditorView>) -> std::io::Result<()> {
+/// Opens this instance's socket and serves it on the window's workspace.
+pub fn start(window: &mut Window, cx: &mut Context<Workspace>) -> std::io::Result<()> {
     let dir = client::runtime_dir();
     client::create_runtime_dir(&dir)?;
     let pid = std::process::id();
@@ -135,27 +141,31 @@ pub fn start(editor: &mut EditorView, cx: &mut Context<EditorView>) -> std::io::
     std::thread::Builder::new()
         .name("api-accept".into())
         .spawn(move || accept(listener, sender))?;
-    cx.spawn(async move |this, cx| {
+    cx.spawn_in(window, async move |this, cx| {
         while let Ok(event) = receiver.recv().await {
-            let handled = this.update(cx, |editor, cx| editor.on_api_event(event, cx));
+            let handled = this.update_in(cx, |workspace, window, cx| {
+                workspace.on_api_event(event, window, cx)
+            });
             if handled.is_err() {
                 break;
             }
         }
     })
     .detach();
-    // The files go with the editor; clients also drop the entries of
+    // The files go with the process; clients also drop the entries of
     // instances that exit without deleting them.
     let files = InstanceFiles {
         socket,
         info: info_path,
     };
-    cx.on_app_quit(|editor: &mut EditorView, _| {
-        editor.agents.files.take();
+    cx.on_app_quit(|_: &mut Workspace, cx| {
+        if cx.has_global::<Agents>() {
+            cx.global_mut::<Agents>().files.take();
+        }
         async {}
     })
     .detach();
-    editor.agents.files = Some(files);
+    cx.default_global::<Agents>().files = Some(files);
     Ok(())
 }
 
@@ -249,27 +259,31 @@ fn serve(stream: UnixStream, connection: u64, events: async_channel::Sender<Even
     }
 }
 
-impl EditorView {
-    fn on_api_event(&mut self, event: Event, cx: &mut Context<Self>) {
+impl Agents {
+    /// Records a client that connected or closed. Returns false for other
+    /// events.
+    pub fn on_event(event: &Event, cx: &mut Context<Workspace>) -> bool {
         match event {
             Event::Connected {
                 connection,
                 name,
                 kind,
-            } => self.agents.clients.push(AgentClient {
-                connection,
-                name,
-                kind,
-            }),
+            } => {
+                cx.default_global::<Agents>().clients.push(AgentClient {
+                    connection: *connection,
+                    name: name.clone(),
+                    kind: *kind,
+                });
+            }
             Event::Closed { connection } => {
-                let closed = self
-                    .agents
+                let agents = cx.default_global::<Agents>();
+                let closed = agents
                     .clients
                     .iter()
-                    .position(|client| client.connection == connection)
-                    .map(|index| self.agents.clients.remove(index));
+                    .position(|client| client.connection == *connection)
+                    .map(|index| agents.clients.remove(index));
                 if closed.is_some_and(|client| client.kind == ClientKind::Cli) {
-                    self.agents.cli_until = Some(Instant::now() + CLI_SHOWN_FOR);
+                    agents.cli_until = Some(Instant::now() + CLI_SHOWN_FOR);
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(CLI_SHOWN_FOR).await;
                         this.update(cx, |_, cx| cx.notify()).ok();
@@ -277,6 +291,18 @@ impl EditorView {
                     .detach();
                 }
             }
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+}
+
+impl EditorView {
+    /// Runs an instance tool, or the document part of `render_shader_video`.
+    pub fn on_api_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        match event {
+            Event::Connected { .. } | Event::Closed { .. } => {}
             Event::Call { tool, args, reply } => {
                 let _span = crate::perf::span("api_call");
                 reply.send(tools::handle(self, &tool, args)).ok();
@@ -352,7 +378,7 @@ impl EditorView {
             edit.goal_x = None;
         }
         self.repair_view(change.slide_index);
-        if self.agents.follow
+        if self.follow_agents
             && let Some(applied) = applied
         {
             self.follow(applied);
@@ -432,6 +458,18 @@ impl Host for EditorView {
         let result = EditorView::redo(self);
         self.after_agent_change(change, None);
         result
+    }
+
+    fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
+    fn unsaved(&self) -> bool {
+        self.is_dirty()
+    }
+
+    fn saved(&mut self, path: PathBuf) {
+        self.mark_saved(path);
     }
 }
 

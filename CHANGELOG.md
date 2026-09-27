@@ -4,6 +4,19 @@
 
 ### Added
 
+- The Home screen. `sliderino` opens on it. Start a new presentation
+  (Ctrl+N) or open a file (Ctrl+O) there.
+- Save presentations as `.sldr` files, with their fonts, images and videos.
+  Ctrl+S saves, and Ctrl+Shift+S saves to a new file. Open a file from the
+  Home screen, with Ctrl+O in the editor, or with `sliderino deck.sldr`.
+- The editor shows a dot after the name of a presentation with unsaved
+  changes. Before Home, a new or an opened presentation, or closing the
+  window drops these changes, Sliderino asks to save or discard them.
+- Agents can save and open presentations with `save_presentation`,
+  `open_presentation` and `new_presentation` (`sliderino save`,
+  `sliderino open-file` and `sliderino new`). `get_basic_info` gives the
+  file and the unsaved state.
+
 - Video fills: fill a rectangle or an ellipse with a video. Drop a video
   file on the canvas, or pick Video in the fill of the Design tab. Videos in
   other formats than MP4 (H.264 and AAC) change to MP4 when you add them;
@@ -113,12 +126,18 @@
 
 ### Changed
 
+- The editor title bar shows Home instead of the folder. Click it to go
+  back to the Home screen.
+- `open_editor` opens an editor with a new presentation, as before. The
+  other tools fail with `no_presentation` when the window shows the Home
+  screen.
 - The agent tool `get_selection` gives the selected elements as a list.
 - Text opacity is now the opacity of the element. Agents set it with the
   `opacity` of `set_layer`, not with the text style.
 
 ### Fixed
 
+- Error messages, such as a file that cannot be read, show in the window.
 - Text in an embedded font now shows in the editor when an installed font
   has the same family name, or when the font has no letter "m".
 - Moving and resizing a text box is smooth. Before, the editor stopped

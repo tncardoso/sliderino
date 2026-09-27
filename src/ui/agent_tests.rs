@@ -153,7 +153,7 @@ fn the_view_follows_agent_edits_only_when_asked(cx: &mut TestAppContext) {
     call(cx, handle, "apply_operations", add.clone()).unwrap();
     assert_eq!(read(cx, handle, |editor| editor.current_slide), SlideId(1));
 
-    with_editor(cx, handle, |editor, _| editor.agents.follow = true);
+    with_editor(cx, handle, |editor, _| editor.follow_agents = true);
     let refs = call(cx, handle, "apply_operations", add).unwrap()["refs"].clone();
     read(cx, handle, |editor| {
         assert_eq!(editor.current_slide.0, refs["$s"]);

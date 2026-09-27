@@ -7,6 +7,7 @@
 //! `stale_revision` when the document changed since.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -22,8 +23,11 @@ use crate::{fonts, render};
 /// Where a tool runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// In an editor instance, reached through its socket.
+    /// In the editor of an instance, reached through its socket.
     Instance,
+    /// In the window of an instance, reached through its socket: also on
+    /// the Home screen, where there is no editor.
+    Window,
     /// In the client process: finding and starting instances.
     Local,
 }
@@ -42,7 +46,7 @@ impl ToolSpec {
     /// The schema a client advertises: instance tools also take `instance`.
     pub fn input_schema(&self) -> Value {
         let mut schema = self.schema.clone();
-        if self.target == Target::Instance {
+        if self.target != Target::Local {
             schema["properties"]["instance"] = json!({
                 "type": "integer",
                 "description": "Process id of the Sliderino instance. Needed only when several instances are open; see list_instances."
@@ -81,6 +85,10 @@ fn base_revision() -> Value {
     })
 }
 
+fn discard_arg() -> Value {
+    json!({"type": "boolean", "description": "Lose the unsaved changes of the open presentation. Default false."})
+}
+
 fn slide_arg() -> Value {
     json!({"type": "integer", "description": "Slide id. Default: the slide shown in the editor."})
 }
@@ -103,8 +111,47 @@ pub fn specs() -> Vec<ToolSpec> {
             read_only: false,
         },
         ToolSpec {
+            name: "new_presentation",
+            description: "Show a new presentation in the editor, also from its Home screen. Fails with unsaved_changes when the open presentation has changes that are not saved, unless discard is true.",
+            schema: json!({
+                "type": "object",
+                "properties": {"discard": discard_arg()},
+                "additionalProperties": false
+            }),
+            target: Target::Window,
+            read_only: false,
+        },
+        ToolSpec {
+            name: "open_presentation",
+            description: "Open a .sldr file in the editor, also from its Home screen. Fails with unsaved_changes when the open presentation has changes that are not saved, unless discard is true.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The .sldr file. A relative path starts at the working folder of the client."},
+                    "discard": discard_arg()
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            target: Target::Window,
+            read_only: false,
+        },
+        ToolSpec {
+            name: "save_presentation",
+            description: "Save the presentation to a .sldr file, with its fonts, images and videos. Without path, save to the file it was opened from or last saved to. With path, replace that file if it exists; the path then becomes the file of the presentation.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The .sldr file to write. A relative path starts at the working folder of the client. Default: the file of the presentation."}
+                },
+                "additionalProperties": false
+            }),
+            target: Target::Instance,
+            read_only: false,
+        },
+        ToolSpec {
             name: "get_basic_info",
-            description: "Overview of the open presentation: revision, slide size, slides with their element counts, embedded fonts and images, the slide shown in the editor and the undo state. Call it first.",
+            description: "Overview of the open presentation: its file and whether it has unsaved changes, revision, slide size, slides with their element counts, embedded fonts and images, the slide shown in the editor and the undo state. Call it first.",
             schema: empty_schema(),
             target: Target::Instance,
             read_only: true,
@@ -275,6 +322,12 @@ pub trait Host {
     /// `None` when there is nothing to undo.
     fn undo(&mut self) -> Option<Result<(), ApplyError>>;
     fn redo(&mut self) -> Option<Result<(), ApplyError>>;
+    /// The file the presentation was opened from or last saved to.
+    fn file(&self) -> Option<&Path>;
+    /// Whether the presentation changed since it was opened or saved.
+    fn unsaved(&self) -> bool;
+    /// Records that the presentation, as it is now, is saved in `path`.
+    fn saved(&mut self, path: PathBuf);
 }
 
 /// The options agent ops use: automatic fonts, all or nothing.
@@ -322,6 +375,7 @@ pub fn handle(host: &mut dyn Host, tool: &str, args: Value) -> Result<ToolOutput
         }
         "list_fonts" => list_fonts(host, parse(args)?),
         "apply_operations" => apply_operations(host, parse(args)?),
+        "save_presentation" => save_presentation(host, parse(args)?),
         "undo" => step(host, parse(args)?, true),
         "redo" => step(host, parse(args)?, false),
         _ => Err(ApiError::new(
@@ -338,6 +392,25 @@ fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ApiError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveArgs {
+    path: Option<PathBuf>,
+}
+
+fn save_presentation(host: &mut dyn Host, args: SaveArgs) -> Result<ToolOutput, ApiError> {
+    let path = match args.path {
+        Some(path) => crate::file::with_extension(&path),
+        None => host.file().map(Path::to_path_buf).ok_or_else(|| {
+            ApiError::new("no_file", "the presentation has no file yet: pass path")
+        })?,
+    };
+    crate::file::save(host.presentation(), &path)
+        .map_err(|error| ApiError::new("io", format!("cannot save {}: {error}", path.display())))?;
+    host.saved(path.clone());
+    Ok(json!({"file": path, "revision": host.presentation().revision()}).into())
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -461,6 +534,8 @@ fn basic_info(host: &dyn Host) -> Value {
         .collect();
     json!({
         "api_version": API_VERSION,
+        "file": host.file(),
+        "unsaved": host.unsaved(),
         "revision": presentation.revision(),
         "slide_size": {"width": presentation.size.width, "height": presentation.size.height},
         "slides": slides,
@@ -838,6 +913,8 @@ pub(crate) mod tests {
     pub struct TestHost {
         pub presentation: Presentation,
         pub history: History,
+        pub file: Option<PathBuf>,
+        pub saved_revision: u64,
     }
 
     impl Host for TestHost {
@@ -877,6 +954,19 @@ pub(crate) mod tests {
             self.history
                 .redo(&mut self.presentation)
                 .map(|result| result.map(|_| ()))
+        }
+
+        fn file(&self) -> Option<&Path> {
+            self.file.as_deref()
+        }
+
+        fn unsaved(&self) -> bool {
+            self.presentation.revision() != self.saved_revision
+        }
+
+        fn saved(&mut self, path: PathBuf) {
+            self.file = Some(path);
+            self.saved_revision = self.presentation.revision();
         }
     }
 
@@ -1080,7 +1170,9 @@ pub(crate) mod tests {
             let code = result.err().map(|error| error.code);
             match spec.target {
                 Target::Instance => assert_eq!(code.as_deref(), Some("invalid_arguments")),
-                Target::Local => assert_eq!(code.as_deref(), Some("unknown_tool")),
+                Target::Window | Target::Local => {
+                    assert_eq!(code.as_deref(), Some("unknown_tool"))
+                }
             }
         }
     }
@@ -1175,5 +1267,42 @@ pub(crate) mod tests {
         .unwrap();
         let problems = call(&mut host, "get_diagnostics", json!({})).unwrap()["problems"].clone();
         assert_eq!(problems, json!([]));
+    }
+
+    #[test]
+    fn save_presentation_writes_the_file_and_clears_unsaved() {
+        let mut host = TestHost::default();
+        let error = call(&mut host, "save_presentation", json!({})).unwrap_err();
+        assert_eq!(error.code, "no_file");
+
+        add_title(&mut host);
+        let info = call(&mut host, "get_basic_info", json!({})).unwrap();
+        assert_eq!(
+            (info["file"].clone(), info["unsaved"].clone()),
+            (json!(null), json!(true))
+        );
+
+        let dir = std::env::temp_dir().join(format!("sliderino-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = call(
+            &mut host,
+            "save_presentation",
+            json!({"path": dir.join("deck")}),
+        )
+        .unwrap();
+        let path = dir.join("deck.sldr");
+        assert_eq!(saved["file"], json!(path));
+        let info = call(&mut host, "get_basic_info", json!({})).unwrap();
+        assert_eq!(
+            (info["file"].clone(), info["unsaved"].clone()),
+            (json!(path), json!(false))
+        );
+        assert_eq!(crate::file::load(&path).unwrap(), host.presentation);
+
+        call(&mut host, "undo", json!({})).unwrap();
+        assert!(host.unsaved());
+        call(&mut host, "save_presentation", json!({})).unwrap();
+        assert!(!host.unsaved());
+        assert_eq!(crate::file::load(&path).unwrap(), host.presentation);
     }
 }

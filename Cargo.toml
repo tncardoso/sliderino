@@ -27,6 +27,7 @@ tokio = { version = "1.53.1", features = ["rt", "io-std", "macros"] }
 ttf-parser = "0.25"
 unicode-linebreak = "0.1"
 wgpu = { version = "29", features = ["naga-ir"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [features]
 # Timing spans for the benchmarks in src/ui/perf_tests.rs.

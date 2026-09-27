@@ -228,6 +228,12 @@ impl Session {
             ("render_shader_video", None) => {
                 return Err(ApiError::invalid_args("render_shader_video needs path"));
             }
+            ("save_presentation" | "open_presentation", Some(Value::String(path))) => {
+                // The editor runs in another folder: send the path from here.
+                let base = std::env::current_dir().unwrap_or_default();
+                object.insert("path".into(), json!(base.join(path)));
+                None
+            }
             (_, None) => None,
             (_, Some(_)) => return Err(ApiError::invalid_args("path must be a file path")),
         };
@@ -321,6 +327,7 @@ pub fn open_editor(dir: &Path) -> Result<InstanceInfo, ApiError> {
     let exe =
         std::env::current_exe().map_err(|error| ApiError::new("open_failed", error.to_string()))?;
     let mut child = std::process::Command::new(exe)
+        .arg("--new")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
