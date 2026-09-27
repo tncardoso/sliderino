@@ -17,6 +17,7 @@ pub mod images;
 pub mod operation;
 pub mod perf;
 pub mod pictures;
+pub mod pptx;
 pub mod render;
 pub mod script;
 pub mod shaders;

@@ -15,7 +15,7 @@ use gpui_kit::{App, Bounds, Pixels, Size, WeakEntity, Window};
 use sliderino::document::{ElementId, Presentation, SlideId};
 use sliderino::editor::EditorView;
 use sliderino::history::History;
-use sliderino::{app, render, script};
+use sliderino::{app, pptx, render, script};
 
 /// Longest wait for the editor to paint the scene before capturing.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,6 +71,76 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// Applies a scene and exports it to PPTX, without the editor.
+    ExportPptx {
+        /// Scene file: a JSON list of operations.
+        #[arg(long)]
+        ops: PathBuf,
+        /// PPTX to write.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Draw thin lines on the text frames and baselines of the layout.
+        #[arg(long)]
+        guides: bool,
+    },
+    /// Applies a scene, exports it to PPTX, reads the deck back and
+    /// compares each shape with its element. Fails on a difference.
+    PptxRoundtrip {
+        /// Scene file: a JSON list of operations.
+        #[arg(long)]
+        ops: PathBuf,
+        /// Also keep the PPTX in this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Renders each slide of a PPTX file to PNG with LibreOffice.
+    PptxRender {
+        /// PPTX file to render.
+        file: PathBuf,
+        /// Folder for the PNG files.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Pixels per slide unit.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f32,
+    },
+    /// Applies a scene, then renders one slide on the CPU and its PPTX
+    /// export with LibreOffice, and compares the two images. Writes
+    /// reference.png, pptx.png and diff.png (differences in red).
+    PptxCompare {
+        /// Scene file: a JSON list of operations.
+        #[arg(long)]
+        ops: PathBuf,
+        /// Folder for the images and the deck.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Slide id to compare.
+        #[arg(long, default_value_t = 1)]
+        slide: u64,
+        /// Pixels per slide unit.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f32,
+        /// Fail when more than this fraction of the pixels differ.
+        #[arg(long)]
+        threshold: Option<f32>,
+    },
+    /// Shows the parts of a PPTX file, or one part as indented XML.
+    PptxDump {
+        /// PPTX file to read.
+        file: PathBuf,
+        /// Part to show, such as ppt/slides/slide1.xml.
+        #[arg(long)]
+        part: Option<PathBuf>,
+    },
+    /// Checks the package of a PPTX file: content types, relationships,
+    /// XML and shape ids. With --schema, also validates the XML against the
+    /// Open XML schema (needs tools/pptx-validate and dotnet).
+    PptxCheck {
+        /// PPTX file to check.
+        file: PathBuf,
+        #[arg(long)]
+        schema: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -99,6 +169,26 @@ fn main() -> ExitCode {
             select.map(ElementId),
             full,
         ),
+        Command::ExportPptx {
+            ops,
+            output,
+            guides,
+        } => export_pptx(&ops, &output, guides),
+        Command::PptxRoundtrip { ops, output } => pptx_roundtrip(&ops, output.as_deref()),
+        Command::PptxRender {
+            file,
+            output,
+            scale,
+        } => pptx_render(&file, &output, scale),
+        Command::PptxCompare {
+            ops,
+            output,
+            slide,
+            scale,
+            threshold,
+        } => pptx_compare(&ops, &output, SlideId(slide), scale, threshold),
+        Command::PptxDump { file, part } => pptx_dump(&file, part.as_deref()),
+        Command::PptxCheck { file, schema } => pptx_check(&file, schema),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -131,6 +221,162 @@ fn render(ops: &Path, output: &Path, slide: SlideId, scale: f32, overlay: bool) 
     println!("{}", output.display());
     print_report(&presentation, slide);
     Ok(())
+}
+
+fn export_pptx(ops: &Path, output: &Path, guides: bool) -> Result<()> {
+    let (presentation, _) = load_scene(ops)?;
+    let export = pptx::export(&presentation, &pptx::Options { guides })?;
+    pptx::save(&export, output)?;
+    println!("{}", output.display());
+    for warning in &export.warnings {
+        println!("warning: {warning}");
+    }
+    Ok(())
+}
+
+fn pptx_roundtrip(ops: &Path, output: Option<&Path>) -> Result<()> {
+    let (presentation, _) = load_scene(ops)?;
+    let export = pptx::export(&presentation, &pptx::Options::default())?;
+    if let Some(output) = output {
+        pptx::save(&export, output)?;
+    }
+    let deck = pptx::inspect::Deck::read(&export.bytes)?;
+    let mut problems = deck.check();
+    problems.extend(pptx::parity::compare(&presentation, &deck)?);
+    for warning in &export.warnings {
+        println!("warning: {warning}");
+    }
+    for problem in &problems {
+        println!("{problem}");
+    }
+    if problems.is_empty() {
+        println!("ok");
+        Ok(())
+    } else {
+        Err(format!("{} difference(s)", problems.len()).into())
+    }
+}
+
+fn pptx_render(file: &Path, output: &Path, scale: f32) -> Result<()> {
+    let pages = pptx::visual::render(file, &output.join("work"), scale)?;
+    for (index, page) in pages.iter().enumerate() {
+        let path = output.join(format!("slide{}.png", index + 1));
+        page.save_png(&path)?;
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
+fn pptx_compare(
+    ops: &Path,
+    output: &Path,
+    slide: SlideId,
+    scale: f32,
+    threshold: Option<f32>,
+) -> Result<()> {
+    let (presentation, _) = load_scene(ops)?;
+    let index = presentation
+        .index_of(slide)
+        .ok_or_else(|| format!("no slide {}", slide.0))?;
+    std::fs::create_dir_all(output)?;
+    let reference = render::render_slide(&presentation, slide, scale, false)?;
+    reference.save_png(output.join("reference.png"))?;
+    let export = pptx::export(&presentation, &pptx::Options::default())?;
+    let deck = output.join("deck.pptx");
+    pptx::save(&export, &deck)?;
+    for warning in &export.warnings {
+        println!("warning: {warning}");
+    }
+    let work = output.join("work");
+    std::fs::remove_dir_all(&work).ok();
+    let pages = pptx::visual::render(&deck, &work, scale)?;
+    let page = pages
+        .get(index)
+        .ok_or("LibreOffice rendered fewer slides than the deck has")?;
+    page.save_png(output.join("pptx.png"))?;
+    let difference = pptx::visual::difference(&reference, page);
+    difference.image.save_png(output.join("diff.png"))?;
+    println!(
+        "size {}x{} and {}x{}, mean difference {:.3}, differing pixels {:.4}%",
+        reference.width(),
+        reference.height(),
+        page.width(),
+        page.height(),
+        difference.mean,
+        difference.differing * 100.
+    );
+    match threshold {
+        Some(limit) if difference.differing > limit => Err(format!(
+            "{:.4}% of the pixels differ, more than {:.4}%",
+            difference.differing * 100.,
+            limit * 100.
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
+fn pptx_dump(file: &Path, part: Option<&Path>) -> Result<()> {
+    let deck = pptx::inspect::Deck::load(file)?;
+    match part {
+        Some(part) => {
+            let name = part.to_string_lossy();
+            let text = deck.text(&name)?;
+            print!("{}", pptx::inspect::pretty(text)?);
+        }
+        None => {
+            for name in deck.names() {
+                let size = deck.part(name).map_or(0, <[u8]>::len);
+                let kind = deck.content_type(name)?.unwrap_or_default();
+                println!("{name}  {size} bytes  {kind}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pptx_check(file: &Path, schema: bool) -> Result<()> {
+    let deck = pptx::inspect::Deck::load(file)?;
+    let mut problems = deck.check();
+    if schema {
+        problems.extend(pptx_validate(file)?);
+    }
+    for problem in &problems {
+        println!("{problem}");
+    }
+    if problems.is_empty() {
+        println!("ok");
+        Ok(())
+    } else {
+        Err(format!("{} problem(s)", problems.len()).into())
+    }
+}
+
+/// Validates `file` against the Open XML schema with the .NET tool in
+/// `tools/pptx-validate`. Gives one line for each error.
+fn pptx_validate(file: &Path) -> Result<Vec<String>> {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/pptx-validate");
+    let output = Process::new("dotnet")
+        .args(["run", "--project"])
+        .arg(&project)
+        .args(["--configuration", "Release", "--"])
+        .arg(file)
+        .output()
+        .map_err(|error| format!("cannot run dotnet: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match output.status.code() {
+        Some(0) => Ok(Vec::new()),
+        Some(1) => Ok(stdout
+            .lines()
+            .map(|line| format!("schema: {line}"))
+            .collect()),
+        _ => Err(format!(
+            "pptx-validate failed: {}{}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into()),
+    }
 }
 
 fn scene(

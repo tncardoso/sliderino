@@ -19,6 +19,7 @@ libc = "0.2"
 naga = { version = "29", features = ["glsl-in"] }
 pollster = "0.4"
 rmcp = { version = "3.4.1", default-features = false, features = ["server", "transport-io"] }
+roxmltree = "0.20"
 rustybuzz = "0.20"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

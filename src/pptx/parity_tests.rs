@@ -1,0 +1,81 @@
+//! Exports the debug scenes and checks that each deck is a consistent
+//! package whose shapes match the elements (`parity.rs`).
+
+use std::path::{Path, PathBuf};
+
+use super::inspect::Deck;
+use super::{Options, export, parity};
+use crate::document::Presentation;
+
+/// The scenes to check, from `debug/scenes`.
+const SCENES: &[&str] = &["shapes.json", "pptx/groups.json"];
+
+fn scene_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("debug/scenes")
+        .join(name)
+}
+
+pub(crate) fn load(name: &str) -> Presentation {
+    let mut presentation = Presentation::new();
+    let ops = crate::script::load(&scene_path(name)).unwrap();
+    crate::script::apply(&mut presentation, ops).unwrap();
+    presentation
+}
+
+fn check(name: &str) -> Vec<String> {
+    let presentation = load(name);
+    let export = export(&presentation, &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    let mut problems = deck.check();
+    problems.extend(parity::compare(&presentation, &deck).unwrap());
+    problems
+        .into_iter()
+        .map(|problem| format!("{name}: {problem}"))
+        .collect()
+}
+
+#[test]
+fn every_scene_exports_with_parity() {
+    let problems: Vec<String> = SCENES.iter().flat_map(|name| check(name)).collect();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn an_empty_presentation_is_a_consistent_deck() {
+    let export = export(&Presentation::new(), &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    assert_eq!(deck.check(), Vec::<String>::new());
+    assert_eq!(deck.slides().unwrap(), vec!["ppt/slides/slide1.xml"]);
+}
+
+#[test]
+fn hidden_elements_are_left_out() {
+    let presentation = load("pptx/groups.json");
+    let export = export(&presentation, &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    let slides = deck.summary().unwrap();
+    let names: Vec<String> = slides[0]
+        .shapes
+        .iter()
+        .flat_map(|shape| shape.walk())
+        .map(|shape| shape.name.clone())
+        .collect();
+    assert!(names.contains(&"Rectangle 8".to_string()));
+    assert!(!names.contains(&"Rectangle 9".to_string()));
+}
+
+#[test]
+fn a_moved_child_is_a_difference() {
+    let mut presentation = load("pptx/groups.json");
+    let export = export(&presentation, &Options::default()).unwrap();
+    let deck = Deck::read(&export.bytes).unwrap();
+    let crate::document::ElementKind::Group(group) = &mut presentation.slides[0].elements[0].kind
+    else {
+        panic!("not a group");
+    };
+    group.children[0].frame.x += 1.;
+    let problems = parity::compare(&presentation, &deck).unwrap();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("element 2: frame"), "{problems:?}");
+}

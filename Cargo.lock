@@ -6763,6 +6763,7 @@ dependencies = [
  "naga",
  "pollster 0.4.0",
  "rmcp",
+ "roxmltree 0.20.0",
  "rustybuzz",
  "serde",
  "serde_json",
