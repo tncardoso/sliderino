@@ -1,0 +1,31 @@
+[workspace]
+members = ["cargo:."]
+
+# The release build and the installer. `dist generate` writes
+# .github/workflows/release.yml from this file, so no hand edits go there.
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell"]
+# No Windows target: the GStreamer and GPUI setup is not tested there. No
+# x86_64 Apple target either: there is no runner in the plan for an Intel Mac.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+# The installer writes here, and SLIDERINO_INSTALL_DIR moves it.
+install-path = "~/.local/bin"
+install-updater = true
+# The binary then holds the list of its dependencies, for an audit.
+cargo-auditable = true
+# A pull request plans the release and builds nothing.
+pr-run-mode = "plan"
+# Steps that run in the build job before dist builds anything: the Linux and
+# macOS libraries, and the Git LFS fonts. `[dist.dependencies.apt]` would be
+# the declarative way to ask for the libraries, but it writes an `apt-get
+# install` with no `--yes`, and that one aborts on a runner with no terminal.
+github-build-setup = "../build-setup.yml"
+# Build on Ubuntu 24.04, the same system that `ci.yml` uses. The binary then
+# asks for glibc 2.39 or newer.
+[dist.github-custom-runners]
+x86_64-unknown-linux-gnu = "ubuntu-24.04"

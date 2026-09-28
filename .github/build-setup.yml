@@ -1,0 +1,29 @@
+# Injected into the build job of `release.yml` by `dist generate`, from the
+# `github-build-setup` key of `dist-workspace.toml`. It is a list of steps and
+# not a workflow, so it lives one directory above `workflows/`: GitHub reads
+# every file in that one as a workflow, and this is not one.
+#
+# The libraries are the ones `ci.yml` installs. Without them the release build
+# dies at the link step: GPUI links against xkbcommon and xcb, and the
+# GStreamer crates look for `gstreamer-1.0` with pkg-config.
+- name: Install Linux dependencies
+  if: runner.os == 'Linux'
+  run: |
+    sudo apt-get update
+    sudo apt-get install --yes pkg-config libxcb1-dev libxkbcommon-dev \
+      libxkbcommon-x11-dev libwayland-dev libfontconfig-dev \
+      libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+- name: Install macOS dependencies
+  if: runner.os == 'macOS'
+  run: brew install pkg-config gstreamer
+
+# The fonts in `assets/fonts` are Git LFS files, and the source includes them
+# in the binary. The checkout of `release.yml` does not fetch LFS files, so
+# without this step the build reads text pointers where it expects fonts. The
+# checkout has no credentials, so this works because the repository is public.
+- name: Fetch Git LFS files
+  shell: bash
+  run: |
+    git lfs install --local
+    git lfs pull

@@ -1,0 +1,82 @@
+name: Publish to crates.io
+
+# The release workflow of dist makes the GitHub release. This one runs after
+# it, so a failure here leaves the binaries where they are.
+on:
+  release:
+    types: [published]
+  # A release that reached GitHub but not crates.io runs again from here.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to publish, for example v0.1.0
+        required: true
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  publish:
+    name: cargo publish
+    # A pre-release, such as v0.2.0-rc.1, goes to GitHub only. A run by hand
+    # publishes the tag it is given.
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      # The fonts in `assets/fonts` are Git LFS files, and the package holds
+      # them.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          lfs: true
+
+      # A crate on crates.io is permanent, and a tag can sit on a commit whose
+      # CI failed. So the checks of `ci.yml` for this commit must all be green.
+      # Push the tag to a commit that went through `main`, or a pull request.
+      - name: Check that the CI passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          runs=$(gh api --paginate \
+            "repos/${{ github.repository }}/commits/$sha/check-runs" \
+            --jq '.check_runs[] | select(.name | startswith("check (")) | "\(.name): \(.conclusion)"')
+          echo "$runs"
+          if [ -z "$runs" ]; then
+            echo "no CI check ran for $sha" >&2
+            exit 1
+          fi
+          if echo "$runs" | grep -v ': success$' > /dev/null; then
+            echo "the CI did not pass for $sha" >&2
+            exit 1
+          fi
+
+      # `cargo publish` verifies the tarball by building it, and the binary
+      # has a window. Without these the verification dies at `unable to find
+      # library`. They are the same libraries that ci.yml installs.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libfontconfig-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A tag that says one version and a manifest that says another would put
+      # the wrong number on crates.io.
+      - name: Check that the tag matches the version
+        run: |
+          tag="${{ inputs.tag || github.event.release.tag_name }}"
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "sliderino") | .version')
+          if [ "$tag" != "v$version" ]; then
+            echo "the tag is $tag and Cargo.toml says $version" >&2
+            exit 1
+          fi
+
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
