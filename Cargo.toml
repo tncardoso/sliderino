@@ -1,8 +1,33 @@
 [package]
 name = "sliderino"
 version = "0.1.0"
+description = "Presentation editor with complete programmatic control for agents, through a CLI and an MCP server"
 edition = "2024"
+# GPUI follows the current stable compiler. The release builds with it.
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/tncardoso/sliderino"
+homepage = "https://github.com/tncardoso/sliderino"
+readme = "README.md"
+keywords = ["presentation", "slides", "editor", "mcp", "agent"]
+categories = ["command-line-utilities", "multimedia"]
 default-run = "sliderino"
+# The only binary is `sliderino`; `sliderino-debug` is an example, below.
+autobins = false
+# What goes to crates.io. The debug scenes, the sample deck and the tools stay
+# in the repository.
+include = ["/src", "/assets", "/Cargo.toml", "/README.md", "/LICENSE"]
+
+[[bin]]
+name = "sliderino"
+path = "src/main.rs"
+
+# A tool for contributors, and an example so that `dist` does not put it in the
+# release archives: `dist` ships each `[[bin]]` and does not read
+# `required-features`. Run it with `cargo run --example sliderino-debug`.
+[[example]]
+name = "sliderino-debug"
+path = "src/bin/sliderino-debug.rs"
 
 [dependencies]
 async-channel = "2"
@@ -41,3 +66,8 @@ gpui-kit = { version = "0.6.6", features = ["test-support"] }
 # they make the editor lag. Sliderino itself still builds fast.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The profile that `dist` builds a release with.
+[profile.dist]
+inherits = "release"
+lto = "thin"

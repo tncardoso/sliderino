@@ -3,12 +3,15 @@
 Use `sliderino-debug` to make an image of a slide without the editor UI.
 A scene file gives the changes to make to a new presentation.
 
+The tool is for contributors. It is a cargo example, so it is not in the
+releases. Run it with `cargo run --example sliderino-debug`.
+
 ## Commands
 
 Render a slide on the CPU:
 
 ```sh
-cargo run --bin sliderino-debug -- render --ops debug/scenes/text.json -o out.png
+cargo run --example sliderino-debug -- render --ops debug/scenes/text.json -o out.png
 ```
 
 | Option | Default | Function |
@@ -22,7 +25,7 @@ cargo run --bin sliderino-debug -- render --ops debug/scenes/text.json -o out.pn
 Open the scene in the editor:
 
 ```sh
-cargo run --bin sliderino-debug -- scene --ops debug/scenes/text.json -o shot.png
+cargo run --example sliderino-debug -- scene --ops debug/scenes/text.json -o shot.png
 ```
 
 | Option | Default | Function |
@@ -144,9 +147,9 @@ the rules of the export.
 Example: check a scene in all the steps.
 
 ```sh
-cargo run --bin sliderino-debug -- pptx-roundtrip --ops debug/scenes/text.json -o text.pptx
-cargo run --bin sliderino-debug -- pptx-check --schema text.pptx
-cargo run --bin sliderino-debug -- pptx-compare --ops debug/scenes/text.json -o compare --scale 2
+cargo run --example sliderino-debug -- pptx-roundtrip --ops debug/scenes/text.json -o text.pptx
+cargo run --example sliderino-debug -- pptx-check --schema text.pptx
+cargo run --example sliderino-debug -- pptx-compare --ops debug/scenes/text.json -o compare --scale 2
 ```
 
 The folder `debug/scenes/pptx` has scenes for the export: `groups.json`
