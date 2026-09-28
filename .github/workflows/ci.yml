@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The build, on the two systems the releases are made for. The name of the job
+  # is `check (<os>)`: `publish-crates.yml` looks for it by that name, so a
+  # change here is a change there.
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # The fonts in `assets/fonts` are Git LFS files and the source includes
+      # them in the binary, so a checkout with no LFS does not build.
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      # GPUI links against xkbcommon, xcb and wayland, and the GStreamer crates
+      # find their libraries with pkg-config. The plugins are for the video
+      # tests. Mesa gives a software Vulkan driver (lavapipe) for the shader
+      # tests, and Xvfb gives a display for the window tests.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libfontconfig-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav \
+            mesa-vulkan-drivers xvfb
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install pkg-config gstreamer
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --offline -- -D warnings
+
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum cargo test --offline
+
+      - name: Test (macOS)
+        if: runner.os == 'macOS'
+        run: cargo test --offline
