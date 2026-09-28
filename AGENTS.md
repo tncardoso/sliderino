@@ -24,3 +24,12 @@
     - A change that only touches the build, the tests or the internals needs
       no line
 
+
+## Releasing
+
+A tag starts the release: the CI builds the binaries, makes the GitHub release
+from the changelog, and sends the crate to crates.io. The steps are in
+`docs/releasing.md`. Do not edit `.github/workflows/release.yml`, because
+`dist generate` writes it from `dist-workspace.toml`. `sliderino-debug` is a
+cargo example (`cargo run --example sliderino-debug`), so the release does not
+ship it.
