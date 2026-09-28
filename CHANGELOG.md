@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-28
+
 ### Added
 
 - The Table tool. Click to add a table of 3 × 3 cells, or drag to choose
@@ -185,3 +187,6 @@
   load.
 - The selection rectangle and the outline of each selected element now show
   on the slide.
+
+[Unreleased]: https://github.com/tncardoso/sliderino/compare/v0.1.0...main
+[0.1.0]: https://github.com/tncardoso/sliderino/releases/tag/v0.1.0
