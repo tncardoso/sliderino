@@ -367,7 +367,7 @@ fn pptx_check(file: &Path, schema: bool) -> Result<()> {
     let deck = pptx::inspect::Deck::load(file)?;
     let mut problems = deck.check();
     if schema {
-        problems.extend(pptx_validate(file)?);
+        problems.extend(pptx::schema::validate(file)?);
     }
     for problem in &problems {
         println!("{problem}");
@@ -377,33 +377,6 @@ fn pptx_check(file: &Path, schema: bool) -> Result<()> {
         Ok(())
     } else {
         Err(format!("{} problem(s)", problems.len()).into())
-    }
-}
-
-/// Validates `file` against the Open XML schema with the .NET tool in
-/// `tools/pptx-validate`. Gives one line for each error.
-fn pptx_validate(file: &Path) -> Result<Vec<String>> {
-    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/pptx-validate");
-    let output = Process::new("dotnet")
-        .args(["run", "--project"])
-        .arg(&project)
-        .args(["--configuration", "Release", "--"])
-        .arg(file)
-        .output()
-        .map_err(|error| format!("cannot run dotnet: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    match output.status.code() {
-        Some(0) => Ok(Vec::new()),
-        Some(1) => Ok(stdout
-            .lines()
-            .map(|line| format!("schema: {line}"))
-            .collect()),
-        _ => Err(format!(
-            "pptx-validate failed: {}{}",
-            stdout,
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into()),
     }
 }
 

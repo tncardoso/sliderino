@@ -38,6 +38,8 @@ sliderino info                          # get_basic_info
 sliderino new                           # new_presentation
 sliderino open-file deck.sldr           # open_presentation
 sliderino save deck.sldr                # save_presentation
+sliderino export-pptx -o deck.pptx      # export_pptx
+sliderino export-pptx deck.sldr -o deck.pptx   # export_pptx, without an editor
 sliderino screenshot -o slide.png       # get_screenshot
 sliderino shader-video 4 -o shader.mp4  # render_shader_video
 sliderino apply ops.json --label "Add title"   # apply_operations
@@ -72,6 +74,7 @@ The error data lists the instances.
 | `new_presentation` | Show a new presentation in the editor. |
 | `open_presentation` | Open a `.sldr` file in the editor. |
 | `save_presentation` | Save the presentation to a `.sldr` file. |
+| `export_pptx` | Export the presentation, or a `.sldr` file, to an editable PowerPoint file. |
 | `get_basic_info` | Get the file, the unsaved state, the revision, the slides, the fonts, the images, the videos and the undo state. |
 | `get_selection` | Get the slide, the list of slides, the list of elements and the text that the person selected. |
 | `get_slide` | Get the elements of a slide in paint order. |
@@ -514,6 +517,44 @@ the open presentation has changes that are not saved. Save them with
 
 `get_basic_info` gives `file` (the path, or null) and `unsaved` (true when
 the presentation changed after it was opened or saved).
+
+## Export to PowerPoint
+
+`export_pptx {path, file?}` writes an editable PowerPoint file (`.pptx`).
+
+- Without `file`, the tool exports the presentation in the editor. The
+  export includes the changes that are not saved.
+- With `file`, the client exports that `.sldr` file. No editor is
+  necessary.
+- The tool adds `.pptx` when `path` has no extension. It replaces the file
+  if it exists.
+- A relative path starts at the working folder of the client.
+
+The result gives `file`, `bytes` and `warnings`. Each warning has `slide`,
+`element` (or null) and `message`. A warning tells what PowerPoint shows
+differently or does not show, for example:
+
+- Text that goes past the bottom of its box.
+- Characters that the font does not have.
+- A font that the deck cannot embed, because of its license or because it
+  has CFF outlines.
+- Two faces of one family that use the same PowerPoint style (see below).
+- A turned table. PowerPoint cannot turn a table, so the table becomes a
+  group of shapes.
+- A video or shader fill with an opacity less than 1. PowerPoint plays
+  videos opaque.
+
+A warning does not stop the export.
+
+The deck keeps the position, the size and the rotation of each element.
+Texts keep the line breaks of Sliderino. The deck embeds the fonts.
+PowerPoint has four styles for each family: regular, bold, italic and bold
+italic. A face with a weight of 600 or more uses the bold style. The deck
+embeds the face that the texts use most for each style.
+
+Videos and shaders play in the slide show. A shader becomes a video of its
+`duration`, at 30 frames per second. The export of shaders takes some
+seconds. `docs/pptx-export.md` gives all the rules.
 
 ## Presentations
 

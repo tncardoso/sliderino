@@ -112,6 +112,12 @@ pub enum Event {
         args: Value,
         reply: mpsc::Sender<Result<(crate::shaders::VideoJob, Value), ApiError>>,
     },
+    /// The part of `export_pptx` that reads the document; the connection
+    /// thread writes the deck.
+    ExportJob {
+        args: Value,
+        reply: mpsc::Sender<Result<(crate::document::Presentation, std::path::PathBuf), ApiError>>,
+    },
 }
 
 /// Opens this instance's socket and serves it on the window's workspace.
@@ -238,6 +244,20 @@ fn serve(stream: UnixStream, connection: u64, events: async_channel::Sender<Even
                         .recv()
                         .unwrap_or_else(|_| Err(closed()))
                         .and_then(|(job, value)| tools::shader_video_output(&job, value))
+                } else if tool == "export_pptx" {
+                    // Writing the deck takes long with shaders: only
+                    // copying the document happens on the UI thread.
+                    let (reply, result) = mpsc::channel();
+                    if events
+                        .send_blocking(Event::ExportJob { args, reply })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    result
+                        .recv()
+                        .unwrap_or_else(|_| Err(closed()))
+                        .and_then(|(presentation, path)| tools::export_output(&presentation, &path))
                 } else {
                     let (reply, result) = mpsc::channel();
                     if events
@@ -299,7 +319,8 @@ impl Agents {
 }
 
 impl EditorView {
-    /// Runs an instance tool, or the document part of `render_shader_video`.
+    /// Runs an instance tool, or the document part of `render_shader_video`
+    /// or `export_pptx`.
     pub fn on_api_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Connected { .. } | Event::Closed { .. } => {}
@@ -310,6 +331,10 @@ impl EditorView {
             Event::ShaderVideoJob { args, reply } => {
                 let args = if args.is_null() { json!({}) } else { args };
                 reply.send(tools::shader_video_job(self, args)).ok();
+            }
+            Event::ExportJob { args, reply } => {
+                let args = if args.is_null() { json!({}) } else { args };
+                reply.send(tools::export_job(self, args)).ok();
             }
         }
         cx.notify();

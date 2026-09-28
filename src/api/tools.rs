@@ -153,6 +153,21 @@ pub fn specs() -> Vec<ToolSpec> {
             read_only: false,
         },
         ToolSpec {
+            name: "export_pptx",
+            description: "Export the presentation to an editable PowerPoint file (.pptx). Texts keep their line breaks, fonts are embedded, and videos and shaders play (a shader becomes a video of its duration). Without file, export the presentation open in the editor, with its unsaved changes. With file, export that .sldr file without an editor. Returns warnings: what PowerPoint shows differently or leaves out, such as text that overflows its box, missing glyphs, fonts that cannot be embedded and turned tables, which become groups of shapes. Exporting shaders takes some seconds.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The .pptx file to write; an existing file is replaced. A relative path starts at the working folder of the client."},
+                    "file": {"type": "string", "description": "A .sldr file to export instead of the open presentation. A relative path starts at the working folder of the client."}
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            target: Target::Instance,
+            read_only: true,
+        },
+        ToolSpec {
             name: "get_basic_info",
             description: "Overview of the open presentation: its file and whether it has unsaved changes, revision, slide size, slides with their element counts, embedded fonts and images, the slide shown in the editor and the undo state. Call it first.",
             schema: empty_schema(),
@@ -377,6 +392,10 @@ pub fn handle(host: &mut dyn Host, tool: &str, args: Value) -> Result<ToolOutput
         "render_shader_video" => {
             let (job, value) = shader_video_job(host, args)?;
             shader_video_output(&job, value)
+        }
+        "export_pptx" => {
+            let (presentation, path) = export_job(host, args)?;
+            export_output(&presentation, &path)
         }
         "list_fonts" => list_fonts(host, parse(args)?),
         "apply_operations" => apply_operations(host, parse(args)?),
@@ -854,6 +873,77 @@ pub fn shader_video_output(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportArgs {
+    path: PathBuf,
+    file: Option<PathBuf>,
+}
+
+/// `path` with the `.pptx` extension added when it has none.
+fn pptx_path(path: &Path) -> PathBuf {
+    if path.extension().is_some() {
+        path.to_path_buf()
+    } else {
+        path.with_extension("pptx")
+    }
+}
+
+/// The first half of `export_pptx`, which reads the document: a copy of
+/// the presentation and the file to write. The editor runs it on its UI
+/// thread, then [`export_output`] off it.
+pub fn export_job(host: &dyn Host, args: Value) -> Result<(Presentation, PathBuf), ApiError> {
+    let args: ExportArgs = parse(args)?;
+    if args.file.is_some() {
+        return Err(ApiError::invalid_args(
+            "file is read by the client: call export_pptx through the CLI or MCP",
+        ));
+    }
+    Ok((host.presentation().clone(), pptx_path(&args.path)))
+}
+
+/// The second half of `export_pptx`: writes the deck. Slow when the
+/// presentation has shaders.
+pub fn export_output(presentation: &Presentation, path: &Path) -> Result<ToolOutput, ApiError> {
+    let export = crate::pptx::export(presentation, &crate::pptx::Options::default())
+        .map_err(|error| ApiError::new("export_failed", error.to_string()))?;
+    crate::pptx::save(&export, path).map_err(|error| {
+        ApiError::new("io", format!("cannot write {}: {error}", path.display()))
+    })?;
+    let warnings: Vec<Value> = export
+        .warnings
+        .iter()
+        .map(|warning| {
+            json!({
+                "slide": warning.slide,
+                "element": warning.element,
+                "message": warning.message,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "file": path,
+        "revision": presentation.revision(),
+        "bytes": export.bytes.len(),
+        "warnings": warnings,
+    })
+    .into())
+}
+
+/// `export_pptx` with `file`: exports a .sldr file in the client, without
+/// an editor. The paths are absolute.
+pub fn export_file(args: Value) -> Result<ToolOutput, ApiError> {
+    let args: ExportArgs = parse(args)?;
+    let file = args
+        .file
+        .ok_or_else(|| ApiError::invalid_args("export_file needs file"))?;
+    let presentation = crate::file::load(&file)
+        .map_err(|error| ApiError::new("io", format!("cannot open {}: {error}", file.display())))?;
+    let mut output = export_output(&presentation, &pptx_path(&args.path))?;
+    output.value["source"] = json!(file);
+    Ok(output)
+}
+
 fn list_fonts(host: &dyn Host, args: FontsArgs) -> Result<ToolOutput, ApiError> {
     let presentation = host.presentation();
     let embedded: Vec<_> = presentation.fonts.faces().collect();
@@ -1262,6 +1352,62 @@ pub(crate) mod tests {
         let text = add_title(&mut host)["refs"]["$title"].clone();
         let error = call(&mut host, "render_shader_video", json!({"element": text})).unwrap_err();
         assert_eq!(error.code, "invalid_arguments");
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sliderino-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn export_pptx_writes_a_deck_and_reports_overflow() {
+        let mut host = TestHost::default();
+        call(
+            &mut host,
+            "apply_operations",
+            json!({"ops": [{"op": "add_element", "slide": 1, "element": {
+                "id": 1, "frame": {"x": 100, "y": 100, "width": 200, "height": 20},
+                "text": {"content": "Too much text for this box", "sizing": "fixed"}}}]}),
+        )
+        .unwrap();
+        let path = temp_file("deck");
+        let value = call(&mut host, "export_pptx", json!({"path": path})).unwrap();
+        let written = path.with_extension("pptx");
+        assert_eq!(value["file"], json!(written));
+        let deck = crate::pptx::inspect::Deck::load(&written).unwrap();
+        assert_eq!(deck.check(), Vec::<String>::new());
+        let warnings = value["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|warning| warning["element"] == json!(1)
+                && warning["message"].as_str().unwrap().contains("bottom")),
+            "{warnings:?}"
+        );
+        std::fs::remove_file(written).ok();
+    }
+
+    #[test]
+    fn export_pptx_of_a_file_runs_without_an_editor() {
+        let source = temp_file("source.sldr");
+        crate::file::save(&crate::document::tests::with_inter(), &source).unwrap();
+        let path = temp_file("from-file.pptx");
+        let value = export_file(json!({"path": path, "file": source}))
+            .unwrap()
+            .value;
+        assert_eq!(value["source"], json!(source));
+        assert!(crate::pptx::inspect::Deck::load(&path).is_ok());
+
+        // The editor does not read files for agents.
+        let mut host = TestHost::default();
+        let error = call(
+            &mut host,
+            "export_pptx",
+            json!({"path": path, "file": source}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(source).ok();
     }
 
     #[test]

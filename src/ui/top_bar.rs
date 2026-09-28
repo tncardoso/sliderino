@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Sizable as _, TitleBar, h_flex, v_flex};
@@ -187,14 +188,25 @@ fn actions(editor: &EditorView, cx: &Context<EditorView>) -> impl IntoElement {
                 .text_color(theme::text_muted())
                 .child(zoom),
         )
-        .child(
+        .child({
+            let editor = cx.entity().downgrade();
             Button::new("export")
                 .outline()
                 .xsmall()
                 .label("Export")
                 .h(px(28.))
-                .px(px(12.)),
-        )
+                .px(px(12.))
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                    let editor = editor.clone();
+                    menu.item(PopupMenuItem::new("PowerPoint (.pptx)…").on_click(
+                        move |_, window, cx| {
+                            editor
+                                .update(cx, |editor, cx| editor.export_pptx(window, cx))
+                                .ok();
+                        },
+                    ))
+                })
+        })
         .child(
             Button::new("present")
                 .primary()

@@ -173,3 +173,88 @@ fn a_turned_table_is_a_group_of_its_parts() {
     assert_eq!(turned.kind, super::inspect::ShapeKind::Group);
     assert_eq!(turned.name, "Table 5");
 }
+
+/// The scenes compared with LibreOffice, and the largest fraction of their
+/// pixels that may differ: what was measured, with a small margin. The
+/// scenes with videos differ most: LibreOffice draws a video without the
+/// crop, outline, shape and rotation of its picture.
+const VISUAL: &[(&str, f32)] = &[
+    ("shapes.json", 0.0077),
+    ("text.json", 0.0180),
+    ("rotation.json", 0.0096),
+    ("custom-font.json", 0.0077),
+    ("system-font.json", 0.0085),
+    ("images.json", 0.0060),
+    ("tables.json", 0.0116),
+    ("shaders.json", 0.1031),
+    ("pptx/groups.json", 0.0027),
+    ("pptx/media.json", 0.1291),
+];
+
+/// Renders each scene on the CPU and its deck with LibreOffice, and checks
+/// that they differ no more than before. Slow: run it with
+/// `cargo test -- --ignored pptx`.
+#[test]
+#[ignore = "needs LibreOffice; slow"]
+fn pptx_decks_look_like_the_slides_in_libreoffice() {
+    if !super::visual::available() {
+        eprintln!("LibreOffice or pdftoppm is missing: skipping");
+        return;
+    }
+    let videos = crate::videos::tests::plugins_or_skip();
+    let work = std::env::temp_dir().join(format!("sliderino-visual-{}", std::process::id()));
+    let mut failures = Vec::new();
+    for (name, limit) in VISUAL {
+        if !videos && VIDEO_SCENES.contains(name) {
+            continue;
+        }
+        let presentation = load(name);
+        let slide = presentation.slides[0].id;
+        let reference = crate::render::render_slide(&presentation, slide, 1., false).unwrap();
+        let deck = export(&presentation, &Options::default()).unwrap();
+        let folder = work.join(name.replace('/', "-"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("deck.pptx");
+        super::save(&deck, &path).unwrap();
+        let pages = super::visual::render(&path, &folder.join("work"), 1.).unwrap();
+        let difference = super::visual::difference(&reference, &pages[0]);
+        if difference.differing > *limit {
+            difference.image.save_png(folder.join("diff.png")).ok();
+            failures.push(format!(
+                "{name}: {:.4}% of the pixels differ, more than {:.4}% (see {})",
+                difference.differing * 100.,
+                limit * 100.,
+                folder.join("diff.png").display()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    std::fs::remove_dir_all(work).ok();
+}
+
+/// Validates the deck of every scene against the Open XML schema. Slow:
+/// run it with `cargo test -- --ignored pptx`.
+#[test]
+#[ignore = "needs dotnet; slow"]
+fn pptx_decks_follow_the_open_xml_schema() {
+    if !super::schema::available() {
+        eprintln!("dotnet is missing: skipping");
+        return;
+    }
+    let videos = crate::videos::tests::plugins_or_skip();
+    let work = std::env::temp_dir().join(format!("sliderino-schema-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let mut problems = Vec::new();
+    for name in SCENES {
+        if !videos && VIDEO_SCENES.contains(name) {
+            continue;
+        }
+        let deck = export(&load(name), &Options::default()).unwrap();
+        let path = work.join(format!("{}.pptx", name.replace('/', "-")));
+        super::save(&deck, &path).unwrap();
+        let errors = super::schema::validate(&path).unwrap();
+        problems.extend(errors.into_iter().map(|error| format!("{name}: {error}")));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    std::fs::remove_dir_all(work).ok();
+}

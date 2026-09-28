@@ -2091,6 +2091,72 @@ impl EditorView {
     /// Saves the presentation to its file. Without a file, or with
     /// `save_as`, asks for one first. The task gives true when the file is
     /// written; errors show as a notification.
+    /// Asks where to write a PowerPoint file and exports the presentation
+    /// to it, off the UI thread. Tells the author what the deck shows
+    /// differently.
+    pub fn export_pptx(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let directory = self
+            .file
+            .as_deref()
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_default();
+        let suggested = format!("{}.pptx", self.title());
+        let presentation = self.presentation.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(chosen) =
+                cx.update(|_, cx| cx.prompt_for_new_path(&directory, Some(&suggested)))
+            else {
+                return;
+            };
+            let path = match chosen.await {
+                Ok(Ok(Some(path))) if path.extension().is_some() => path,
+                Ok(Ok(Some(path))) => path.with_extension("pptx"),
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    this.update_in(cx, |_, window, cx| {
+                        crate::ui::show_error(format!("Cannot export: {error}"), window, cx);
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let target = path.clone();
+            let written = cx
+                .background_spawn(async move {
+                    let export =
+                        crate::pptx::export(&presentation, &crate::pptx::Options::default())?;
+                    crate::pptx::save(&export, &target)?;
+                    Ok::<_, crate::pptx::ExportError>(export.warnings)
+                })
+                .await;
+            this.update_in(cx, |_, window, cx| match written {
+                Ok(warnings) if warnings.is_empty() => {}
+                Ok(warnings) => {
+                    let mut message = format!(
+                        "Exported {}. PowerPoint shows {} thing(s) differently:",
+                        path.display(),
+                        warnings.len()
+                    );
+                    for warning in warnings.iter().take(5) {
+                        message.push_str(&format!("\n• {warning}"));
+                    }
+                    if warnings.len() > 5 {
+                        message.push_str(&format!("\n• and {} more", warnings.len() - 5));
+                    }
+                    crate::ui::show_warning(message, window, cx);
+                }
+                Err(error) => {
+                    let message = format!("Cannot export {}: {error}", path.display());
+                    crate::ui::show_error(message, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn save(
         &mut self,
         save_as: bool,

@@ -199,7 +199,8 @@ impl Session {
 
     /// Calls any tool. `instance` in `args` picks the instance; for
     /// `get_screenshot` and `render_shader_video`, `path` writes the image
-    /// or the video to a file here instead of returning it. The `add_image`,
+    /// or the video to a file here instead of returning it. `export_pptx`
+    /// with `file` runs here, without an editor. The `add_image`,
     /// `add_video` and `add_font` ops of `apply_operations` read their
     /// `path` here.
     pub fn call(&mut self, tool: &str, mut args: Value) -> Result<ToolOutput, ApiError> {
@@ -228,7 +229,10 @@ impl Session {
             ("render_shader_video", None) => {
                 return Err(ApiError::invalid_args("render_shader_video needs path"));
             }
-            ("save_presentation" | "open_presentation", Some(Value::String(path))) => {
+            (
+                "save_presentation" | "open_presentation" | "export_pptx",
+                Some(Value::String(path)),
+            ) => {
                 // The editor runs in another folder: send the path from here.
                 let base = std::env::current_dir().unwrap_or_default();
                 object.insert("path".into(), json!(base.join(path)));
@@ -244,6 +248,15 @@ impl Session {
             let base = std::env::current_dir().unwrap_or_default();
             crate::api::ops::inline_paths(ops, &base)
                 .map_err(|message| ApiError::new("io", message))?;
+        }
+        if tool == "export_pptx"
+            && let Some(Value::String(file)) = object.get("file")
+        {
+            // A .sldr file exports here, without an editor.
+            let base = std::env::current_dir().unwrap_or_default();
+            let file = base.join(file);
+            object.insert("file".into(), json!(file));
+            return tools::export_file(args);
         }
         if spec.target == Target::Local {
             return self.call_local(tool, args);

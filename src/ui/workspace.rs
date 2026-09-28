@@ -361,6 +361,9 @@ impl Workspace {
                     Event::ShaderVideoJob { reply, .. } => {
                         reply.send(Err(no_presentation())).ok();
                     }
+                    Event::ExportJob { reply, .. } => {
+                        reply.send(Err(no_presentation())).ok();
+                    }
                     Event::Connected { .. } | Event::Closed { .. } => {}
                 },
             },

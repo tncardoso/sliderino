@@ -18,6 +18,7 @@ pub mod xml;
 
 pub mod inspect;
 pub mod parity;
+pub mod schema;
 pub mod visual;
 
 use crate::document::{ElementId, Presentation, SlideId};

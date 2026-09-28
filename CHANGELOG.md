@@ -150,6 +150,16 @@
 - Agents can add shapes and images with `add_element`, `add_image`,
   `set_shape_style` and `set_line_points`. See "Shapes" and "Images" in
   `docs/agent-api.md`.
+- Export to PowerPoint: choose **Export › PowerPoint (.pptx)** in the top
+  bar. The deck keeps the place, size and rotation of every element, and
+  stays editable: texts are text boxes with the same line breaks, tables
+  are tables and groups are groups. The fonts go inside the file. Videos and
+  shaders play in the slide show, and start as they do in Sliderino. When
+  PowerPoint shows something differently, such as text that overflows or a
+  turned table, a message tells what.
+- Agents export with the `export_pptx` tool, and the CLI with
+  `sliderino export-pptx -o deck.pptx`. Give a `.sldr` file to export it
+  without opening the editor.
 
 ### Changed
 

@@ -83,6 +83,15 @@ enum Command {
         #[arg(long)]
         time: Option<f32>,
     },
+    /// Export to an editable PowerPoint file (export_pptx). Without FILE,
+    /// exports the presentation open in the editor.
+    ExportPptx {
+        /// A .sldr file to export without an editor.
+        file: Option<PathBuf>,
+        /// PPTX file to write.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Render the shader fill of an element to an MP4 file
     /// (render_shader_video).
     ShaderVideo {
@@ -189,6 +198,13 @@ fn main() -> ExitCode {
                 args["time"] = json!(time);
             }
             Ok(("get_screenshot".into(), args))
+        }
+        Command::ExportPptx { file, output } => {
+            let mut args = json!({"path": output});
+            if let Some(file) = file {
+                args["file"] = json!(file);
+            }
+            Ok(("export_pptx".into(), args))
         }
         Command::ShaderVideo {
             element,
@@ -318,5 +334,12 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Save { path: Some(_) })));
 
         assert!(Cli::try_parse_from(["sliderino", "--new", "deck.sldr"]).is_err());
+
+        let cli = Cli::try_parse_from(["sliderino", "export-pptx", "deck.sldr", "-o", "deck.pptx"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::ExportPptx { file: Some(_), .. })
+        ));
     }
 }

@@ -122,3 +122,42 @@ not compile.
 The `scene` command waits until the editor decodes all images and video
 frames and renders all shaders before it captures the slide. The capture
 shows the first frame of videos and shaders at time 0.
+
+## PPTX export
+
+These commands check each step of the PPTX export. See `pptx-export.md` for
+the rules of the export.
+
+| Command | Function |
+| --- | --- |
+| `export-pptx --ops FILE -o OUT.pptx [--guides]` | Export a scene to PPTX without the editor. `--guides` adds thin blue lines on the text frames and on the baselines of the Sliderino layout. Use it to see where a viewer puts the text. |
+| `pptx-dump FILE [--part PART]` | Without `--part`, list the parts of the file with their size and content type. With `--part`, show one part as indented XML, for example `ppt/slides/slide1.xml`. |
+| `pptx-check FILE [--schema]` | Check the package: the content types, the relationships, the XML and the shape ids. `--schema` also validates the XML against the Open XML schema. |
+| `pptx-roundtrip --ops FILE [-o OUT.pptx]` | Export a scene, read the deck, and compare each shape with its element. The command fails when they are different. |
+| `pptx-render FILE -o DIR [--scale N]` | Render each slide of a PPTX file to PNG with LibreOffice. |
+| `pptx-compare --ops FILE -o DIR [--slide ID] [--scale N] [--threshold F]` | Render a slide on the CPU and its deck with LibreOffice. Write `reference.png`, `pptx.png`, `diff.png` (the different pixels in red) and `deck.pptx`. Show the fraction of different pixels and where the ink of each element moves. With `--threshold`, fail when more than this fraction of the pixels is different. |
+
+`pptx-render` and `pptx-compare` need LibreOffice (`soffice`) and
+`pdftoppm`. `--schema` needs `dotnet`. The first run builds the tool in
+`tools/pptx-validate` and gets the Open XML SDK from NuGet.
+
+Example: check a scene in all the steps.
+
+```sh
+cargo run --bin sliderino-debug -- pptx-roundtrip --ops debug/scenes/text.json -o text.pptx
+cargo run --bin sliderino-debug -- pptx-check --schema text.pptx
+cargo run --bin sliderino-debug -- pptx-compare --ops debug/scenes/text.json -o compare --scale 2
+```
+
+The folder `debug/scenes/pptx` has scenes for the export: `groups.json`
+(groups in groups, turned groups and hidden elements) and `media.json`
+(video fills with each fit and start, and a shader).
+
+The tests check the parity of the export:
+
+- `cargo test pptx` exports the debug scenes and compares each deck with
+  its presentation. It needs no other programs.
+- `cargo test -- --ignored pptx` also compares each deck with LibreOffice,
+  pixel by pixel, and validates it against the Open XML schema. Each scene
+  has a limit of different pixels. The test fails when a scene becomes
+  worse.
