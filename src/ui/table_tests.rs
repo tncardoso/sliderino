@@ -438,10 +438,10 @@ fn copied_cells_paste_with_their_style_and_tsv_pastes_a_new_table(cx: &mut TestA
         editor.set_fill_type(FillType::Solid)
     });
     with_window(cx, handle, |window, cx| {
-        key(window, "ctrl-c", true, cx);
+        key(window, "secondary-c", true, cx);
         key(window, "down", true, cx);
         key(window, "right", true, cx);
-        key(window, "ctrl-v", true, cx);
+        key(window, "secondary-v", true, cx);
     });
     let table = table_of(cx, handle, id);
     assert_eq!(table.rows[1][1].content, "a");
@@ -451,7 +451,7 @@ fn copied_cells_paste_with_their_style_and_tsv_pastes_a_new_table(cx: &mut TestA
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("x\ty\n1\t2".into()));
         key(window, "escape", true, cx);
         key(window, "escape", true, cx);
-        key(window, "ctrl-v", true, cx);
+        key(window, "secondary-v", true, cx);
     });
     let tables = read(cx, handle, |editor| editor.current_slide().elements.len());
     assert_eq!(tables, 2);

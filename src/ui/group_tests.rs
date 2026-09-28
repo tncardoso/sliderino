@@ -127,7 +127,7 @@ fn a_click_on_a_child_selects_its_group_and_a_double_click_enters(cx: &mut TestA
 fn ctrl_click_selects_the_leaf_and_shift_click_adds(cx: &mut TestAppContext) {
     let s = scene(cx);
     let second = inside(cx, s.handle, s.second);
-    click(cx, s.handle, second, 1, Modifiers::control());
+    click(cx, s.handle, second, 1, Modifiers::secondary_key());
     assert_eq!(selection(cx, s.handle), [s.second]);
     let other = inside(cx, s.handle, s.other);
     click(cx, s.handle, other, 1, Modifiers::shift());
@@ -268,7 +268,7 @@ fn a_marquee_selects_what_it_touches_at_the_top_level(cx: &mut TestAppContext) {
             MouseButton::Left,
             from,
             to,
-            Modifiers::control(),
+            Modifiers::secondary_key(),
             cx,
         )
     });

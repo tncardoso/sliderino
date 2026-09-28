@@ -80,15 +80,15 @@ fn ctrl_and_shift_clicks_select_several_slides(cx: &mut TestAppContext) {
     let handle = deck(cx, 5);
     click_thumb(cx, handle, 1, Modifiers::default());
     assert_eq!(selected(cx, handle), (vec![2], 2));
-    click_thumb(cx, handle, 3, Modifiers::control());
+    click_thumb(cx, handle, 3, Modifiers::secondary_key());
     assert_eq!(selected(cx, handle), (vec![2, 4], 4));
     // Shift selects from the last Ctrl click.
     click_thumb(cx, handle, 4, Modifiers::shift());
     assert_eq!(selected(cx, handle), (vec![4, 5], 5));
-    click_thumb(cx, handle, 0, Modifiers::control());
+    click_thumb(cx, handle, 0, Modifiers::secondary_key());
     assert_eq!(selected(cx, handle), (vec![1, 4, 5], 1));
     // Ctrl removes a slide; the canvas shows another selected one.
-    click_thumb(cx, handle, 0, Modifiers::control());
+    click_thumb(cx, handle, 0, Modifiers::secondary_key());
     assert_eq!(selected(cx, handle).0, [4, 5]);
     // A plain click keeps only one.
     click_thumb(cx, handle, 2, Modifiers::default());
@@ -101,7 +101,7 @@ fn a_right_click_outside_the_selection_selects_only_that_slide(cx: &mut TestAppC
     // test; the handler of the thumbnail calls this method.
     let handle = deck(cx, 3);
     click_thumb(cx, handle, 0, Modifiers::default());
-    click_thumb(cx, handle, 1, Modifiers::control());
+    click_thumb(cx, handle, 1, Modifiers::secondary_key());
     // Inside the selection: the menu acts on both.
     with_editor(cx, handle, |editor, _| editor.right_click_slide(SlideId(1)));
     assert_eq!(selected(cx, handle).0, [1, 2]);
@@ -118,7 +118,7 @@ fn dragging_thumbnails_moves_the_selected_slides_together(cx: &mut TestAppContex
     assert_eq!(selected(cx, handle), (vec![1], 1));
 
     click_thumb(cx, handle, 0, Modifiers::default());
-    click_thumb(cx, handle, 3, Modifiers::control());
+    click_thumb(cx, handle, 3, Modifiers::secondary_key());
     // Slides 2 and 4 before slide 5.
     drag_thumb(cx, handle, 3, 4, true);
     assert_eq!(order(cx, handle), [3, 1, 2, 4, 5]);
@@ -133,7 +133,7 @@ fn dragging_thumbnails_moves_the_selected_slides_together(cx: &mut TestAppContex
 fn delete_removes_the_selected_slides_and_undo_restores_them(cx: &mut TestAppContext) {
     let handle = deck(cx, 4);
     click_thumb(cx, handle, 1, Modifiers::default());
-    click_thumb(cx, handle, 2, Modifiers::control());
+    click_thumb(cx, handle, 2, Modifiers::secondary_key());
     with_editor(cx, handle, |editor, _| editor.delete_slides());
     assert_eq!(order(cx, handle), [1, 4]);
     // The slide that takes the place of the first deleted one shows.

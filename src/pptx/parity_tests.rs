@@ -10,6 +10,9 @@ use crate::document::Presentation;
 /// Scenes with videos, checked when the GStreamer plugins are installed.
 const VIDEO_SCENES: &[&str] = &["pptx/media.json"];
 
+/// Scenes that use an installed font, checked when the system has it.
+const SYSTEM_FONT_SCENES: &[(&str, &str)] = &[("system-font.json", "Droid Serif")];
+
 /// The scenes to check, from `debug/scenes`.
 const SCENES: &[&str] = &[
     "shapes.json",
@@ -37,6 +40,21 @@ pub(crate) fn load(name: &str) -> Presentation {
     presentation
 }
 
+/// Whether the system has what `name` needs: the GStreamer plugins when
+/// `videos`, and the installed fonts of the scene. Prints why not.
+fn available(name: &str, videos: bool) -> bool {
+    if !videos && VIDEO_SCENES.contains(&name) {
+        return false;
+    }
+    match SYSTEM_FONT_SCENES.iter().find(|(scene, _)| *scene == name) {
+        Some((_, family)) if crate::fonts::catalog().family(family).is_none() => {
+            eprintln!("font {family} is not installed: skipping {name}");
+            false
+        }
+        _ => true,
+    }
+}
+
 fn check(name: &str) -> Vec<String> {
     let presentation = load(name);
     let export = export(&presentation, &Options::default()).unwrap();
@@ -54,7 +72,7 @@ fn every_scene_exports_with_parity() {
     let videos = crate::videos::tests::plugins_or_skip();
     let problems: Vec<String> = SCENES
         .iter()
-        .filter(|name| videos || !VIDEO_SCENES.contains(name))
+        .filter(|name| available(name, videos))
         .flat_map(|name| check(name))
         .collect();
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -205,7 +223,7 @@ fn pptx_decks_look_like_the_slides_in_libreoffice() {
     let work = std::env::temp_dir().join(format!("sliderino-visual-{}", std::process::id()));
     let mut failures = Vec::new();
     for (name, limit) in VISUAL {
-        if !videos && VIDEO_SCENES.contains(name) {
+        if !available(name, videos) {
             continue;
         }
         let presentation = load(name);
@@ -246,7 +264,7 @@ fn pptx_decks_follow_the_open_xml_schema() {
     std::fs::create_dir_all(&work).unwrap();
     let mut problems = Vec::new();
     for name in SCENES {
-        if !videos && VIDEO_SCENES.contains(name) {
+        if !available(name, videos) {
             continue;
         }
         let deck = export(&load(name), &Options::default()).unwrap();

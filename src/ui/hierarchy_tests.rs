@@ -90,7 +90,7 @@ fn rows_list_layers_topmost_first_and_select_them(cx: &mut TestAppContext) {
 
     click_row(cx, &s, s.first, Modifiers::default());
     assert_eq!(selection(cx, s.handle), [s.first]);
-    click_row(cx, &s, s.other, Modifiers::control());
+    click_row(cx, &s, s.other, Modifiers::secondary_key());
     assert_eq!(selection(cx, s.handle), [s.first, s.other]);
     click_row(cx, &s, s.first, Modifiers::shift());
     assert_eq!(selection(cx, s.handle), order);

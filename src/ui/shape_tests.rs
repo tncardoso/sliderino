@@ -163,7 +163,7 @@ fn shapes_move_and_the_move_undoes(cx: &mut TestAppContext) {
         "{moved:?}"
     );
     with_window(cx, handle, |window, cx| {
-        key(window, "secondary-z", true, cx);
+        key(window, "ctrl-z", true, cx);
     });
     assert_eq!(element_frame(cx, handle, id), frame(100., 100., 200., 200.));
 }
@@ -587,7 +587,9 @@ fn a_pasted_image_is_inserted(cx: &mut TestAppContext) {
             ),
         ))
     });
-    with_window(cx, handle, |window, cx| key(window, "ctrl-v", true, cx));
+    with_window(cx, handle, |window, cx| {
+        key(window, "secondary-v", true, cx)
+    });
     let element = only_element(cx, handle);
     assert!(matches!(element.kind.fill(), Some(Fill::Image(_))));
 }
