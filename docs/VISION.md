@@ -6,7 +6,7 @@ This document defines the intended product for contributors and future implement
 
 ## Compose slides with a few primitives
 
-Sliderino provides a what-you-see-is-what-you-get (WYSIWYG) editor inspired by Figma's direct manipulation and small set of composable primitives. Authors build slides from text, images, basic shapes, and groups. They position, resize, align, and stack elements, then apply simple styling.
+Sliderino provides a what-you-see-is-what-you-get (WYSIWYG) editor inspired by design tools' direct manipulation and small set of composable primitives. Authors build slides from text, images, basic shapes, and groups. They position, resize, align, and stack elements, then apply simple styling.
 
 Sensible defaults help authors produce readable slides without navigating a large collection of specialized tools. The editor remains focused on presentations.
 

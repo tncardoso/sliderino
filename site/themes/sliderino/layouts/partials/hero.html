@@ -1,0 +1,17 @@
+{{ $hero := .Params.hero }}
+<section class="hero container">
+  <div class="hero__text">
+    <p class="eyebrow eyebrow--dot">{{ $hero.eyebrow }}</p>
+    <h1 class="hero__headline">{{ delimit $hero.headline "<br>" | safeHTML }}</h1>
+  </div>
+  <div class="hero__aside">
+    <p class="hero__subhead">{{ $hero.subhead }}</p>
+    <div class="cta-row">
+      <a class="btn btn--dark" href="{{ partial "link" $hero.cta_primary_href }}">
+        {{ $hero.cta_primary_label }}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </a>
+      <a class="btn btn--outline" href="{{ partial "link" $hero.cta_secondary_href }}">{{ $hero.cta_secondary_label }}</a>
+    </div>
+  </div>
+</section>

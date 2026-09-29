@@ -1,0 +1,26 @@
+{{ $f := .Params.features }}
+<section id="agents" class="features container">
+  <div class="section-head">
+    <p class="eyebrow">{{ $f.eyebrow }}</p>
+    <h2 class="section-title">{{ delimit $f.title "<br>" | safeHTML }}</h2>
+  </div>
+  <div class="features__split">
+    <figure class="features__shot">
+      <div class="window window--soft">
+        {{ partial "picture.html" (dict "src" $f.image "alt" $f.alt "sizes" "(min-width: 1440px) 760px, 92vw") }}
+      </div>
+      <figcaption class="caption">{{ $f.caption }}</figcaption>
+    </figure>
+    <ol class="feature-list">
+      {{ range $i, $item := hugo.Data.features }}
+        <li class="feature-list__item">
+          <span class="feature-list__number">{{ printf "%02d" (add $i 1) }}</span>
+          <div>
+            <h3 class="feature-list__title">{{ $item.title }}</h3>
+            <p class="feature-list__description">{{ $item.description }}</p>
+          </div>
+        </li>
+      {{ end }}
+    </ol>
+  </div>
+</section>

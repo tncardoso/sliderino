@@ -1,0 +1,151 @@
+/*
+ * Sliderino site styling for the book.
+ *
+ * book.toml loads this file through `additional-css`, so it comes after the
+ * variables.css, general.css and chrome.css of mdbook and can override them.
+ * It makes /docs/ read as the same site as the Hugo landing page: the same
+ * palette, the same type, and room at the top for the shared nav bar.
+ */
+
+/* Palette -------------------------------------------------------------- */
+
+/*
+ * `html:not(.js)` is matched with `.light`, so the render without JavaScript
+ * (which never gets a theme class) also gets these values.
+ */
+.light,
+html:not(.js) {
+  --bg: #ffffff;
+  --fg: #111111;
+
+  --sidebar-bg: #f4f4f2;
+  --sidebar-fg: #444444;
+  --sidebar-non-existant: #a8a8a8;
+  --sidebar-active: #1f4bff;
+  --sidebar-spacer: #e2e2e2;
+  --sidebar-header-border-color: #e2e2e2;
+
+  --scrollbar: #a8a8a8;
+
+  --icons: #6b6b6b;
+  --icons-hover: #111111;
+
+  --links: #1f4bff;
+  --inline-code-color: #111111;
+
+  --theme-popup-bg: #ffffff;
+  --theme-popup-border: #dadada;
+  --theme-hover: #f4f4f2;
+
+  --quote-bg: #f4f4f2;
+  --quote-border: #e2e2e2;
+
+  --table-border-color: #e2e2e2;
+  --table-header-bg: #f4f4f2;
+  --table-alternate-bg: #fafafa;
+
+  --searchbar-border-color: #dadada;
+  --searchbar-bg: #ffffff;
+  --searchbar-fg: #111111;
+  --searchbar-shadow-color: rgba(17, 17, 17, 0.15);
+  --searchresults-header-fg: #6b6b6b;
+  --searchresults-border-color: #e2e2e2;
+  --searchresults-li-bg: #f4f4f2;
+  --search-mark-bg: #d6deff;
+
+  --overlay-bg: rgba(17, 17, 17, 0.25);
+  --footnote-highlight: #1f4bff;
+}
+
+/* Type ----------------------------------------------------------------- */
+
+:root {
+  --mono-font: "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body {
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #111111;
+}
+
+.content h1 {
+  letter-spacing: -0.035em;
+}
+
+/* The same corner radius as the code blocks of the landing page. */
+.content pre {
+  border-radius: 10px;
+}
+
+/* Room for the nav ----------------------------------------------------- */
+
+/*
+ * The nav is fixed here, not sticky: the sidebar of mdbook is position: fixed
+ * and would slide under a sticky bar. Everything that is anchored to the top
+ * of the viewport moves down by the same amount.
+ *
+ * --nav-height comes from nav.css. That file is the only source of the value,
+ * and the value changes with the breakpoint. Do not declare it here.
+ */
+.nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+#mdbook-body-container {
+  padding-top: var(--nav-height);
+}
+
+.sidebar {
+  top: var(--nav-height);
+}
+
+/* chrome.css sets `top: 0 !important` on the sticky menu bar. */
+#mdbook-menu-bar.sticky,
+#mdbook-menu-bar-hover-placeholder:hover + #mdbook-menu-bar,
+#mdbook-menu-bar:hover,
+html.sidebar-visible #mdbook-menu-bar {
+  top: var(--nav-height) !important;
+}
+
+/* Remove chrome that repeats the site ---------------------------------- */
+
+/*
+ * The book is light only, as the site is, so the theme picker has nothing to
+ * give. The book title of the menu bar goes, because it would be directly
+ * under the "Sliderino" wordmark of the nav.
+ */
+#mdbook-theme-toggle,
+#mdbook-theme-list {
+  display: none;
+}
+
+.menu-title {
+  visibility: hidden;
+}
+
+/* Print ---------------------------------------------------------------- */
+
+/*
+ * print.html uses this same template. Without this rule, the nav would keep
+ * space at the top of the printed book.
+ */
+@media print {
+  .nav {
+    display: none;
+  }
+
+  #mdbook-body-container {
+    padding-top: 0;
+  }
+}

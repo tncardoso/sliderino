@@ -1,0 +1,24 @@
+{{ $description := .Description | default .Site.Params.description }}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ if .IsHome }}{{ .Site.Title }} — {{ .Site.Params.tagline }}{{ else }}{{ .Title }} — {{ .Site.Title }}{{ end }}</title>
+<meta name="description" content="{{ $description }}">
+
+<meta property="og:title" content="{{ .Site.Title }}">
+<meta property="og:description" content="{{ $description }}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ .Permalink }}">
+{{ with resources.Get "editor-kpi.png" }}
+  {{ $og := .Fill "1200x630 webp q85" }}
+  <meta property="og:image" content="{{ $og.Permalink }}">
+{{ end }}
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" href="{{ "images/logo.svg" | relURL }}" type="image/svg+xml">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..800&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="{{ "css/nav.css" | relURL }}">
+<link rel="stylesheet" href="{{ "css/sliderino.css" | relURL }}">

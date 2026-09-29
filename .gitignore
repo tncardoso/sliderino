@@ -1,3 +1,7 @@
 /target
 TODO.md
 *.sldr
+/site/public/
+/site/.hugo_build.lock
+/site/resources/
+/site/static/docs

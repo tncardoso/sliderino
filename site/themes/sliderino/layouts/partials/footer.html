@@ -1,0 +1,15 @@
+{{ $footer := .Params.footer }}
+<footer class="site-footer">
+  <div class="container site-footer__inner">
+    <div class="site-footer__brand">
+      <a class="site-footer__logo" href="{{ "/" | relURL }}">{{ partial "logo.html" . }}Sliderino</a>
+      <span class="site-footer__tagline">{{ $footer.tagline }}</span>
+    </div>
+    <nav class="site-footer__links">
+      {{ range $footer.links }}
+        {{ $isExternal := strings.HasPrefix .href "http" }}
+        <a href="{{ partial "link" .href }}" {{ if $isExternal }}target="_blank" rel="noopener"{{ end }}>{{ .label }}</a>
+      {{ end }}
+    </nav>
+  </div>
+</footer>

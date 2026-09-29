@@ -1,0 +1,15 @@
+{{- /*
+  Starts a recording on its first click and gives it the native controls.
+  Before the click the page loads only the posters.
+*/ -}}
+<script>
+  document.querySelectorAll("[data-clip]").forEach(function (frame) {
+    frame.addEventListener("click", function () {
+      if (frame.classList.contains("is-playing")) return;
+      var video = frame.querySelector("video");
+      frame.classList.add("is-playing");
+      video.controls = true;
+      video.play();
+    });
+  });
+</script>

@@ -1,0 +1,6 @@
+name = "Sliderino"
+license = "MIT"
+licenselink = "https://github.com/tncardoso/sliderino/blob/main/LICENSE"
+description = "The landing page theme for Sliderino, a presentation editor for people and agents."
+homepage = "https://github.com/tncardoso/sliderino"
+min_version = "0.164.0"

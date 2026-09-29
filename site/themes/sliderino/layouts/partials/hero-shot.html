@@ -1,0 +1,10 @@
+{{ $shot := .Params.hero_shot }}
+<section class="hero-shot container">
+  <div class="window">
+    {{ partial "picture.html" (dict "src" $shot.image "alt" $shot.alt "sizes" "(min-width: 1440px) 1248px, 92vw" "eager" true) }}
+  </div>
+  <div class="caption-row">
+    <p class="caption">{{ $shot.caption }}</p>
+    <p class="caption">{{ $shot.note }}</p>
+  </div>
+</section>

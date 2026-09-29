@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Sliderino website at <https://sliderino.embornal.com>, with the
+  documentation at <https://sliderino.embornal.com/docs/>.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

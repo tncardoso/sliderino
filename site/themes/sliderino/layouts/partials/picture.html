@@ -1,0 +1,19 @@
+{{- /*
+  One screenshot from site/assets/, as a WebP image with two widths.
+
+  Takes a dict: "src" (asset name), "alt", "sizes" (the CSS sizes hint) and,
+  when true, "eager" for an image above the fold.
+*/ -}}
+{{- with resources.Get .src -}}
+  {{- $large := .Resize (printf "%dx webp q82" .Width) -}}
+  {{- $small := .Resize "800x webp q80" -}}
+  <img
+    src="{{ $large.RelPermalink }}"
+    srcset="{{ $small.RelPermalink }} 800w, {{ $large.RelPermalink }} {{ $large.Width }}w"
+    sizes="{{ $.sizes }}"
+    width="{{ $large.Width }}"
+    height="{{ $large.Height }}"
+    alt="{{ $.alt }}"
+    {{ if $.eager }}fetchpriority="high"{{ else }}loading="lazy"{{ end }}
+    decoding="async">
+{{- end -}}

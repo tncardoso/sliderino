@@ -1,0 +1,15 @@
+# The numbered list of the "One editor, two authors" section.
+- title: "Live edits, one undo history"
+  description: "Agent changes show at once. Undo reverses the last step, from a person or an agent."
+
+- title: "Overflow you can see and read"
+  description: "Text never shrinks by itself. The editor and get_diagnostics both report overflow."
+
+- title: "Tables, videos and shaders"
+  description: "A small set of primitives: text, shapes, images, groups, tables and media fills."
+
+- title: "One file that you own"
+  description: "A .sldr file holds the slides with their fonts, images and videos. No server."
+
+- title: "Editable pptx export"
+  description: "Texts stay text, fonts are embedded, and shaders become videos that play."

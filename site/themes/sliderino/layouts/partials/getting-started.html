@@ -1,0 +1,42 @@
+{{ $gs := .Params.getting_started }}
+<section id="getting-started" class="getting-started">
+  <div class="container getting-started__inner">
+    <div class="getting-started__intro">
+      <p class="eyebrow">{{ $gs.eyebrow }}</p>
+      <h2 class="getting-started__title">{{ $gs.title }}</h2>
+      <p class="getting-started__paragraph">{{ $gs.paragraph }}</p>
+      <dl class="facts">
+        {{ range $gs.facts }}
+          <div class="facts__row">
+            <dt>{{ .label }}</dt>
+            <dd>{{ .value }}</dd>
+          </div>
+        {{ end }}
+      </dl>
+    </div>
+    <ol class="steps">
+      {{ range $i, $step := hugo.Data.steps }}
+        <li class="step">
+          <span class="step__number{{ if $step.accent }} step__number--accent{{ end }}">{{ add $i 1 }}</span>
+          <div class="step__body">
+            <h3 class="step__title">{{ $step.title }}</h3>
+            {{ range $b := $step.blocks }}
+              {{ with $b.text }}
+                <p class="step__text{{ if $b.note }} step__text--note{{ end }}{{ if $b.strong }} step__text--strong{{ end }}">{{ . }}</p>
+              {{ end }}
+              {{ with $b.code }}
+                <pre class="code"><code>{{ . }}</code></pre>
+              {{ end }}
+              {{ with $b.prompt }}
+                <div class="prompt">
+                  <p class="prompt__label">Then ask</p>
+                  <p class="prompt__text">{{ . }}</p>
+                </div>
+              {{ end }}
+            {{ end }}
+          </div>
+        </li>
+      {{ end }}
+    </ol>
+  </div>
+</section>

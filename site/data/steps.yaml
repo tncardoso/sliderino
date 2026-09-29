@@ -1,0 +1,46 @@
+# The four steps of the "Getting started" section. docs/getting-started.md
+# gives the same steps in full; keep the two in agreement.
+#
+# Each block is one of:
+#   text    a paragraph (note: true makes it the small secondary style)
+#   code    a dark code block, shown as written
+#   prompt  a quoted prompt for an agent, under a "Then ask" label
+- title: "Install Sliderino"
+  blocks:
+    - text: "Run the installer. It puts sliderino in ~/.local/bin."
+    - code: |-
+        curl --proto '=https' --tlsv1.2 -LsSf \
+          https://github.com/tncardoso/sliderino/releases/latest/download/sliderino-installer.sh | sh
+    - text: "Then install GStreamer, which reads and plays videos:"
+      note: true
+    - code: |-
+        # Debian, Ubuntu
+        sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+          gstreamer1.0-plugins-bad gstreamer1.0-libav
+
+        # macOS
+        brew install gstreamer
+
+- title: "Open the editor"
+  blocks:
+    - text: "The Home screen opens. Press Ctrl+N for a new presentation or Ctrl+O to open a .sldr file."
+    - code: |-
+        sliderino                 # the Home screen
+        sliderino deck.sldr       # open a file
+
+- title: "Connect your agent"
+  accent: true
+  blocks:
+    - text: "Add the MCP server to your client. The editor shows each connected client at the top of the window. For Claude Code:"
+    - code: "claude mcp add sliderino -- sliderino mcp"
+    - prompt: "Use the Sliderino MCP and make a presentation about Sliderino tools"
+
+- title: "Or script it from the shell"
+  blocks:
+    - text: "The CLI gives the same tools as MCP and writes JSON to stdout."
+    - code: |-
+        sliderino info                                # slides, fonts, undo state
+        sliderino apply ops.json --label "Add KPIs"   # one undo step
+        sliderino screenshot -o slide.png             # render a slide to PNG
+        sliderino export-pptx deck.sldr -o deck.pptx  # editable PowerPoint
+        sliderino tools                               # list every tool

@@ -1,0 +1,21 @@
+{{ $v := .Params.videos }}
+{{ $clips := hugo.Data.videos }}
+<section id="features" class="videos">
+  <div class="container">
+    <div class="section-head section-head--split">
+      <div class="section-head__title">
+        <p class="eyebrow eyebrow--on-dark">{{ $v.eyebrow }}</p>
+        <h2 class="section-title section-title--on-dark">{{ delimit $v.title "<br>" | safeHTML }}</h2>
+      </div>
+      <p class="section-paragraph section-paragraph--on-dark">{{ $v.paragraph }}</p>
+    </div>
+    {{ with index $clips 0 }}
+      {{ partial "clip.html" (dict "c" . "index" 1 "large" true) }}
+    {{ end }}
+    <div class="clip-pair">
+      {{ range $i, $c := after 1 $clips }}
+        {{ partial "clip.html" (dict "c" $c "index" (add $i 2) "large" false) }}
+      {{ end }}
+    </div>
+  </div>
+</section>

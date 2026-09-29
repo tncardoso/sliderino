@@ -1,5 +1,5 @@
 //! Hierarchy tab of the left panel: the layers of the current slide as a
-//! tree, topmost first, like the layers panel of Figma. Rows select, show or
+//! tree, topmost first, like the layers panel. Rows select, show or
 //! hide, lock, rename and reorder layers; dragging a row into a group moves
 //! the layer into it.
 

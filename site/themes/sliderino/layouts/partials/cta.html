@@ -1,0 +1,13 @@
+{{ $cta := .Params.cta }}
+<section class="cta">
+  <div class="container cta__inner">
+    <h2 class="cta__title">{{ $cta.title }}</h2>
+    <div class="cta__aside">
+      <pre class="code cta__command"><code>$ {{ $cta.command }}</code></pre>
+      <div class="cta-row">
+        <a class="btn btn--light" href="{{ partial "link" $cta.primary_href }}" target="_blank" rel="noopener">{{ $cta.primary_label }}</a>
+        <a class="btn btn--ghost" href="{{ partial "link" $cta.secondary_href }}" target="_blank" rel="noopener">{{ $cta.secondary_label }}</a>
+      </div>
+    </div>
+  </div>
+</section>

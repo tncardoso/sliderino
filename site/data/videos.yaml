@@ -1,0 +1,29 @@
+# The clips of the "See it move" section. The first clip is the large one;
+# the others show in pairs under it. Each video and poster is in site/assets/.
+- video: "agent-live.mp4"
+  poster: "poster-agent-live.png"
+  slug: "Live Agent"
+  duration: "0:14"
+  title: "An agent builds a slide while you watch"
+  description: >
+    Any MCP compatible harness can design slides and add
+    content. If MCP is not available, use the sliderino CLI.
+
+- video: "shader-preview.mp4"
+  poster: "poster-shader.png"
+  slug: "Fun with shaders"
+  duration: "0:09"
+  title: "Fill a shape with a live GLSL shader"
+  description: >
+    Write the shader. Preview plays it on
+    the canvas. Exporting to other formats generate a video
+    rendering.
+
+- video: "present.mp4"
+  poster: "poster-present.png"
+  slug: "Presentation mode"
+  duration: "0:13"
+  title: "Present on the full screen"
+  description: >
+    Present straight from sliderino. Or export the deck
+    to one available format.

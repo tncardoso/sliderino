@@ -1,0 +1,41 @@
+baseURL = 'https://sliderino.embornal.com/'
+locale = 'en-us'
+title = 'Sliderino'
+theme = 'sliderino'
+disableKinds = ['taxonomy', 'term']
+
+[params]
+  github_url = "https://github.com/tncardoso/sliderino"
+  tagline = "presentation software for the age of agents"
+  description = "Sliderino is a fast visual editor for presentations, with a CLI and an MCP server that give external agents complete control."
+
+# The book under /docs/ has its own copy of this menu, in book-theme/index.hbs.
+# Change both together.
+[[menu.main]]
+  name = "Features"
+  url = "/#features"
+  weight = 10
+
+[[menu.main]]
+  name = "Agents"
+  url = "/#agents"
+  weight = 20
+
+[[menu.main]]
+  name = "Get started"
+  url = "/#getting-started"
+  weight = 30
+
+[[menu.main]]
+  name = "Docs"
+  url = "/docs/"
+  weight = 40
+  [menu.main.params]
+    keep = true
+
+[[menu.main]]
+  name = "Star on GitHub"
+  url = "https://github.com/tncardoso/sliderino"
+  weight = 50
+  [menu.main.params]
+    cta = true

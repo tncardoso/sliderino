@@ -1,0 +1,146 @@
+/*
+ * Shared site navigation bar.
+ *
+ * Two documents load this file and share no other CSS: the Hugo landing page,
+ * and every mdbook page under /docs/. Its tokens are declared on .nav, not on
+ * :root, because mdbook declares its own tokens (--bg, --fg) at the same
+ * specificity, and a :root token here would win or lose by source order alone.
+ */
+
+/*
+ * The one token on :root. The mdbook pages read it from outside .nav to
+ * offset their fixed sidebar and sticky menu bar. mdbook defines no --nav-*
+ * token, so nothing collides.
+ */
+:root {
+  --nav-height: 96px;
+}
+
+@media (max-width: 880px) {
+  :root {
+    --nav-height: 64px;
+  }
+}
+
+.nav {
+  --nav-bg: rgba(255, 255, 255, 0.9);
+  --nav-ink: #111111;
+  --nav-muted: #444444;
+  --nav-line: #ebebeb;
+  --nav-accent: #1f4bff;
+
+  /*
+   * An explicit height, not vertical padding, so the mdbook pages can offset
+   * by a known value (28 + 40 + 28px in the design).
+   */
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  height: var(--nav-height);
+  padding: 0 clamp(20px, 6.67vw, 96px);
+  box-sizing: border-box;
+  font-family: "Inter", system-ui, sans-serif;
+  background-color: var(--nav-bg);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--nav-line);
+}
+
+.nav__logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 28px;
+  letter-spacing: -0.03em;
+  color: var(--nav-ink);
+  text-decoration: none;
+}
+
+.nav__logo .logo-mark {
+  flex-shrink: 0;
+}
+
+.nav__menu {
+  display: flex;
+  align-items: center;
+  gap: 36px;
+}
+
+.nav__link {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--nav-muted);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.nav__link:hover {
+  color: var(--nav-ink);
+}
+
+.nav__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--nav-ink);
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+
+.nav__cta:hover {
+  border-color: var(--nav-ink);
+}
+
+/*
+ * mdbook's chrome.css sets `a:visited { color: var(--links) }` on every
+ * /docs/ page (specificity 0,1,1). That rule beats the rules above after a
+ * visit. Restate the colors with the same or higher specificity, so that the
+ * nav looks the same on /docs/ as on the Hugo pages.
+ */
+.nav__logo:visited,
+.nav__cta:visited,
+.nav__link:visited:hover {
+  color: var(--nav-ink);
+}
+
+.nav__link:visited {
+  color: var(--nav-muted);
+}
+
+@media (max-width: 880px) {
+  .nav__logo {
+    font-size: 19px;
+  }
+
+  .nav__menu {
+    gap: 20px;
+  }
+
+  /* The anchors of the landing page go; Docs and GitHub stay. */
+  .nav__link:not(.nav__link--keep) {
+    display: none;
+  }
+
+  .nav__cta {
+    padding: 8px 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .nav__cta-label {
+    display: none;
+  }
+}

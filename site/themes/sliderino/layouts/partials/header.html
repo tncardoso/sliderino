@@ -1,0 +1,19 @@
+{{- /*
+  The site navigation bar. book-theme/index.hbs holds a copy of this markup
+  for the pages under /docs/. Change both together.
+*/ -}}
+<header class="nav">
+  <a class="nav__logo" href="{{ "/" | relURL }}">{{ partial "logo.html" . }}Sliderino</a>
+  <nav class="nav__menu">
+    {{ range .Site.Menus.main }}
+      {{ $isExternal := strings.HasPrefix .URL "http" }}
+      {{ if .Params.cta }}
+        <a class="nav__cta" href="{{ .URL }}" {{ if $isExternal }}target="_blank" rel="noopener"{{ end }} aria-label="{{ .Name }}">
+          {{ partial "github-icon.html" . }}<span class="nav__cta-label">{{ .Name }}</span>
+        </a>
+      {{ else }}
+        <a class="nav__link{{ if .Params.keep }} nav__link--keep{{ end }}" href="{{ .URL }}" {{ if $isExternal }}target="_blank" rel="noopener"{{ end }}>{{ .Name }}</a>
+      {{ end }}
+    {{ end }}
+  </nav>
+</header>

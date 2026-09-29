@@ -1,0 +1,43 @@
+{{- /*
+  One recording of the "See it move" section, from site/data/videos.yaml.
+
+  Takes a dict: "c" (the entry), "index" (1-based) and "large" (bool). The
+  video loads nothing until a click: preload="none" and a poster image. The
+  click handler is in clip-script.html.
+*/ -}}
+{{ $c := .c }}
+{{ $large := .large }}
+{{ $video := resources.Get $c.video }}
+{{ $poster := resources.Get $c.poster }}
+{{ $posterImg := $poster.Resize (printf "%dx webp q80" $poster.Width) }}
+<figure class="clip{{ if $large }} clip--large{{ end }}">
+  <div class="clip__frame" data-clip>
+    <video
+      src="{{ $video.RelPermalink }}"
+      poster="{{ $posterImg.RelPermalink }}"
+      width="{{ $posterImg.Width }}"
+      height="{{ $posterImg.Height }}"
+      preload="none"
+      playsinline
+      muted></video>
+    {{ if $large }}
+      <div class="clip__shade"></div>
+      <button class="clip__play" type="button" aria-label="Play: {{ $c.title }}">
+        <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z" fill="#FFFFFF"/></svg>
+      </button>
+      <div class="clip__bar" aria-hidden="true">
+        <span>0:00</span><span class="clip__track"></span><span>{{ $c.duration }}</span>
+      </div>
+    {{ else }}
+      <button class="clip__pill" type="button" aria-label="Play: {{ $c.title }}">
+        <span class="clip__pill-icon"><svg width="10" height="10" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z" fill="#FFFFFF"/></svg></span>
+        {{ $c.duration }}
+      </button>
+    {{ end }}
+  </div>
+  <figcaption class="clip__caption">
+    <p class="clip__file">{{ printf "%02d" .index }} · {{ $c.slug }}</p>
+    <h3 class="clip__title">{{ $c.title }}</h3>
+    <p class="clip__description">{{ $c.description }}</p>
+  </figcaption>
+</figure>
