@@ -40,7 +40,7 @@ facts = [
 [params.cta]
 title = "Make the next deck together."
 command = "sliderino"
-primary_label = "Download 0.1.0"
+primary_label = "Download"
 primary_href = "https://github.com/tncardoso/sliderino/releases/latest"
 secondary_label = "View on GitHub"
 secondary_href = "https://github.com/tncardoso/sliderino"
