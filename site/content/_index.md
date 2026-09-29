@@ -12,8 +12,8 @@ cta_secondary_label = "Read the docs"
 cta_secondary_href = "/docs/"
 
 [params.hero_shot]
-image = "editor-kpi.png"
-alt = "The Sliderino editor with a KPI slide on the canvas"
+image = "editor-deck.png"
+alt = "The Sliderino editor with the cover slide of a bold pitch deck on the canvas"
 caption = ""
 note = "Sliderino 0.1.0"
 
