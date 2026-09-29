@@ -1,6 +1,6 @@
 [package]
 name = "sliderino"
-version = "0.1.0"
+version = "0.2.0"
 description = "Presentation editor with complete programmatic control for agents, through a CLI and an MCP server"
 edition = "2024"
 # GPUI follows the current stable compiler. The release builds with it.
