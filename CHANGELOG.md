@@ -7,6 +7,11 @@
 - The Sliderino website at <https://sliderino.embornal.com>, with the
   documentation at <https://sliderino.embornal.com/docs/>.
 
+### Removed
+
+- The Components tab of the left panel and the Insert component button of the
+  toolbar. They did not do an operation.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

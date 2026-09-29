@@ -238,7 +238,7 @@ impl EditorView {
             state.focus(window, cx);
             state.select_all(window, cx);
         });
-        self.library_tab = 2;
+        self.library_tab = 1;
         self.renaming = Some(Renaming {
             id,
             input,

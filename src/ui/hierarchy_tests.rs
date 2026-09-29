@@ -49,7 +49,7 @@ fn scene(cx: &mut TestAppContext) -> Scene {
         .unwrap();
     presentation.apply(Operation::Batch(operations)).unwrap();
     let handle = open_with(cx, presentation);
-    with_editor(cx, handle, |editor, _| editor.library_tab = 2);
+    with_editor(cx, handle, |editor, _| editor.library_tab = 1);
     Scene {
         handle,
         group,

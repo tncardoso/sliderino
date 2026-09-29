@@ -16,7 +16,6 @@ icon_assets!(
         Circle,
         Slash,
         Image,
-        Component,
         Play,
         Plus,
         AlignStartVertical,

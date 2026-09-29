@@ -2649,7 +2649,7 @@ fn tool_button(tool: Tool, active: bool, cx: &mut Context<EditorView>) -> impl I
 
 impl Tool {
     /// Tools in palette order; a divider separates each group.
-    const GROUPS: [&[Tool]; 3] = [
+    const GROUPS: [&[Tool]; 2] = [
         &[Tool::Move, Tool::Hand],
         &[
             Tool::Text,
@@ -2659,7 +2659,6 @@ impl Tool {
             Tool::Table,
             Tool::Image,
         ],
-        &[Tool::Component],
     ];
 
     fn id(self) -> &'static str {
@@ -2672,7 +2671,6 @@ impl Tool {
             Tool::Line => "tool-line",
             Tool::Table => "tool-table",
             Tool::Image => "tool-image",
-            Tool::Component => "tool-component",
         }
     }
 
@@ -2686,7 +2684,6 @@ impl Tool {
             Tool::Line => "Line",
             Tool::Table => "Table",
             Tool::Image => "Image",
-            Tool::Component => "Insert component",
         }
     }
 
@@ -2700,7 +2697,6 @@ impl Tool {
             Tool::Line => IconName::Slash,
             Tool::Table => IconName::Table,
             Tool::Image => IconName::Image,
-            Tool::Component => IconName::Component,
         }
     }
 }

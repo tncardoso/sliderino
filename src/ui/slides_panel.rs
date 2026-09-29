@@ -1,5 +1,4 @@
-//! Left panel: slide thumbnails, later the component library, and the
-//! hierarchy of the current slide.
+//! Left panel: slide thumbnails and the hierarchy of the current slide.
 //!
 //! Thumbnails select slides (Ctrl and Shift select more than one), open a
 //! menu to add, duplicate or delete them, and drag to change their order.
@@ -76,7 +75,7 @@ impl EditorView {
 
 pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> impl IntoElement {
     let _span = crate::perf::span("slides_panel");
-    let hierarchy = editor.library_tab == 2;
+    let hierarchy = editor.library_tab == 1;
     let slides: Vec<_> = editor
         .presentation
         .slides
@@ -112,7 +111,6 @@ pub fn slides_panel(editor: &mut EditorView, cx: &mut Context<EditorView>) -> im
                     cx.notify();
                 }))
                 .child(Tab::new().label("Slides"))
-                .child(Tab::new().label("Components"))
                 .child(Tab::new().label("Hierarchy"))
                 .when(!hierarchy, |this| {
                     this.suffix(

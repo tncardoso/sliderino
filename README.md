@@ -3,7 +3,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.png">
-    <img src="docs/assets/banner-light.png" alt="Sliderino — Slides you make. Slides your agent makes.">
+    <img src="docs/assets/banner-light.png" alt="Sliderino — Presentation software for the age of agents.">
   </picture>
 </p>
 

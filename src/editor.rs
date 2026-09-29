@@ -53,7 +53,6 @@ pub enum Tool {
     Line,
     Table,
     Image,
-    Component,
 }
 
 gpui_kit::actions!(editor, [NextCell, PreviousCell]);
@@ -472,7 +471,7 @@ pub struct EditorView {
     pub slide_anchor: SlideId,
     /// Where the slides dragged in the slides panel would land.
     pub slide_drop: Option<(SlideId, crate::ui::slides_panel::SlideDrop)>,
-    /// Tab of the left panel: 0 = Slides, 1 = Components, 2 = Hierarchy.
+    /// Tab of the left panel: 0 = Slides, 1 = Hierarchy.
     pub library_tab: usize,
     /// Tab of the right panel: 0 = Design, 1 = Notes, 2 = History.
     pub inspector_tab: usize,
