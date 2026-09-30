@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use sliderino::api::client::Session;
 use sliderino::api::protocol::{ApiError, ClientKind};
-use sliderino::api::{mcp, tools};
+use sliderino::api::{mcp, skill, tools};
 use sliderino::app;
 
 #[derive(Parser)]
@@ -41,6 +41,8 @@ enum Command {
     Call { tool: String, args: Option<String> },
     /// List the tools with their descriptions and argument schemas.
     Tools,
+    /// Print the skill that tells an agent how to use Sliderino (SKILL.md).
+    Skill,
     /// List the open editors (list_instances).
     Instances,
     /// Open an editor and wait until it accepts calls (open_editor).
@@ -163,6 +165,10 @@ fn main() -> ExitCode {
                 })
                 .collect();
             return print(Ok(json!(listed)));
+        }
+        Command::Skill => {
+            print!("{}", skill::SKILL);
+            return ExitCode::SUCCESS;
         }
         Command::Call { tool, args } => read_args(args.as_deref()).map(|args| (tool, args)),
         Command::Instances => Ok(("list_instances".into(), json!({}))),
@@ -334,6 +340,9 @@ mod tests {
         assert!(matches!(cli.command, Some(Command::Save { path: Some(_) })));
 
         assert!(Cli::try_parse_from(["sliderino", "--new", "deck.sldr"]).is_err());
+
+        let cli = Cli::try_parse_from(["sliderino", "skill"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Skill)));
 
         let cli = Cli::try_parse_from(["sliderino", "export-pptx", "deck.sldr", "-o", "deck.pptx"])
             .unwrap();

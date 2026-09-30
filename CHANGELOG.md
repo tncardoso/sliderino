@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- A skill for agents, `SKILL.md`, that tells how to use the Sliderino tools.
+  The MCP server gives it as the resource `skill://sliderino/SKILL.md`, and
+  `sliderino skill` writes it to stdout. To install it for Claude Code, run
+  `sliderino skill > ~/.claude/skills/sliderino/SKILL.md`.
+
 ## [0.2.0] - 2026-09-28
 
 ### Added

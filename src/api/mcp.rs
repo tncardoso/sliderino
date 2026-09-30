@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
-    Tool, ToolAnnotations,
+    Implementation, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt as _};
@@ -18,9 +19,9 @@ use serde_json::{Value, json};
 
 use crate::api::client::Session;
 use crate::api::protocol::{ApiError, ClientKind, ToolOutput};
-use crate::api::tools;
+use crate::api::{skill, tools};
 
-const INSTRUCTIONS: &str = "Sliderino is a presentation editor. These tools read and change the presentation open in the Sliderino editor, live: the person sees each change and shares one undo history with you. Start with get_basic_info, look with get_screenshot, change with apply_operations (one call is one undo step), and check get_diagnostics for text that overflows its box. If no editor is open, call open_editor.";
+const INSTRUCTIONS: &str = "Sliderino is a presentation editor. These tools read and change the presentation open in the Sliderino editor, live: the person sees each change and shares one undo history with you. Start with get_basic_info, look with get_screenshot, change with apply_operations (one call is one undo step), and check get_diagnostics for text that overflows its box. If no editor is open, call open_editor. For the full guide, read the resource skill://sliderino/SKILL.md.";
 
 /// Runs the server until the client closes stdin.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,6 +67,33 @@ fn tool_list_result() -> ListToolsResult {
         .with_cache_scope(CacheScope::Public)
 }
 
+/// The `resources/list` result: the skill. Like the tool list, it only
+/// changes with the binary.
+fn resource_list_result() -> ListResourcesResult {
+    let resource = Resource::new(skill::URI, "SKILL.md")
+        .with_title("Sliderino skill")
+        .with_description("How to use the Sliderino tools: the workflow, the operations and their fields, and the errors.")
+        .with_mime_type("text/markdown")
+        .with_size(skill::SKILL.len() as u64);
+    ListResourcesResult::with_all_items(vec![resource])
+        .with_ttl_ms(TOOLS_TTL_MS)
+        .with_cache_scope(CacheScope::Public)
+}
+
+/// The `resources/read` result for `uri`.
+fn read_resource_result(uri: &str) -> Result<ReadResourceResult, ErrorData> {
+    if uri != skill::URI {
+        return Err(ErrorData::resource_not_found(
+            format!("no resource {uri}"),
+            Some(json!({"uri": uri})),
+        ));
+    }
+    let contents = ResourceContents::text(skill::SKILL, skill::URI).with_mime_type("text/markdown");
+    Ok(ReadResourceResult::new(vec![contents])
+        .with_ttl_ms(TOOLS_TTL_MS)
+        .with_cache_scope(CacheScope::Public))
+}
+
 /// The MCP form of a tool result: the JSON as text, then the image.
 fn to_result(outcome: Result<ToolOutput, ApiError>) -> CallToolResult {
     match outcome {
@@ -87,9 +115,14 @@ fn to_result(outcome: Result<ToolOutput, ApiError>) -> CallToolResult {
 
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("sliderino", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(Implementation::new("sliderino", env!("CARGO_PKG_VERSION")))
+        .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -98,6 +131,22 @@ impl ServerHandler for Server {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(tool_list_result())
+    }
+
+    async fn list_resources(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(resource_list_result())
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        read_resource_result(&request.uri).map(Into::into)
     }
 
     async fn call_tool(
@@ -149,6 +198,31 @@ mod tests {
         let listed = serde_json::to_value(tool_list_result()).unwrap();
         assert_eq!(listed["ttlMs"], TOOLS_TTL_MS);
         assert_eq!(listed["cacheScope"], "public");
+    }
+
+    #[test]
+    fn the_skill_is_the_only_resource() {
+        let listed = serde_json::to_value(resource_list_result()).unwrap();
+        assert_eq!(listed["resources"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["resources"][0]["uri"], skill::URI);
+        assert_eq!(listed["resources"][0]["name"], "SKILL.md");
+        assert_eq!(listed["resources"][0]["mimeType"], "text/markdown");
+        assert_eq!(listed["ttlMs"], TOOLS_TTL_MS);
+        assert_eq!(listed["cacheScope"], "public");
+    }
+
+    #[test]
+    fn reading_the_skill_gives_its_text() {
+        let read = serde_json::to_value(read_resource_result(skill::URI).unwrap()).unwrap();
+        assert_eq!(read["contents"][0]["text"], skill::SKILL);
+        assert_eq!(read["contents"][0]["mimeType"], "text/markdown");
+        assert_eq!(read["ttlMs"], TOOLS_TTL_MS);
+    }
+
+    #[test]
+    fn reading_an_unknown_resource_fails() {
+        let error = read_resource_result("skill://sliderino/OTHER.md").unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
     }
 
     #[test]
