@@ -9,6 +9,13 @@
   `sliderino skill` writes it to stdout. To install it for Claude Code, run
   `sliderino skill > ~/.claude/skills/sliderino/SKILL.md`.
 
+### Fixed
+
+- The tool descriptions that MCP clients and `sliderino tools` show now match
+  what the tools do. For example, `get_basic_info` lists the videos,
+  `list_fonts` tells when the fonts are still loading, and `save_presentation`
+  and `export_pptx` tell that they add the file extension.
+
 ## [0.2.0] - 2026-09-28
 
 ### Added

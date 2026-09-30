@@ -58,7 +58,7 @@ impl ToolSpec {
 
 const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - add_slide {slide?: {id?, elements?}, index?}
-- remove_slide {id}; move_slide {id, index}
+- remove_slide {id}: fails on the last slide; move_slide {id, index}
 - duplicate_slide {id, index?, ref?}: copies the slide and its elements with new ids, right after it by default; ref (\"$copy\") names the copy
 - add_element {slide, parent?, element, index?}. element: {id?, name?, hidden?, locked?, opacity?, frame: {x, y, width, height, rotation}} plus one kind key: text: {content, sizing, style} | group: {children: [element]} | rectangle: {fill?, stroke?, corner_radius?} | ellipse: {fill?, stroke?} | line: {stroke?, start?, end?, from?, to?} | table: {cells: [[cell]], text?, fill?, stroke?, padding?, width?, height?}
 - remove_element {id}; set_frame {id, frame}; set_text_sizing {id, sizing}
@@ -68,14 +68,15 @@ const OPS_FORMAT: &str = "Each op is an object tagged by \"op\":
 - move_element {id, parent?, index?}: into a group of the same slide, or to the slide without parent
 - group {id?, children: [id]}; ungroup {id}
 - set_layer {id, patch: {name?, hidden?, locked?, opacity?}}; \"name\": null clears the name
-- add_font {face} embeds an installed face. add_font {path | data, face?} embeds the faces of a TTF, OTF or TTC file (face picks one); path is read by the client, data is base64. A family name already in use by other fonts becomes \"Name (2)\"; the result lists the embedded faces in fonts. remove_font {face} removes an unused face; remove_font {family} removes all faces of the family and changes its texts to Inter. batch {ops}
+- add_font {face} embeds an installed face. add_font {path | data, face?} embeds the faces of a TTF, OTF or TTC file (face picks one); path is read by the client, data is base64. A family name already in use by other fonts becomes \"Name (2)\"; the result lists the embedded faces in fonts. remove_font {face} removes an unused face; remove_font {family} removes all faces of the family and changes its texts to Inter.
 - add_image {id?, path | data}: embeds a PNG or JPEG; path is read by the client (relative to its working folder), data is base64. The same bytes are not added twice: the reference names the embedded image. remove_image {id}: removes an image no fill uses.
 - Tables: set_cell_text {id, row, column, text, range?} | set_cells {id, row?, column?, values: [[text]]} (grows the table) | insert_rows {id, index, count?} | remove_rows {id, index, count?} | move_rows {id, index, count?, to} | insert_columns, remove_columns, move_columns (same fields) | merge_cells {id, rows: {start, end}, columns: {start, end}} | split_cell {id, row, column} | set_table_style {id, text?, fill?, stroke?, padding?} | set_cell_style {id, rows?, columns?, fill?, text?, reset_text?} | set_borders {id, rows?, columns?, sides, stroke} | set_table_sizing {id, width?, height?}.
 - add_video {id?, path | data}: embeds a video. An MP4 with H.264 and AAC is kept as it is; other formats are converted to it first, which can take long. remove_video {id}: removes a video no fill uses.
+- batch {ops}: applies the ops as one operation; each op sees the changes of the ops before it.
 Elements form a tree: a group holds children in paint order (last on top). All frames are in slide units, children too. frame.rotation is the final angle in degrees, clockwise around the frame center, kept in (-180, 180]; x, y, width and height are the frame before it turns. get_elements and find_elements add bounds {x, y, width, height}, the unrotated box around a rotated element. The frame of a group is the box around its children in the axes of the group rotation. set_frame on a group moves it, resizes it by scaling the positions and boxes of its children (not their fonts, stroke widths or corner radii), or turns it and its children to the given angle; a new group has rotation 0, and the rotation of an added group only sets the axes of its box. A locked element, or one inside a locked group, rejects every op but set_layer. Hidden elements are not drawn, exported or reported. opacity (0-1, default 1) applies to the whole element; a group multiplies the opacity of its children. group and ungroup read the document as the earlier ops of the call left it: inside a batch they cannot use elements the same batch creates.
 Shapes: a line has a frame of height 0; it goes from the left end to the right end of the frame, turned by the rotation. A frame with a height becomes its horizontal center axis. Give a new line from and to instead of a frame to place it by its ends; get_elements adds points {from, to} for lines. fill: \"none\" | {\"solid\": {color, opacity?}} | {\"linear_gradient\": {angle (degrees clockwise, 0 = left to right, turns with the shape), stops}} | {\"radial_gradient\": {center?: {x, y}, radius?: {x, y} (fractions of the box, default 0.5), stops}} | {\"image\": {id (or \"$name\" of add_image), fit?: cover | contain | stretch, opacity?}} | {\"video\": {id (or \"$name\" of add_video), fit?, opacity?, start?: auto | on_click, loop? (default true), muted?}} | {\"shader\": {source? (GLSL as on Shadertoy: void mainImage(out vec4 fragColor, in vec2 fragCoord) with iResolution, iTime, iTimeDelta, iFrame, iFrameRate, iChannel0, iChannelResolution; default: the Shadertoy default shader), channel0? (image id or \"$name\"), opacity?, start?, loop?, duration? (seconds 1-60, default 10: the loop of the video PPTX gets)}}. In a presentation, start auto plays when the slide shows; on_click fills start one per click, in layer order, before the next slide. Screenshots and PDF show the first video frame and the shader at time 0. get_basic_info lists the images with their upright pixel size, and the videos. stops: 2 to 10 of {position 0-1 in increasing order, color, opacity?}. A new rectangle or ellipse has a light gray fill and no stroke. stroke: {color?, opacity?, width? (default 4), dash?: solid | dashed | dotted}; the stroke is centered on the outline. corner_radius (rectangles) is in slide units. start and end (lines): none | triangle | arrow | diamond | circle, or {kind, size: small | medium | large}.
 Tables: rows and columns count from 0; a range {start, end} excludes end; rows and columns omitted mean the whole table. A cell is a text or {content, fill?, text?, span?: {rows, columns}}; text is a style patch over the table text style (Inter 24, vertical_align middle) and fill (\"none\" included) replaces the table fill. Text never wraps: \\n breaks a line. Every column is as wide as its widest cell and every row as tall as its tallest cell, plus padding (default 12) on each side; width and height are \"auto\" or {\"fixed\": units}: a fixed axis is at least that size and shares the extra space equally. set_frame with a new width or height fixes that axis (a size under the content goes back to auto). The default grid stroke is 111111 at opacity 0.4, width 2; stroke null draws none. Merged cells: the anchor (top-left) holds the text; merge_cells joins the texts as lines; ranges grow to hold whole merges; a move that cuts a merge fails. set_borders sides: all | outside | inside | inside_horizontal | inside_vertical | top | bottom | left | right; stroke: fields of a stroke (over the table stroke), null for no line, or \"inherit\". Inserted rows and columns copy the style of the one before them. Cells show no videos or shaders. get_elements adds layout {columns, rows} (sizes) for tables.
-Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. Slides are 1600x900 units. Colors are hex strings like \"1A1A1A\". sizing: auto_width | auto_height | fixed. style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color. Fonts are embedded automatically from the bundled and system fonts.";
+Ids of new slides and elements are optional; write \"$name\" to name a new id and use \"$name\" in later ops of the same call. The result gives refs (the id of each \"$name\"), warnings and the embedded fonts; a failed call changes nothing and its error data gives the index of the failing op in op. A new presentation has slides of 1600x900 units; get_basic_info gives slide_size. Colors are hex strings like \"1A1A1A\". Text content: \\n starts a paragraph. sizing: auto_width (default: no wrap, the frame follows the text) | auto_height (wraps at the frame width, the height follows) | fixed (wraps; text past the bottom is overflow). style/patch fields (all optional): font {family, weight 100-900, italic}, size, line_height (\"auto\" or {\"percent\": 120}), letter_spacing (% of size), align (left|center|right|justify), vertical_align (top|middle|bottom), paragraph_spacing, underline, strikethrough, case (original|upper), color. Defaults: Inter 400, size 32, color 111111. Fonts are embedded automatically from the bundled and system fonts.";
 
 fn empty_schema() -> Value {
     json!({"type": "object", "properties": {}, "additionalProperties": false})
@@ -141,7 +142,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "save_presentation",
-            description: "Save the presentation to a .sldr file, with its fonts, images and videos. Without path, save to the file it was opened from or last saved to. With path, replace that file if it exists; the path then becomes the file of the presentation.",
+            description: "Save the presentation to a .sldr file, with its fonts, images and videos. Without path, save to the file it was opened from or last saved to; fails with no_file when there is none. With path, replace that file if it exists; the path then becomes the file of the presentation. .sldr is added when the path has no extension.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -158,7 +159,7 @@ pub fn specs() -> Vec<ToolSpec> {
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "The .pptx file to write; an existing file is replaced. A relative path starts at the working folder of the client."},
+                    "path": {"type": "string", "description": "The .pptx file to write; an existing file is replaced, and .pptx is added when the path has no extension. A relative path starts at the working folder of the client."},
                     "file": {"type": "string", "description": "A .sldr file to export instead of the open presentation. A relative path starts at the working folder of the client."}
                 },
                 "required": ["path"],
@@ -169,7 +170,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_basic_info",
-            description: "Overview of the open presentation: its file and whether it has unsaved changes, revision, slide size, slides with their element counts, embedded fonts and images, the slide shown in the editor and the undo state. Call it first.",
+            description: "Overview of the open presentation: its file and whether it has unsaved changes, revision, slide size, slides with their element counts, embedded fonts, images (with their upright pixel size) and videos, the slide shown in the editor, and the labels of the next undo and redo steps. Call it first.",
             schema: empty_schema(),
             target: Target::Instance,
             read_only: true,
@@ -194,10 +195,10 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_elements",
-            description: "Full data of elements by id, with the resolved text layout: line count, content size, overflow past a fixed box and characters the font does not have.",
+            description: "Full data of elements by id, with their slide. Texts add the resolved layout: line count, content size, overflow past a fixed box and characters the font does not have. Tables add layout {columns, rows} (sizes) and missing_glyphs, lines add points {from, to}, and rotated elements add bounds, the unrotated box around them.",
             schema: json!({
                 "type": "object",
-                "properties": {"ids": {"type": "array", "items": {"type": "integer"}}},
+                "properties": {"ids": {"type": "array", "items": {"type": "integer"}, "description": "Element ids, from get_slide or find_elements."}},
                 "required": ["ids"],
                 "additionalProperties": false
             }),
@@ -206,11 +207,11 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "find_elements",
-            description: "Find text elements and table cells whose content contains a string (case-insensitive), on all slides or on one. A table cell match adds cell {row, column}.",
+            description: "Find text elements and table cells whose content contains a string (case-insensitive), on all slides or on one. Each match gives the id, slide, content and frame; a table cell match adds cell {row, column}, and a rotated element adds bounds.",
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string"},
+                    "text": {"type": "string", "description": "The string to find."},
                     "slide": {"type": "integer", "description": "Slide id. Default: all slides."}
                 },
                 "required": ["text"],
@@ -227,9 +228,9 @@ pub fn specs() -> Vec<ToolSpec> {
                 "properties": {
                     "slide": slide_arg(),
                     "scale": {"type": "number", "description": "Pixels per slide unit. Default 0.5 (800x450)."},
-                    "overlay": {"type": "boolean"},
-                    "time": {"type": "number", "description": "Seconds after the shaders start. Default 0."},
-                    "path": {"type": "string", "description": "Write the PNG to this file instead of returning it."}
+                    "overlay": {"type": "boolean", "description": "Draw text frames, line boxes, baselines and overflow. Default false."},
+                    "time": {"type": "number", "description": "Seconds after the shaders start, 0 or more. Default 0."},
+                    "path": {"type": "string", "description": "Write the PNG to this file instead of returning it. A relative path starts at the working folder of the client."}
                 },
                 "additionalProperties": false
             }),
@@ -238,7 +239,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_diagnostics",
-            description: "Problems, on all slides or on one: text that overflows its fixed box, characters missing from the font (overflow, missing_glyphs), shaders that do not compile (shader_error: {line, message}) and videos or shaders that cannot play on this machine (media_error).",
+            description: "Problems, on all slides or on one: text that overflows its fixed box (overflow, in slide units) or has characters missing from the font (missing_glyphs), shaders that do not compile (shader_error: {line, message}) and videos or shaders that cannot play on this machine (media_error). Each problem gives its slide and element. An empty list means no problems.",
             schema: json!({
                 "type": "object",
                 "properties": {"slide": {"type": "integer", "description": "Slide id. Default: all slides."}},
@@ -254,9 +255,9 @@ pub fn specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "element": {"type": "integer", "description": "Id of a rectangle or ellipse with a shader fill."},
-                    "path": {"type": "string", "description": "MP4 file to write."},
-                    "width": {"type": "integer", "description": "Pixels. Default: the width of the element in slide units, at most 1920."},
-                    "height": {"type": "integer", "description": "Pixels. Default: the height of the element in slide units, at most 1920."},
+                    "path": {"type": "string", "description": "MP4 file to write. A relative path starts at the working folder of the client."},
+                    "width": {"type": "integer", "description": "Pixels. Default: the width of the element in slide units. A size with a side over 1920 is scaled down to 1920, with its proportions."},
+                    "height": {"type": "integer", "description": "Pixels. Default: the height of the element in slide units. A size with a side over 1920 is scaled down to 1920, with its proportions."},
                     "fps": {"type": "integer", "description": "Frames per second, 1 to 60. Default 30."}
                 },
                 "required": ["element", "path"],
@@ -267,7 +268,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "list_fonts",
-            description: "Font faces embedded in the presentation, and the families available to embed (bundled and installed). Filter families with query.",
+            description: "Font faces embedded in the presentation, and the families available to embed (bundled and installed) with their faces. Filter families with query; then faces whose license does not permit embedding have restricted: true. While the editor still reads the installed fonts, the result has loading: true and no families: call it again.",
             schema: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Case-insensitive part of a family name."}},
@@ -294,7 +295,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "undo",
-            description: "Undo the latest step of the shared history, whether a person or an agent made it. Pass base_revision to avoid undoing an edit you have not seen.",
+            description: "Undo the latest step of the shared history, whether a person or an agent made it. Returns the label of the step in undone, or null when there is nothing to undo. Pass base_revision to avoid undoing an edit you have not seen.",
             schema: json!({
                 "type": "object",
                 "properties": {"base_revision": base_revision()},
@@ -305,7 +306,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "redo",
-            description: "Redo the latest undone step.",
+            description: "Redo the latest undone step. Returns the label of the step in redone, or null when there is nothing to redo. Pass base_revision to avoid redoing over an edit you have not seen.",
             schema: json!({
                 "type": "object",
                 "properties": {"base_revision": base_revision()},

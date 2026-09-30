@@ -676,5 +676,10 @@ again, then send the change again.
 | `cannot_open` | `open_presentation` cannot read the file. |
 | `io` | The editor cannot write the file. |
 | `connection_failed` | The editor closed the connection. |
+| `closed` | The editor closed during the call. |
+| `unknown_tool` | No tool has the given name. |
+| `open_failed` | `open_editor` cannot start an editor, or the editor does not accept calls in 20 seconds. |
+| `export_failed` | `export_pptx` cannot make the PowerPoint file. |
+| `protocol`, `invalid_request` | The client and the editor cannot read the messages of the other. Use the same version of Sliderino for both. |
 
 <!-- ANCHOR_END: guide -->
