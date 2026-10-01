@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
 ### Added
 
 - A skill for agents, `SKILL.md`, that tells how to use the Sliderino tools.
